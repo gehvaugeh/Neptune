@@ -81,12 +81,3 @@ Final note"""
     assert mounted_widgets[2].content == "Final note"
 
     os.remove("test_import_real.md")
-
-def test_get_current_token():
-    class DummyApp:
-        pass
-    app = DummyApp()
-
-    assert main.ShellApp._get_current_token(app, "ls -l /home") == "/home"
-    assert main.ShellApp._get_current_token(app, "ls -l /home ") == ""
-    assert main.ShellApp._get_current_token(app, 'ls "/home/user name"') == '"/home/user name"'

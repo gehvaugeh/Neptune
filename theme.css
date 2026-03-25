@@ -1,16 +1,16 @@
-/* Basis-Setup für die Gemmi-Shell - Modern Dark Theme */
+/* Basis-Setup für die Gemmi-Shell - Ultra Dark Theme */
 
-$bg-dark: #0f0f12;
-$bg-input: #16161a;
-$bg-block: #1c1c21;
-$bg-focus: #25252b;
+$bg-dark: #050505;
+$bg-input: #0a0a0a;
+$bg-block: #080808;
+$bg-focus: #121212;
 $purple-primary: #7c4dff;
-$purple-dim: #4a338e;
-$text-main: #e1e1e6;
-$text-dim: #88888e;
+$purple-dim: #311b92;
+$text-main: #eeeeee;
+$text-dim: #757575;
 $success: #00e676;
 $error: #ff5252;
-$border: #2e2e36;
+$border: #1a1a1a;
 
 Screen {
     background: $bg-dark;
@@ -27,20 +27,9 @@ Screen {
 #bottom_dock {
     dock: bottom;
     height: auto;
+    max-height: 10;
     background: $bg-input;
     border-top: solid $border;
-}
-
-#palette {
-    display: none;
-    max-height: 10;
-    background: $bg-block;
-    border-bottom: solid $border;
-    color: $text-main;
-}
-
-#palette.visible {
-    display: block;
 }
 
 #input_area {
@@ -70,7 +59,7 @@ CommandBlock, NoteBlock {
     padding: 0 0 0 1;
     height: auto;
     width: 100%;
-    border-left: solid $purple-dim;
+    border-left: solid $border;
     position: relative;
     background: $bg-block;
 }
@@ -82,7 +71,7 @@ CommandBlock:focus, NoteBlock:focus {
 }
 
 NoteBlock {
-    border-left: solid $purple-primary;
+    border-left: solid $purple-dim;
 }
 
 .block-header {
@@ -102,9 +91,19 @@ NoteBlock {
     text-style: italic;
 }
 
-.cmd-syntax {
+.inline-input {
     width: 100%;
     height: auto;
+    min-height: 1;
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    color: $text-main;
+}
+
+.inline-input:focus {
+    border: none;
 }
 
 .block-output {
