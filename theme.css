@@ -63,7 +63,6 @@ CommandBlock, NoteBlock {
     min-height: 1;
     width: 100%;
     border-left: solid $purple-dim;
-    position: relative;
     background: $bg-block;
 }
 
@@ -97,6 +96,8 @@ NoteBlock {
 #cmd_syntax {
     width: 100%;
     height: auto;
+    padding: 0;
+    margin: 0;
 }
 
 .block-output {
@@ -128,7 +129,6 @@ NoteBlock {
 #cmd_wrapper {
     height: auto;
     width: 100%;
-    position: relative;
 }
 
 /* Editor innerhalb eines Blocks */
@@ -139,10 +139,8 @@ NoteBlock {
     border: none;
     background: $bg-input;
     margin: 0;
+    padding: 0;
     width: 100%;
-    position: absolute;
-    top: 0;
-    left: 0;
 }
 
 .hidden {
