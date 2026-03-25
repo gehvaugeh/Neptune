@@ -395,27 +395,48 @@ class ShellApp(App):
             with open(filename, "r") as f: content = f.read()
             container = self.query_one("#command_history")
             for child in container.children[1:]: child.remove()
-            pattern = re.compile(r'```(bash|text)\n(.*?)\n```', re.DOTALL)
+
+            # Match bash, sh, shell, or text blocks
+            pattern = re.compile(r'```(bash|sh|shell|text)\n(.*?)\n```', re.DOTALL)
             last_pos = 0
             last_command_block = None
+
             matches = list(pattern.finditer(content))
             for match in matches:
                 before = content[last_pos:match.start()].strip()
                 if before:
+                    # Filter out the generic header but keep other headers
                     lines = [l for l in before.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
                     clean_before = "\n".join(lines).strip()
-                    if clean_before: container.mount(NoteBlock(clean_before))
+                    if clean_before:
+                        # Split by headers for better granularity if possible
+                        parts = re.split(r'(\n#+ .*)', "\n" + clean_before)
+                        current_part = ""
+                        for part in parts:
+                            if part.strip():
+                                if part.startswith("\n#"):
+                                    if current_part.strip(): container.mount(NoteBlock(current_part.strip()))
+                                    current_part = part
+                                else:
+                                    current_part += part
+                        if current_part.strip(): container.mount(NoteBlock(current_part.strip()))
+
                 lang, code = match.groups()
-                if lang == "bash":
-                    last_command_block = CommandBlock(code, os.getcwd(), self)
+                if lang in ("bash", "sh", "shell"):
+                    last_command_block = CommandBlock(code.strip(), os.getcwd(), self)
                     container.mount(last_command_block)
                 elif lang == "text" and last_command_block:
-                    last_command_block.full_output = code
+                    last_command_block.full_output = code.strip()
                     try:
-                        last_command_block.query_one("#output").update(Text.from_ansi(code))
+                        last_command_block.query_one("#output").update(Text.from_ansi(last_command_block.full_output))
                         last_command_block.query_one("#info").update("[blue]Imported[/]")
                     except: pass
+                else:
+                    # Treat unknown or orphaned text block as a NoteBlock
+                    container.mount(NoteBlock(f"```text\n{code}\n```"))
+
                 last_pos = match.end()
+
             after = content[last_pos:].strip()
             if after:
                 lines = [l for l in after.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
