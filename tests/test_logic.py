@@ -38,7 +38,7 @@ def test_history_manager(tmp_path):
 def test_import_parsing():
     class DummyApp:
         def query_one(self, q): return self.container
-        def notify(self, m, variant=None): pass
+        def notify(self, m, severity=None): pass
 
     app = DummyApp()
     container = MagicMock()

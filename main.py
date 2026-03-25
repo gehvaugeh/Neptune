@@ -142,6 +142,7 @@ class CommandBlock(Static):
         super().__init__(**kwargs)
         self.command, self.cwd, self.app_ref = command, cwd, app_ref
         self.full_output, self.proc_active, self.process, self.is_editing, self.last_click_time = "", False, None, False, 0
+        self.start_time = 0
     def compose(self) -> ComposeResult:
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
@@ -149,12 +150,30 @@ class CommandBlock(Static):
             yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
+
+    def update_status(self):
+        if self.proc_active:
+            elapsed = time.time() - self.start_time
+            self.query_one("#info").update(f"[yellow]⏳ {elapsed:.1f}s[/]")
     def append_output(self, text: str):
-        self.full_output += text
+        # Basic terminal emulation for interactive commands like 'watch'
+        # \x1b[H (Home) or \x1b[2J (Clear Screen)
+        if "\x1b[H" in text or "\x1b[2J" in text:
+            idx = max(text.rfind("\x1b[H"), text.rfind("\x1b[2J"))
+            self.full_output = text[idx:]
+        else:
+            self.full_output += text
+
+        # Limit buffer to avoid performance issues
+        if len(self.full_output) > 30000:
+            self.full_output = "...(truncated)...\n" + self.full_output[-30000:]
+
         self.query_one("#output").update(Text.from_ansi(self.full_output))
     def finish(self, code: int):
         self.proc_active = False
-        self.query_one("#info").update("[green]✅ OK[/]" if code == 0 else f"[red]❌ ERR({code})[/]")
+        elapsed = time.time() - self.start_time
+        status = "[green]✅ OK[/]" if code == 0 else f"[red]❌ ERR({code})[/]"
+        self.query_one("#info").update(f"{status} [dim]({elapsed:.1f}s)[/]")
         self.remove_class("running")
     def toggle_edit(self):
         self.is_editing = not self.is_editing
@@ -167,6 +186,7 @@ class CommandBlock(Static):
             label.remove_class("hidden"); edit.add_class("hidden"); self.run_process()
     def run_process(self):
         self.full_output = ""; self.query_one("#output").update(""); self.add_class("running")
+        self.start_time = time.time()
         self.app_ref.start_process(self.command, self)
     def on_key(self, event: events.Key):
         if not self.is_editing and event.key == "e": self.toggle_edit()
@@ -210,6 +230,12 @@ class ShellApp(App):
 
     def on_mount(self):
         self.workflows = load_workflows(); self.query_one("#main_input").focus()
+        self.set_interval(0.5, self.update_running_statuses)
+
+    def update_running_statuses(self):
+        for widget in self.query_one("#command_history").children:
+            if isinstance(widget, CommandBlock) and widget.proc_active:
+                widget.update_status()
 
     def action_toggle_mode(self):
         self.input_mode = "NOTE" if self.input_mode == "CMD" else "CMD"
@@ -372,9 +398,9 @@ class ShellApp(App):
                 lines = [l for l in after.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
                 clean_after = "\n".join(lines).strip()
                 if clean_after: container.mount(NoteBlock(clean_after))
-            self.notify(f"Importiert: {filename}", variant="success")
+            self.notify(f"Importiert: {filename}", severity="information")
         except Exception as e:
-            self.notify(f"Fehler beim Import: {e}", variant="error")
+            self.notify(f"Fehler beim Import: {e}", severity="error")
 
     def export_notebook(self, filename: str):
         if not filename: return
@@ -391,8 +417,8 @@ class ShellApp(App):
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
-            self.notify(f"Gespeichert: {filename}", variant="success")
-        except Exception as e: self.notify(f"Fehler: {e}", variant="error")
+            self.notify(f"Gespeichert: {filename}", severity="information")
+        except Exception as e: self.notify(f"Fehler: {e}", severity="error")
 
     def on_click(self, event: events.Click):
         try:
@@ -416,14 +442,14 @@ class ShellApp(App):
         focused = self.focused
         if focused and isinstance(focused, (CommandBlock, NoteBlock)):
             idx = container.children.index(focused)
-            if idx > 1: container.move_child(focused, index=idx-1)
+            if idx > 1: container.move_child(focused, before=idx-1)
 
     def action_move_down(self):
         container = self.query_one("#command_history")
         focused = self.focused
         if focused and isinstance(focused, (CommandBlock, NoteBlock)):
             idx = container.children.index(focused)
-            if idx < len(container.children) - 1: container.move_child(focused, index=idx+1)
+            if idx < len(container.children) - 1: container.move_child(focused, after=idx+1)
     def action_close_palette(self): self.query_one("#palette").remove_class("visible")
     def on_unmount(self): 
         self.history.save()
