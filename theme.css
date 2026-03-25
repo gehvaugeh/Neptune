@@ -1,0 +1,143 @@
+/* Basis-Setup für die Gemmi-Shell */
+Screen {
+    background: #0c0c0c;
+    color: #eeeeee;
+}
+
+#command_history {
+    height: 1fr;
+    scrollbar-gutter: stable;
+    padding: 1 1 0 1;
+}
+
+/* Fixierte Eingabe-Zone unten */
+#input_area {
+    height: auto;
+    max-height: 15;
+    dock: bottom;
+    background: #080808;
+    border-top: solid #333;
+    padding: 0 1;
+}
+
+#main_input {
+    height: auto;
+    min-height: 3;
+    border: none;
+    background: #080808;
+    color: #00ff00;
+}
+
+#mode_indicator {
+    width: 100%;
+    padding: 0 1;
+    height: 1;
+    text-style: bold;
+}
+
+/* Block-Struktur für Notebook-Feeling */
+CommandBlock, NoteBlock {
+    margin: 0 0 1 0;
+    padding: 0 0 0 1;
+    height: auto;
+    width: 100%;
+    border-left: solid #333;
+}
+
+/* Visueller Fokus beim Editieren oder Auswählen */
+CommandBlock:focus, NoteBlock:focus {
+    background: #161616;
+    border-left: solid cyan;
+}
+
+NoteBlock {
+    border-left: double magenta;
+}
+
+NoteBlock:focus {
+    border-left: double magenta;
+}
+
+.block-header {
+    height: auto;
+    padding-top: 1;
+}
+
+.prompt-symbol {
+    color: #00ff00;
+    margin-right: 1;
+    text-style: bold;
+}
+
+#cmd_label {
+    width: 100%;
+    height: auto;
+}
+
+.block-output {
+    color: #cccccc;
+    height: auto;
+    max-height: 60;
+    margin: 0 0 0 3;
+    background: transparent;
+}
+
+.block-info {
+    text-align: right;
+    color: #444;
+    height: 1;
+    margin-right: 1;
+}
+
+.markdown-content {
+    background: transparent;
+    padding: 1 2;
+}
+
+/* Editor innerhalb eines Blocks */
+#block_text_edit {
+    height: auto;
+    min-height: 3;
+    max-height: 15;
+    border: solid #444;
+    background: #111;
+    margin: 1 0;
+}
+
+.hidden {
+    display: none !important;
+}
+
+.running {
+    border-left: solid yellow;
+}
+
+/* Autocomplete Palette */
+#palette {
+    display: none;
+    max-height: 10;
+    background: #1a1a1a;
+    border: solid #333;
+}
+
+#palette.visible {
+    display: block;
+}
+
+/* Modals */
+#modal_dialog {
+    padding: 1 2;
+    background: #1e1e1e;
+    border: thick #444;
+    width: 60;
+    height: auto;
+    align: center middle;
+}
+
+#modal_buttons {
+    margin-top: 1;
+    height: 3;
+    align: right middle;
+}
+
+

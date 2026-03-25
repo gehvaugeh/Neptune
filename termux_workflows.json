@@ -1,0 +1,10 @@
+[
+    {
+        "name": "System Update",
+        "cmd": "pkg update && pkg upgrade"
+    },
+    {
+        "name": "initialize git repo",
+        "cmd": "git init"
+    }
+]
