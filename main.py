@@ -149,8 +149,9 @@ class CommandBlock(Static):
             yield Label("➜", classes="prompt-symbol")
             with Vertical(classes="command-container"):
                 yield Label(f"[bold blue]{self.cwd}[/]", id="cwd_label")
-                yield Static(Syntax(self.command, "bash", theme="monokai"), id="cmd_syntax")
-                yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
+                with Static(id="cmd_wrapper"):
+                    yield Static(Syntax(self.command, "bash", theme="monokai"), id="cmd_syntax")
+                    yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
@@ -175,7 +176,9 @@ class CommandBlock(Static):
         if len(self.full_output) > 30000:
             self.full_output = "...(truncated)...\n" + self.full_output[-30000:]
 
-        self.query_one("#output").update(Text.from_ansi(self.full_output))
+        try:
+            self.query_one("#output").update(Text.from_ansi(self.full_output))
+        except: pass
     def finish(self, code: int):
         self.proc_active = False
         elapsed = time.time() - self.start_time
@@ -219,7 +222,8 @@ class ShellApp(App):
         Binding("ctrl+l", "import_notebook_dialog", "Import MD"),
         Binding("shift+up", "move_up", "Move Up"),
         Binding("shift+down", "move_down", "Move Down"),
-        Binding("ctrl+x", "delete_block", "Delete Block")
+        Binding("ctrl+x", "delete_block", "Delete Block"),
+        Binding("escape", "close_palette", "Close")
     ]
 
     def __init__(self):
@@ -232,6 +236,7 @@ class ShellApp(App):
         with ScrollableContainer(id="command_history"):
             yield Static("[bold #7c4dff]G E M M I - S H E L L[/] [bold #e1e1e6]v12.0[/] | [italic #88888e]Notebook Chronicler[/]")
         with Vertical(id="bottom_dock"):
+            yield OptionList(id="palette")
             self.mode_label = Label("[bold #7c4dff]MODE: COMMAND[/]", id="mode_indicator")
             yield self.mode_label
             yield TextArea(language="bash", id="main_input")
@@ -254,11 +259,90 @@ class ShellApp(App):
         # Force re-render of input if possible or just focus
         inp.focus()
 
+    # --- PALETTE LOGIC ---
+    def _get_current_token(self, text: str) -> str:
+        if not text or text.endswith(" "): return ""
+        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
+        return parts[-1] if parts else ""
+
+    def update_palette(self, val: str):
+        p = self.query_one("#palette"); p.clear_options()
+        if not val.strip() and not val.endswith(" "): p.remove_class("visible"); return
+        token = self._get_current_token(val)
+        last = token.strip("\"'")
+        d_p = os.path.dirname(last) if last else ""; f_q = os.path.basename(last) if last else ""
+        ex_d = os.path.expanduser(d_p) if d_p else "."
+        try:
+            if os.path.isdir(ex_d):
+                for f in os.listdir(ex_d):
+                    if fuzzy_match(f_q, f):
+                        full = os.path.join(d_p, f) if d_p else f
+                        if os.path.isdir(os.path.join(ex_d, f)): full += "/"
+                        p.add_option(f"[green]Path:[/] {full}")
+        except: pass
+        for h in self.history.get_matches(val): p.add_option(f"[yellow]Hist:[/] {h}")
+        for wf in self.workflows:
+            if fuzzy_match(val, wf['name']) or fuzzy_match(val, wf['cmd']):
+                p.add_option(f"[cyan]WF:[/] {wf['name']} ([dim]{wf['cmd'][:20]}...[/])")
+        if p.option_count > 0: p.add_class("visible")
+        else: p.remove_class("visible")
+
+    def sync_input(self):
+        p = self.query_one("#palette")
+        if p.highlighted is None: return
+        option = p.get_option_at_index(p.highlighted)
+        label = str(option.prompt)
+        inp = self.query_one("#main_input"); self._suppress_search = True
+        if "[green]Path:[/]" in label:
+            path = label.split("] ")[1]
+            if " " in path: path = f'"{path}"'
+            token = self._get_current_token(inp.text)
+            if token:
+                inp.text = inp.text[:inp.text.rfind(token)] + path
+            else:
+                inp.text += path
+        else:
+            cmd = label.split("] ", 1)[1]
+            if "[cyan]WF:[/]" in label:
+                name = label.split("] ")[1].split(" (")[0]
+                cmd = next((wf['cmd'] for wf in self.workflows if wf['name'] == name), cmd)
+            inp.text = cmd
+        lines = inp.document.lines
+        inp.cursor_location = (len(lines)-1, len(lines[-1]))
+
+    @on(OptionList.OptionSelected, "#palette")
+    def opt_sel(self, event):
+        self.sync_input(); self.query_one("#palette").remove_class("visible"); self.query_one("#main_input").focus()
+
+    def on_key(self, event: events.Key):
+        p, inp = self.query_one("#palette"), self.query_one("#main_input")
+        if event.key == "ctrl+p": # Manuelles Triggern der Palette
+            event.prevent_default()
+            if p.has_class("visible"): p.remove_class("visible")
+            else: p.add_class("visible"); self.update_palette(inp.text)
+            return
+
+        vis = p.has_class("visible")
+        if event.key in ("up", "down") and self.focused.id == "main_input" and vis:
+            event.prevent_default()
+            p.highlighted = max(0, min(p.option_count-1, (p.highlighted or 0) + (-1 if event.key == "up" else 1)))
+            self.sync_input()
+        elif event.key == "tab":
+            event.prevent_default()
+            if not vis: p.add_class("visible"); self.update_palette(inp.text)
+            else: self.sync_input(); p.remove_class("visible")
+
+    @on(TextArea.Changed, "#main_input")
+    def in_ch(self, event):
+        if not self._suppress_search and self.query_one("#palette").has_class("visible"):
+            self.update_palette(event.text_area.text)
+        self._suppress_search = False
+
     # --- CORE ACTIONS ---
     def action_submit(self):
         ta = self.query_one("#main_input"); content = ta.text.strip()
         if not content: return
-        ta.text = ""
+        ta.text = ""; self.query_one("#palette").remove_class("visible")
         container = self.query_one("#command_history")
         if self.input_mode == "NOTE":
             new_block = NoteBlock(content); container.mount(new_block)
@@ -400,6 +484,7 @@ class ShellApp(App):
                 except: pass
             focused.remove()
             self.notify("Block gelöscht", severity="information")
+    def action_close_palette(self): self.query_one("#palette").remove_class("visible")
     def on_unmount(self): 
         self.history.save()
         for p in self.active_processes: 

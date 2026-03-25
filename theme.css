@@ -62,7 +62,7 @@ CommandBlock, NoteBlock {
     height: auto;
     min-height: 1;
     width: 100%;
-    border-left: solid $border;
+    border-left: solid $purple-dim;
     position: relative;
     background: $bg-block;
 }
@@ -125,6 +125,12 @@ NoteBlock {
     height: auto;
 }
 
+#cmd_wrapper {
+    height: auto;
+    width: 100%;
+    position: relative;
+}
+
 /* Editor innerhalb eines Blocks */
 #block_text_edit {
     height: auto;
@@ -134,6 +140,9 @@ NoteBlock {
     background: $bg-input;
     margin: 0;
     width: 100%;
+    position: absolute;
+    top: 0;
+    left: 0;
 }
 
 .hidden {
@@ -142,6 +151,18 @@ NoteBlock {
 
 .running {
     border-left: solid $success;
+}
+
+#palette {
+    display: none;
+    max-height: 10;
+    background: $bg-block;
+    border-bottom: solid $border;
+    color: $text-main;
+}
+
+#palette.visible {
+    display: block;
 }
 
 /* Modals */
