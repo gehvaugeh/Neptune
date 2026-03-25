@@ -126,7 +126,7 @@ class NoteBlock(Static):
         yield Button("/\\", id="toggle_expand", classes="toggle-expand-btn")
         yield Markdown(self.content, id="md_render", classes="markdown-content")
         yield TextArea(self.content, id="block_text_edit", classes="hidden", language="markdown")
-        yield Label("[dim]Note (e: edit | ctrl+enter/j: save)[/]", classes="block-info")
+        yield Label("[dim]Note (e: edit | ctrl+enter/j/m: save)[/]", classes="block-info")
     def toggle_edit(self):
         self.is_editing = not self.is_editing
         render, edit = self.query_one("#md_render"), self.query_one("#block_text_edit")
@@ -148,7 +148,7 @@ class NoteBlock(Static):
 
     def on_key(self, event: events.Key):
         if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key in ("ctrl+enter", "ctrl+j"): self.toggle_edit()
+        elif self.is_editing and event.key in ("ctrl+enter", "ctrl+j", "ctrl+m"): self.toggle_edit()
 
 class CommandBlock(Static):
     can_focus = True
@@ -211,11 +211,12 @@ class CommandBlock(Static):
             btn.label = "/\\"
 
     def run_process(self):
+        self.command = self.query_one("#cmd_input").text
         self.full_output = ""; self.query_one("#output").update(""); self.add_class("running")
         self.start_time = time.time()
         self.app_ref.start_process(self.command, self)
     def on_key(self, event: events.Key):
-        if event.key in ("ctrl+enter", "ctrl+j"): self.run_process()
+        if event.key in ("ctrl+enter", "ctrl+j", "ctrl+m"): self.run_process()
         elif event.key == "ctrl+c" and self.process:
             try: os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
             except: pass
@@ -228,7 +229,7 @@ class ShellApp(App):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+n", "toggle_mode", "CMD/NOTE"),
-        Binding("ctrl+enter,ctrl+j", "submit", "Execute"),
+        Binding("ctrl+enter,ctrl+j,ctrl+m", "submit", "Execute"),
         Binding("ctrl+s", "save_wf_dialog", "Save WF"),
         Binding("ctrl+e", "save_notebook_dialog", "Export MD"),
         Binding("ctrl+l", "import_notebook_dialog", "Import MD"),

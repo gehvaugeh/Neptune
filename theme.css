@@ -3,7 +3,7 @@
 $bg-dark: #050505;
 $bg-input: #0a0a0a;
 $bg-block: #080808;
-$bg-focus: #121212;
+$bg-focus: #0c0c0c;
 $purple-primary: #7c4dff;
 $purple-dim: #311b92;
 $text-main: #eeeeee;
@@ -30,16 +30,17 @@ Screen {
     max-height: 10;
     background: $bg-input;
     border-top: solid $border;
+    padding-bottom: 1;
 }
 
 #input_area {
     height: auto;
-    padding: 0 1;
 }
 
 #main_input {
     height: auto;
     min-height: 1;
+    max-height: 8;
     border: none;
     background: $bg-input;
     color: $text-main;
@@ -95,6 +96,7 @@ NoteBlock {
     width: 100%;
     height: auto;
     min-height: 1;
+    max-height: 10;
     border: none;
     background: transparent;
     padding: 0;
@@ -109,7 +111,7 @@ NoteBlock {
 .block-output {
     color: $text-dim;
     height: auto;
-    max-height: 40;
+    max-height: 20;
     margin: 0 0 0 3;
     background: transparent;
 }
