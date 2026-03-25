@@ -30,6 +30,7 @@ def load_workflows():
     return [{"name": "System Update", "cmd": "pkg update && pkg upgrade"}]
 
 def fuzzy_match(query: str, target: str) -> bool:
+    if not query: return True
     query, target = query.lower(), target.lower()
     it = iter(target)
     return all(c in it for c in query)
@@ -53,8 +54,8 @@ class HistoryManager:
         with open(HISTORY_FILE, "w") as f:
             for cmd in self.cache: f.write(f"{cmd}\n")
     def get_matches(self, query: str):
-        q = query.lower()
-        return [c for c in self.cache if q in c.lower()][-15:]
+        if not query: return self.cache[-15:]
+        return [c for c in self.cache if fuzzy_match(query, c)][-15:]
 
 # --- MODALE DIALOGE ---
 
@@ -70,6 +71,22 @@ class SaveNotebookModal(ModalScreen):
     def cancel(self): self.dismiss(None)
     @on(Button.Pressed, "#export")
     def export(self):
+        name = self.query_one("#file_name").value
+        if not name.endswith(".md"): name += ".md"
+        self.dismiss(name)
+
+class ImportNotebookModal(ModalScreen):
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal_dialog"):
+            yield Label("[bold cyan]Notebook importieren (.md)[/]")
+            yield Input(placeholder="dateiname.md", id="file_name")
+            with Horizontal(id="modal_buttons"):
+                yield Button("Abbrechen", variant="error", id="cancel")
+                yield Button("Importieren", variant="success", id="import")
+    @on(Button.Pressed, "#cancel")
+    def cancel(self): self.dismiss(None)
+    @on(Button.Pressed, "#import")
+    def import_nb(self):
         name = self.query_one("#file_name").value
         if not name.endswith(".md"): name += ".md"
         self.dismiss(name)
@@ -169,6 +186,9 @@ class ShellApp(App):
         Binding("ctrl+j", "submit", "Execute"),
         Binding("ctrl+s", "save_wf_dialog", "Save WF"),
         Binding("ctrl+e", "save_notebook_dialog", "Export MD"),
+        Binding("ctrl+i", "import_notebook_dialog", "Import MD"),
+        Binding("shift+up", "move_up", "Move Up"),
+        Binding("shift+down", "move_down", "Move Down"),
         Binding("escape", "close_palette", "Close")
     ]
 
@@ -198,10 +218,16 @@ class ShellApp(App):
         self.query_one("#main_input").language = "markdown" if self.input_mode == "NOTE" else "bash"
 
     # --- PALETTE LOGIC ---
+    def _get_current_token(self, text: str) -> str:
+        if not text or text.endswith(" "): return ""
+        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
+        return parts[-1] if parts else ""
+
     def update_palette(self, val: str):
         p = self.query_one("#palette"); p.clear_options()
-        if not val.strip(): p.remove_class("visible"); return
-        parts = val.split(); last = parts[-1] if parts else ""
+        if not val.strip() and not val.endswith(" "): p.remove_class("visible"); return
+        token = self._get_current_token(val)
+        last = token.strip("\"'")
         d_p = os.path.dirname(last) if last else ""; f_q = os.path.basename(last) if last else ""
         ex_d = os.path.expanduser(d_p) if d_p else "."
         try:
@@ -226,8 +252,13 @@ class ShellApp(App):
         label = str(option.prompt)
         inp = self.query_one("#main_input"); self._suppress_search = True
         if "[green]Path:[/]" in label:
-            path = label.split("] ")[1]; parts = inp.text.rsplit(None, 1)
-            inp.text = (parts[0] + " " + path) if len(parts) > 1 else path
+            path = label.split("] ")[1]
+            if " " in path: path = f'"{path}"'
+            token = self._get_current_token(inp.text)
+            if token:
+                inp.text = inp.text[:inp.text.rfind(token)] + path
+            else:
+                inp.text += path
         else:
             cmd = label.split("] ", 1)[1]
             if "[cyan]WF:[/]" in label:
@@ -302,9 +333,48 @@ class ShellApp(App):
             try: os.close(m)
             except: pass
 
-    # --- EXPORT LOGIC ---
+    # --- EXPORT / IMPORT LOGIC ---
     def action_save_notebook_dialog(self):
         self.push_screen(SaveNotebookModal(), self.export_notebook)
+
+    def action_import_notebook_dialog(self):
+        self.push_screen(ImportNotebookModal(), self.import_notebook)
+
+    def import_notebook(self, filename: str):
+        if not filename or not os.path.exists(filename): return
+        try:
+            with open(filename, "r") as f: content = f.read()
+            container = self.query_one("#command_history")
+            for child in container.children[1:]: child.remove()
+            pattern = re.compile(r'```(bash|text)\n(.*?)\n```', re.DOTALL)
+            last_pos = 0
+            last_command_block = None
+            matches = list(pattern.finditer(content))
+            for match in matches:
+                before = content[last_pos:match.start()].strip()
+                if before:
+                    lines = [l for l in before.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
+                    clean_before = "\n".join(lines).strip()
+                    if clean_before: container.mount(NoteBlock(clean_before))
+                lang, code = match.groups()
+                if lang == "bash":
+                    last_command_block = CommandBlock(code, os.getcwd(), self)
+                    container.mount(last_command_block)
+                elif lang == "text" and last_command_block:
+                    last_command_block.full_output = code
+                    try:
+                        last_command_block.query_one("#output").update(Text.from_ansi(code))
+                        last_command_block.query_one("#info").update("[blue]Imported[/]")
+                    except: pass
+                last_pos = match.end()
+            after = content[last_pos:].strip()
+            if after:
+                lines = [l for l in after.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
+                clean_after = "\n".join(lines).strip()
+                if clean_after: container.mount(NoteBlock(clean_after))
+            self.notify(f"Importiert: {filename}", variant="success")
+        except Exception as e:
+            self.notify(f"Fehler beim Import: {e}", variant="error")
 
     def export_notebook(self, filename: str):
         if not filename: return
@@ -314,7 +384,7 @@ class ShellApp(App):
             if isinstance(widget, NoteBlock):
                 md_output.append(f"{widget.content}\n")
             elif isinstance(widget, CommandBlock):
-                md_output.append(f"{widget.content}\n")
+                md_output.append(f"```bash\n{widget.command}\n```\n")
 
                 if widget.full_output.strip():
                     clean = re.sub(r'\x1B[@-_][0-?]*[ -/]*[@-~]', '', widget.full_output)
@@ -341,6 +411,19 @@ class ShellApp(App):
 
     def action_save_wf_dialog(self):
         self.push_screen(SaveWorkflowModal(self.query_one("#main_input").text), lambda s: s and setattr(self, 'workflows', load_workflows()))
+    def action_move_up(self):
+        container = self.query_one("#command_history")
+        focused = self.focused
+        if focused and isinstance(focused, (CommandBlock, NoteBlock)):
+            idx = container.children.index(focused)
+            if idx > 1: container.move_child(focused, index=idx-1)
+
+    def action_move_down(self):
+        container = self.query_one("#command_history")
+        focused = self.focused
+        if focused and isinstance(focused, (CommandBlock, NoteBlock)):
+            idx = container.children.index(focused)
+            if idx < len(container.children) - 1: container.move_child(focused, index=idx+1)
     def action_close_palette(self): self.query_one("#palette").remove_class("visible")
     def on_unmount(self): 
         self.history.save()
