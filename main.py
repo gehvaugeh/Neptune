@@ -121,12 +121,10 @@ class NoteBlock(Static):
     def __init__(self, content: str, **kwargs):
         super().__init__(**kwargs)
         self.content, self.is_editing, self.last_click_time = content, False, 0
-        self.is_collapsed = False
     def compose(self) -> ComposeResult:
-        yield Button("/\\", id="toggle_expand", classes="toggle-expand-btn")
         yield Markdown(self.content, id="md_render", classes="markdown-content")
         yield TextArea(self.content, id="block_text_edit", classes="hidden", language="markdown")
-        yield Label("[dim]Note (e: edit | ctrl+enter/j/m: save)[/]", classes="block-info")
+        yield Label("[dim]Note (e: edit | ctrl+j: save)[/]", classes="block-info")
     def toggle_edit(self):
         self.is_editing = not self.is_editing
         render, edit = self.query_one("#md_render"), self.query_one("#block_text_edit")
@@ -135,41 +133,26 @@ class NoteBlock(Static):
         else:
             self.content = edit.text
             render.update(self.content); render.remove_class("hidden"); edit.add_class("hidden")
-    @on(Button.Pressed, "#toggle_expand")
-    def toggle_collapse(self):
-        self.is_collapsed = not self.is_collapsed
-        btn = self.query_one("#toggle_expand")
-        if self.is_collapsed:
-            self.add_class("collapsed")
-            btn.label = "\\/"
-        else:
-            self.remove_class("collapsed")
-            btn.label = "/\\"
-
     def on_key(self, event: events.Key):
         if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key in ("ctrl+enter", "ctrl+j", "ctrl+m"): self.toggle_edit()
+        elif self.is_editing and event.key == "ctrl+j": self.toggle_edit()
 
 class CommandBlock(Static):
     can_focus = True
     def __init__(self, command: str, cwd: str, app_ref, **kwargs):
         super().__init__(**kwargs)
         self.command, self.cwd, self.app_ref = command, cwd, app_ref
-        self.full_output, self.proc_active, self.process, self.last_click_time = "", False, None, 0
+        self.full_output, self.proc_active, self.process, self.is_editing, self.last_click_time = "", False, None, False, 0
         self.start_time = 0
-        self.is_collapsed = False
     def compose(self) -> ComposeResult:
-        yield Button("/\\", id="toggle_expand", classes="toggle-expand-btn")
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
             with Vertical():
-                yield Label(f"[bold blue]{self.cwd}[/]", classes="cwd-label")
-                yield TextArea(self.command, id="cmd_input", language="bash", classes="inline-input")
+                yield Label(f"[bold blue]{self.cwd}[/]", id="cwd_label")
+                yield Static(Syntax(self.command, "bash", theme="monokai"), id="cmd_syntax")
+            yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
-
-    def on_focus(self):
-        self.query_one("#cmd_input").focus()
 
     def update_status(self):
         if self.proc_active:
@@ -199,25 +182,25 @@ class CommandBlock(Static):
         status = "[green]✅ OK[/]" if code == 0 else f"[red]❌ ERR({code})[/]"
         self.query_one("#info").update(f"{status} [dim]({elapsed:.1f}s)[/]")
         self.remove_class("running")
-    @on(Button.Pressed, "#toggle_expand")
-    def toggle_collapse(self):
-        self.is_collapsed = not self.is_collapsed
-        btn = self.query_one("#toggle_expand")
-        if self.is_collapsed:
-            self.add_class("collapsed")
-            btn.label = "\\/"
+    def toggle_edit(self):
+        self.is_editing = not self.is_editing
+        syntax, edit = self.query_one("#cmd_syntax"), self.query_one("#block_text_edit")
+        if self.is_editing:
+            syntax.add_class("hidden"); edit.remove_class("hidden"); edit.focus()
         else:
-            self.remove_class("collapsed")
-            btn.label = "/\\"
+            self.command = edit.text
+            syntax.update(Syntax(self.command, "bash", theme="monokai"))
+            syntax.remove_class("hidden"); edit.add_class("hidden"); self.run_process()
 
     def run_process(self):
-        self.command = self.query_one("#cmd_input").text
         self.full_output = ""; self.query_one("#output").update(""); self.add_class("running")
         self.start_time = time.time()
         self.app_ref.start_process(self.command, self)
     def on_key(self, event: events.Key):
-        if event.key in ("ctrl+enter", "ctrl+j", "ctrl+m"): self.run_process()
-        elif event.key == "ctrl+c" and self.process:
+        if not self.is_editing and event.key == "e": self.toggle_edit()
+        elif self.is_editing and event.key == "ctrl+j": self.toggle_edit()
+        elif not self.is_editing and event.key == "ctrl+j": self.run_process()
+        elif not self.is_editing and event.key == "ctrl+c" and self.process:
             try: os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
             except: pass
 
@@ -229,7 +212,7 @@ class ShellApp(App):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+n", "toggle_mode", "CMD/NOTE"),
-        Binding("ctrl+enter,ctrl+j,ctrl+m", "submit", "Execute"),
+        Binding("ctrl+j", "submit", "Execute"),
         Binding("ctrl+s", "save_wf_dialog", "Save WF"),
         Binding("ctrl+e", "save_notebook_dialog", "Export MD"),
         Binding("ctrl+l", "import_notebook_dialog", "Import MD"),
