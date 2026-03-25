@@ -147,10 +147,10 @@ class CommandBlock(Static):
     def compose(self) -> ComposeResult:
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
-            with Vertical():
+            with Vertical(classes="command-container"):
                 yield Label(f"[bold blue]{self.cwd}[/]", id="cwd_label")
                 yield Static(Syntax(self.command, "bash", theme="monokai"), id="cmd_syntax")
-            yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
+                yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
@@ -197,9 +197,10 @@ class CommandBlock(Static):
         self.start_time = time.time()
         self.app_ref.start_process(self.command, self)
     def on_key(self, event: events.Key):
-        if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key == "ctrl+j": self.toggle_edit()
-        elif not self.is_editing and event.key == "ctrl+j": self.run_process()
+        if event.key == "e": self.toggle_edit()
+        elif event.key == "ctrl+j":
+            if self.is_editing: self.toggle_edit()
+            else: self.run_process()
         elif not self.is_editing and event.key == "ctrl+c" and self.process:
             try: os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
             except: pass
@@ -266,10 +267,11 @@ class ShellApp(App):
             if content.startswith("cd "):
                 try:
                     os.chdir(os.path.expanduser(content[3:].strip() or "~"))
-                    container.mount(Label(f"[dim]➜ {os.getcwd()}[/]")); return
+                    container.mount(Label(f"[dim]➜ {os.getcwd()}[/]"), after=0); return
                 except: pass
             new_block = CommandBlock(content, os.getcwd(), self)
-            container.mount(new_block); new_block.run_process()
+            container.mount(new_block)
+            new_block.run_process()
         new_block.scroll_visible()
 
     @work(exclusive=False, thread=True)

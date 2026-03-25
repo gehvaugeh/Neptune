@@ -21,6 +21,7 @@ Screen {
     height: 1fr;
     scrollbar-gutter: stable;
     padding: 0 1;
+    overflow-y: scroll;
 }
 
 /* Fixierte Eingabe-Zone unten */
@@ -59,6 +60,7 @@ CommandBlock, NoteBlock {
     margin: 0 0 1 0;
     padding: 0 0 0 1;
     height: auto;
+    min-height: 1;
     width: 100%;
     border-left: solid $border;
     position: relative;
@@ -118,14 +120,20 @@ NoteBlock {
     padding: 0 1;
 }
 
+.command-container {
+    width: 100%;
+    height: auto;
+}
+
 /* Editor innerhalb eines Blocks */
 #block_text_edit {
     height: auto;
-    min-height: 3;
+    min-height: 1;
     max-height: 15;
-    border: solid $border;
+    border: none;
     background: $bg-input;
-    margin: 1 0;
+    margin: 0;
+    width: 100%;
 }
 
 .hidden {
