@@ -255,7 +255,7 @@ class ShellApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with ScrollableContainer(id="command_history"):
-            yield Static("[bold magenta]Gemmi-Shell v12.0 | Notebook Chronicler[/]")
+            yield Static("[bold #ff00ff]G E M M I - S H E L L[/] [bold #00ffff]v12.0[/] | [italic #9d4edd]Notebook Chronicler[/]")
         yield OptionList(id="palette")
         with Vertical(id="input_area"):
             self.mode_label = Label("[bold cyan]MODE: COMMAND[/]", id="mode_indicator")

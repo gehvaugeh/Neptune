@@ -1,22 +1,21 @@
-/* Basis-Setup für die Gemmi-Shell - Dark Purple Theme */
-:root {
-    --bg-dark: #0a0410;
-    --bg-input: #120820;
-    --bg-block: #180c28;
-    --bg-focus: #2a1545;
-    --purple-primary: #7b2cbf;
-    --purple-light: #9d4edd;
-    --purple-dark: #5a189a;
-    --text-main: #e0d1f0;
-    --text-dim: #9b81b8;
-    --accent: #ff9e00;
-    --success: #00f5d4;
-    --error: #f15bb5;
-}
+/* Basis-Setup für die Gemmi-Shell - Deep Purple Neon Punk Theme */
+
+$bg-dark: #0d0221;
+$bg-input: #1b0636;
+$bg-block: #15002e;
+$bg-focus: #240046;
+$neon-pink: #ff00ff;
+$neon-cyan: #00ffff;
+$neon-purple: #9d4edd;
+$neon-purple-dark: #5a189a;
+$neon-green: #39ff14;
+$neon-yellow: #fff200;
+$text-main: #f0e6ff;
+$text-dim: #9b81b8;
 
 Screen {
-    background: var(--bg-dark);
-    color: var(--text-main);
+    background: $bg-dark;
+    color: $text-main;
 }
 
 #command_history {
@@ -30,8 +29,8 @@ Screen {
     height: auto;
     max-height: 12;
     dock: bottom;
-    background: var(--bg-input);
-    border-top: solid var(--purple-primary);
+    background: $bg-input;
+    border-top: double $neon-purple;
     padding: 0 1;
 }
 
@@ -39,15 +38,16 @@ Screen {
     height: auto;
     min-height: 1;
     border: none;
-    background: var(--bg-input);
-    color: var(--text-main);
+    background: $bg-input;
+    color: $neon-cyan;
 }
 
 #mode_indicator {
     width: 100%;
     padding: 0 1;
     height: 1;
-    text-style: bold;
+    text-style: bold italic;
+    color: $neon-pink;
 }
 
 /* Block-Struktur für Notebook-Feeling */
@@ -56,22 +56,22 @@ CommandBlock, NoteBlock {
     padding: 0 0 0 1;
     height: auto;
     width: 100%;
-    border-left: solid var(--purple-dark);
+    border-left: solid $neon-purple-dark;
     position: relative;
 }
 
 /* Visueller Fokus beim Editieren oder Auswählen */
 CommandBlock:focus, NoteBlock:focus {
-    background: var(--bg-focus);
-    border-left: solid var(--purple-light);
+    background: $bg-focus;
+    border-left: tall $neon-pink;
 }
 
 NoteBlock {
-    border-left: double var(--purple-primary);
+    border-left: double $neon-cyan;
 }
 
 NoteBlock:focus {
-    border-left: double var(--purple-light);
+    border-left: tall $neon-cyan;
 }
 
 .block-header {
@@ -80,7 +80,7 @@ NoteBlock:focus {
 }
 
 .prompt-symbol {
-    color: var(--success);
+    color: $neon-green;
     margin-right: 1;
     text-style: bold;
 }
@@ -88,6 +88,8 @@ NoteBlock:focus {
 .cwd-label {
     width: 100%;
     height: 1;
+    color: $neon-purple;
+    text-style: italic;
 }
 
 .cmd-syntax {
@@ -96,7 +98,7 @@ NoteBlock:focus {
 }
 
 .block-output {
-    color: var(--text-dim);
+    color: $text-dim;
     height: auto;
     max-height: 40;
     margin: 0 0 0 3;
@@ -105,9 +107,10 @@ NoteBlock:focus {
 
 .block-info {
     text-align: right;
-    color: var(--purple-dark);
+    color: $neon-purple-dark;
     height: 1;
     margin-right: 1;
+    text-style: italic;
 }
 
 .markdown-content {
@@ -120,8 +123,8 @@ NoteBlock:focus {
     height: auto;
     min-height: 3;
     max-height: 10;
-    border: solid var(--purple-primary);
-    background: var(--bg-input);
+    border: solid $neon-pink;
+    background: $bg-input;
     margin: 1 0;
 }
 
@@ -130,7 +133,7 @@ NoteBlock:focus {
 }
 
 .running {
-    border-left: solid var(--accent);
+    border-left: tall $neon-yellow;
 }
 
 .collapsed {
@@ -149,14 +152,14 @@ NoteBlock:focus {
     min-width: 4;
     border: none;
     background: transparent;
-    color: var(--text-dim);
+    color: $text-dim;
     text-style: dim;
     padding: 0;
     margin: 0;
 }
 
 .toggle-expand-btn:hover {
-    color: var(--purple-light);
+    color: $neon-cyan;
     background: transparent;
 }
 
@@ -164,8 +167,8 @@ NoteBlock:focus {
 #palette {
     display: none;
     max-height: 8;
-    background: var(--bg-input);
-    border: solid var(--purple-primary);
+    background: $bg-input;
+    border: double $neon-cyan;
 }
 
 #palette.visible {
@@ -175,8 +178,8 @@ NoteBlock:focus {
 /* Modals */
 #modal_dialog {
     padding: 1 2;
-    background: var(--bg-block);
-    border: thick var(--purple-primary);
+    background: $bg-block;
+    border: thick $neon-pink;
     width: 60;
     height: auto;
     align: center middle;
