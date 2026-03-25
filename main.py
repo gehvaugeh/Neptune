@@ -126,7 +126,7 @@ class NoteBlock(Static):
         yield Button("/\\", id="toggle_expand", classes="toggle-expand-btn")
         yield Markdown(self.content, id="md_render", classes="markdown-content")
         yield TextArea(self.content, id="block_text_edit", classes="hidden", language="markdown")
-        yield Label("[dim]Note (e: edit | ctrl+enter: save)[/]", classes="block-info")
+        yield Label("[dim]Note (e: edit | ctrl+enter/j: save)[/]", classes="block-info")
     def toggle_edit(self):
         self.is_editing = not self.is_editing
         render, edit = self.query_one("#md_render"), self.query_one("#block_text_edit")
@@ -148,7 +148,7 @@ class NoteBlock(Static):
 
     def on_key(self, event: events.Key):
         if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key == "ctrl+enter": self.toggle_edit()
+        elif self.is_editing and event.key in ("ctrl+enter", "ctrl+j"): self.toggle_edit()
 
 class CommandBlock(Static):
     can_focus = True
@@ -223,8 +223,8 @@ class CommandBlock(Static):
         self.app_ref.start_process(self.command, self)
     def on_key(self, event: events.Key):
         if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key == "ctrl+enter": self.toggle_edit()
-        elif not self.is_editing and event.key == "ctrl+enter": self.run_process()
+        elif self.is_editing and event.key in ("ctrl+enter", "ctrl+j"): self.toggle_edit()
+        elif not self.is_editing and event.key in ("ctrl+enter", "ctrl+j"): self.run_process()
         elif not self.is_editing and event.key == "ctrl+c" and self.process:
             try: os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
             except: pass
@@ -237,10 +237,10 @@ class ShellApp(App):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+n", "toggle_mode", "CMD/NOTE"),
-        Binding("ctrl+enter", "submit", "Execute"),
+        Binding("ctrl+enter,ctrl+j", "submit", "Execute"),
         Binding("ctrl+s", "save_wf_dialog", "Save WF"),
         Binding("ctrl+e", "save_notebook_dialog", "Export MD"),
-        Binding("ctrl+i", "import_notebook_dialog", "Import MD"),
+        Binding("ctrl+l", "import_notebook_dialog", "Import MD"),
         Binding("shift+up", "move_up", "Move Up"),
         Binding("shift+down", "move_down", "Move Down"),
         Binding("ctrl+x", "delete_block", "Delete Block"),
@@ -255,12 +255,13 @@ class ShellApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with ScrollableContainer(id="command_history"):
-            yield Static("[bold #ff00ff]G E M M I - S H E L L[/] [bold #00ffff]v12.0[/] | [italic #9d4edd]Notebook Chronicler[/]")
-        yield OptionList(id="palette")
-        with Vertical(id="input_area"):
-            self.mode_label = Label("[bold cyan]MODE: COMMAND[/]", id="mode_indicator")
-            yield self.mode_label
-            yield TextArea(language="bash", id="main_input")
+            yield Static("[bold #7c4dff]G E M M I - S H E L L[/] [bold #e1e1e6]v12.0[/] | [italic #88888e]Notebook Chronicler[/]")
+        with Vertical(id="bottom_dock"):
+            yield OptionList(id="palette")
+            with Vertical(id="input_area"):
+                self.mode_label = Label("[bold #7c4dff]MODE: COMMAND[/]", id="mode_indicator")
+                yield self.mode_label
+                yield TextArea(language="bash", id="main_input")
         yield Footer()
 
     def on_mount(self):
