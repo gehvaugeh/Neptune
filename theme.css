@@ -1,31 +1,46 @@
-/* Basis-Setup für die Gemmi-Shell */
+/* Basis-Setup für die Gemmi-Shell - Dark Purple Theme */
+:root {
+    --bg-dark: #0a0410;
+    --bg-input: #120820;
+    --bg-block: #180c28;
+    --bg-focus: #2a1545;
+    --purple-primary: #7b2cbf;
+    --purple-light: #9d4edd;
+    --purple-dark: #5a189a;
+    --text-main: #e0d1f0;
+    --text-dim: #9b81b8;
+    --accent: #ff9e00;
+    --success: #00f5d4;
+    --error: #f15bb5;
+}
+
 Screen {
-    background: #0c0c0c;
-    color: #eeeeee;
+    background: var(--bg-dark);
+    color: var(--text-main);
 }
 
 #command_history {
     height: 1fr;
     scrollbar-gutter: stable;
-    padding: 1 1 0 1;
+    padding: 0 1;
 }
 
 /* Fixierte Eingabe-Zone unten */
 #input_area {
     height: auto;
-    max-height: 15;
+    max-height: 12;
     dock: bottom;
-    background: #080808;
-    border-top: solid #333;
+    background: var(--bg-input);
+    border-top: solid var(--purple-primary);
     padding: 0 1;
 }
 
 #main_input {
     height: auto;
-    min-height: 3;
+    min-height: 1;
     border: none;
-    background: #080808;
-    color: #00ff00;
+    background: var(--bg-input);
+    color: var(--text-main);
 }
 
 #mode_indicator {
@@ -41,66 +56,72 @@ CommandBlock, NoteBlock {
     padding: 0 0 0 1;
     height: auto;
     width: 100%;
-    border-left: solid #333;
+    border-left: solid var(--purple-dark);
+    position: relative;
 }
 
 /* Visueller Fokus beim Editieren oder Auswählen */
 CommandBlock:focus, NoteBlock:focus {
-    background: #161616;
-    border-left: solid cyan;
+    background: var(--bg-focus);
+    border-left: solid var(--purple-light);
 }
 
 NoteBlock {
-    border-left: double magenta;
+    border-left: double var(--purple-primary);
 }
 
 NoteBlock:focus {
-    border-left: double magenta;
+    border-left: double var(--purple-light);
 }
 
 .block-header {
     height: auto;
-    padding-top: 1;
+    padding-top: 0;
 }
 
 .prompt-symbol {
-    color: #00ff00;
+    color: var(--success);
     margin-right: 1;
     text-style: bold;
 }
 
-#cmd_label {
+.cwd-label {
+    width: 100%;
+    height: 1;
+}
+
+.cmd-syntax {
     width: 100%;
     height: auto;
 }
 
 .block-output {
-    color: #cccccc;
+    color: var(--text-dim);
     height: auto;
-    max-height: 60;
+    max-height: 40;
     margin: 0 0 0 3;
     background: transparent;
 }
 
 .block-info {
     text-align: right;
-    color: #444;
+    color: var(--purple-dark);
     height: 1;
     margin-right: 1;
 }
 
 .markdown-content {
     background: transparent;
-    padding: 1 2;
+    padding: 0 1;
 }
 
 /* Editor innerhalb eines Blocks */
 #block_text_edit {
     height: auto;
     min-height: 3;
-    max-height: 15;
-    border: solid #444;
-    background: #111;
+    max-height: 10;
+    border: solid var(--purple-primary);
+    background: var(--bg-input);
     margin: 1 0;
 }
 
@@ -109,15 +130,42 @@ NoteBlock:focus {
 }
 
 .running {
-    border-left: solid yellow;
+    border-left: solid var(--accent);
+}
+
+.collapsed {
+    max-height: 5;
+    overflow: hidden;
+}
+
+.collapsed .block-output {
+    display: none;
+}
+
+.toggle-expand-btn {
+    dock: right;
+    width: 4;
+    height: 1;
+    min-width: 4;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    text-style: dim;
+    padding: 0;
+    margin: 0;
+}
+
+.toggle-expand-btn:hover {
+    color: var(--purple-light);
+    background: transparent;
 }
 
 /* Autocomplete Palette */
 #palette {
     display: none;
-    max-height: 10;
-    background: #1a1a1a;
-    border: solid #333;
+    max-height: 8;
+    background: var(--bg-input);
+    border: solid var(--purple-primary);
 }
 
 #palette.visible {
@@ -127,8 +175,8 @@ NoteBlock:focus {
 /* Modals */
 #modal_dialog {
     padding: 1 2;
-    background: #1e1e1e;
-    border: thick #444;
+    background: var(--bg-block);
+    border: thick var(--purple-primary);
     width: 60;
     height: auto;
     align: center middle;
@@ -139,5 +187,3 @@ NoteBlock:focus {
     height: 3;
     align: right middle;
 }
-
-

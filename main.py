@@ -8,6 +8,7 @@ import re
 from typing import List
 
 from rich.text import Text
+from rich.syntax import Syntax
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
 from textual.containers import Vertical, Horizontal, ScrollableContainer
@@ -120,10 +121,12 @@ class NoteBlock(Static):
     def __init__(self, content: str, **kwargs):
         super().__init__(**kwargs)
         self.content, self.is_editing, self.last_click_time = content, False, 0
+        self.is_collapsed = False
     def compose(self) -> ComposeResult:
+        yield Button("/\\", id="toggle_expand", classes="toggle-expand-btn")
         yield Markdown(self.content, id="md_render", classes="markdown-content")
         yield TextArea(self.content, id="block_text_edit", classes="hidden", language="markdown")
-        yield Label("[dim]Note (e: edit | ctrl+j: save)[/]", classes="block-info")
+        yield Label("[dim]Note (e: edit | ctrl+enter: save)[/]", classes="block-info")
     def toggle_edit(self):
         self.is_editing = not self.is_editing
         render, edit = self.query_one("#md_render"), self.query_one("#block_text_edit")
@@ -132,9 +135,20 @@ class NoteBlock(Static):
         else:
             self.content = edit.text
             render.update(self.content); render.remove_class("hidden"); edit.add_class("hidden")
+    @on(Button.Pressed, "#toggle_expand")
+    def toggle_collapse(self):
+        self.is_collapsed = not self.is_collapsed
+        btn = self.query_one("#toggle_expand")
+        if self.is_collapsed:
+            self.add_class("collapsed")
+            btn.label = "\\/"
+        else:
+            self.remove_class("collapsed")
+            btn.label = "/\\"
+
     def on_key(self, event: events.Key):
         if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key == "ctrl+j": self.toggle_edit()
+        elif self.is_editing and event.key == "ctrl+enter": self.toggle_edit()
 
 class CommandBlock(Static):
     can_focus = True
@@ -143,10 +157,14 @@ class CommandBlock(Static):
         self.command, self.cwd, self.app_ref = command, cwd, app_ref
         self.full_output, self.proc_active, self.process, self.is_editing, self.last_click_time = "", False, None, False, 0
         self.start_time = 0
+        self.is_collapsed = False
     def compose(self) -> ComposeResult:
+        yield Button("/\\", id="toggle_expand", classes="toggle-expand-btn")
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
-            yield Label(f"[bold blue]{self.cwd}[/]\n[white]{self.command}[/]", id="cmd_label")
+            with Vertical():
+                yield Label(f"[bold blue]{self.cwd}[/]", classes="cwd-label")
+                yield Static(Syntax(self.command, "bash", theme="monokai"), id="cmd_syntax", classes="cmd-syntax")
             yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
@@ -162,6 +180,10 @@ class CommandBlock(Static):
             idx = max(text.rfind("\x1b[H"), text.rfind("\x1b[2J"))
             self.full_output = text[idx:]
         else:
+            # Filter out some more problematic control sequences
+            # especially OSC sequences that might contain numbers and end with \x07 or \x1b\
+            text = re.sub(r'\x1b\][0-9]*;.*?\x07', '', text)
+            text = re.sub(r'\x1b\][0-9]*;.*?\x1b\\', '', text)
             self.full_output += text
 
         # Limit buffer to avoid performance issues
@@ -177,20 +199,32 @@ class CommandBlock(Static):
         self.remove_class("running")
     def toggle_edit(self):
         self.is_editing = not self.is_editing
-        label, edit = self.query_one("#cmd_label"), self.query_one("#block_text_edit")
+        syntax, edit = self.query_one("#cmd_syntax"), self.query_one("#block_text_edit")
         if self.is_editing:
-            label.add_class("hidden"); edit.remove_class("hidden"); edit.focus()
+            syntax.add_class("hidden"); edit.remove_class("hidden"); edit.focus()
         else:
             self.command = edit.text
-            label.update(f"[bold blue]{self.cwd}[/]\n[white]{self.command}[/]")
-            label.remove_class("hidden"); edit.add_class("hidden"); self.run_process()
+            syntax.update(Syntax(self.command, "bash", theme="monokai"))
+            syntax.remove_class("hidden"); edit.add_class("hidden"); self.run_process()
+    @on(Button.Pressed, "#toggle_expand")
+    def toggle_collapse(self):
+        self.is_collapsed = not self.is_collapsed
+        btn = self.query_one("#toggle_expand")
+        if self.is_collapsed:
+            self.add_class("collapsed")
+            btn.label = "\\/"
+        else:
+            self.remove_class("collapsed")
+            btn.label = "/\\"
+
     def run_process(self):
         self.full_output = ""; self.query_one("#output").update(""); self.add_class("running")
         self.start_time = time.time()
         self.app_ref.start_process(self.command, self)
     def on_key(self, event: events.Key):
         if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key == "ctrl+j": self.toggle_edit()
+        elif self.is_editing and event.key == "ctrl+enter": self.toggle_edit()
+        elif not self.is_editing and event.key == "ctrl+enter": self.run_process()
         elif not self.is_editing and event.key == "ctrl+c" and self.process:
             try: os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
             except: pass
@@ -203,12 +237,13 @@ class ShellApp(App):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+n", "toggle_mode", "CMD/NOTE"),
-        Binding("ctrl+j", "submit", "Execute"),
+        Binding("ctrl+enter", "submit", "Execute"),
         Binding("ctrl+s", "save_wf_dialog", "Save WF"),
         Binding("ctrl+e", "save_notebook_dialog", "Export MD"),
         Binding("ctrl+i", "import_notebook_dialog", "Import MD"),
         Binding("shift+up", "move_up", "Move Up"),
         Binding("shift+down", "move_down", "Move Down"),
+        Binding("ctrl+x", "delete_block", "Delete Block"),
         Binding("escape", "close_palette", "Close")
     ]
 
@@ -241,7 +276,10 @@ class ShellApp(App):
         self.input_mode = "NOTE" if self.input_mode == "CMD" else "CMD"
         c = "magenta" if self.input_mode == "NOTE" else "cyan"
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
-        self.query_one("#main_input").language = "markdown" if self.input_mode == "NOTE" else "bash"
+        inp = self.query_one("#main_input")
+        inp.language = "markdown" if self.input_mode == "NOTE" else "bash"
+        # Force re-render of input if possible or just focus
+        inp.focus()
 
     # --- PALETTE LOGIC ---
     def _get_current_token(self, text: str) -> str:
@@ -344,6 +382,12 @@ class ShellApp(App):
     @work(exclusive=False, thread=True)
     def start_process(self, cmd: str, block: CommandBlock):
         m, s = pty.openpty()
+        # Set some sane terminal size to avoid weird wrapping/numbers (columns, rows)
+        try:
+            import fcntl, termios, struct
+            fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        except: pass
+
         try:
             p = subprocess.Popen(cmd, shell=True, executable=BASH_EXE, stdout=s, stderr=s, stdin=s,
                                  close_fds=True, preexec_fn=os.setsid)
@@ -413,7 +457,9 @@ class ShellApp(App):
                 md_output.append(f"```bash\n{widget.command}\n```\n")
 
                 if widget.full_output.strip():
-                    clean = re.sub(r'\x1B[@-_][0-?]*[ -/]*[@-~]', '', widget.full_output)
+                    # More comprehensive ANSI cleaning
+                    ansi_escape = re.compile(r'(?:\x1B[@-_]|[\x80-\x9F])[0-?]*[ -/]*[@-~]')
+                    clean = ansi_escape.sub('', widget.full_output)
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
@@ -450,6 +496,15 @@ class ShellApp(App):
         if focused and isinstance(focused, (CommandBlock, NoteBlock)):
             idx = container.children.index(focused)
             if idx < len(container.children) - 1: container.move_child(focused, after=idx+1)
+
+    def action_delete_block(self):
+        focused = self.focused
+        if focused and isinstance(focused, (CommandBlock, NoteBlock)):
+            if isinstance(focused, CommandBlock) and focused.process:
+                try: os.killpg(os.getpgid(focused.process.pid), signal.SIGTERM)
+                except: pass
+            focused.remove()
+            self.notify("Block gelöscht", severity="information")
     def action_close_palette(self): self.query_one("#palette").remove_class("visible")
     def on_unmount(self): 
         self.history.save()
