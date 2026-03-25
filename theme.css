@@ -42,6 +42,7 @@ CommandBlock, NoteBlock {
     height: auto;
     width: 100%;
     border-left: solid #333;
+    border-right: none;
 }
 
 /* Visueller Fokus beim Editieren oder Auswählen */
