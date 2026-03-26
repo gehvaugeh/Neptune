@@ -1,5 +1,4 @@
 echo hi du ei
-ls -la
 tail -f test.log
 jecho twst >> test.log
 echo twst >> test.log
@@ -7,10 +6,6 @@ apt search openssh
 git init
 git add .
 git status
-ls
-ls
 echi"hi"
-ls
-ls
 ls
 ls -la
