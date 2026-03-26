@@ -292,10 +292,9 @@ class ClientApp(App):
                 line = await self.reader.readline()
                 if not line: break
                 msg = json.loads(line.decode())
-                # Using call_from_thread is safer for UI updates from a worker
-                self.app.call_from_thread(self.handle_server_message, msg)
+                await self.handle_server_message(msg)
             except Exception as e:
-                # print(f"Listener error: {e}")
+                # logging.error(f"Listener error: {e}")
                 break
 
     def send_message(self, msg):
@@ -303,7 +302,7 @@ class ClientApp(App):
             self.writer.write(json.dumps(msg).encode() + b"\n")
             asyncio.create_task(self.writer.drain())
 
-    def handle_server_message(self, msg):
+    async def handle_server_message(self, msg):
         msg_type = msg.get("type")
 
         if msg_type == "init":
@@ -316,7 +315,7 @@ class ClientApp(App):
                 self.blocks[b_id].remove()
             self.blocks = {}
             for block_data in msg.get("blocks", []):
-                self.create_block(block_data)
+                await self.create_block(block_data)
 
         elif msg_type == "user_join":
             u_id, u_col = msg.get("user_id"), msg.get("color")
@@ -330,17 +329,15 @@ class ClientApp(App):
                 self.notify(f"User {u_id[:4]} left", variant="info")
 
         elif msg_type == "new_block":
-            self.create_block(msg.get("block"))
+            await self.create_block(msg.get("block"))
 
         elif msg_type == "reorder":
-            container = self.query_one("#command_history")
             # Clear all blocks and recreate in new order
-            # This is simpler than manual moving in Textual for now
             for b_id in list(self.blocks.keys()):
                 self.blocks[b_id].remove()
             self.blocks = {}
             for block_data in msg.get("blocks", []):
-                self.create_block(block_data)
+                await self.create_block(block_data)
 
         elif msg_type == "update_block":
             data = msg.get("block")
@@ -375,8 +372,7 @@ class ClientApp(App):
             if b_id in self.blocks:
                 self.blocks[b_id].update_lock(None, None)
 
-    def create_block(self, data):
-        container = self.query_one("#command_history")
+    async def create_block(self, data):
         b_id = data["id"]
         if b_id in self.blocks: return # Avoid duplicates
 
@@ -388,21 +384,18 @@ class ClientApp(App):
 
         self.blocks[b_id] = new_block
 
-        # Ensure we mount to the container
-        async def do_mount():
-            await container.mount(new_block)
+        container = self.query_one("#command_history")
+        await container.mount(new_block)
 
-            if data["type"] == "CMD":
-                new_block.update_status(data["status"])
-                if data["output"]:
-                    new_block.query_one("#output").update(Text.from_ansi(data["output"]))
+        if data["type"] == "CMD":
+            new_block.update_status(data["status"])
+            if data["output"]:
+                new_block.query_one("#output").update(Text.from_ansi(data["output"]))
 
-            if data["locked_by"]:
+        if data["locked_by"]:
                 new_block.update_lock(data["locked_by"], self.users.get(data["locked_by"], "white"))
 
-            new_block.scroll_visible()
-
-        asyncio.create_task(do_mount())
+        new_block.scroll_visible()
 
     def action_toggle_mode(self):
         self.input_mode = "NOTE" if self.input_mode == "CMD" else "CMD"

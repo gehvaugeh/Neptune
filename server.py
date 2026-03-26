@@ -7,7 +7,15 @@ import uuid
 import signal
 import argparse
 import shutil
+import logging
 from typing import Dict, List, Any
+
+# Setup logging
+logging.basicConfig(
+    filename='gemmi_server.log',
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s: %(message)s'
+)
 
 DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
 
@@ -52,19 +60,23 @@ state = ServerState()
 async def broadcast(message):
     data = json.dumps(message).encode() + b"\n"
     for writer in list(state.clients.keys()):
-        try:
-            if not writer.is_closing():
-                writer.write(data)
-                # Use wait_for to prevent slow clients from blocking others
-                await asyncio.wait_for(writer.drain(), timeout=2.0)
-        except Exception as e:
-            # print(f"Broadcast error for {state.clients.get(writer)}: {e}")
-            if writer in state.clients:
-                del state.clients[writer]
+        asyncio.create_task(send_to_client(writer, data))
+
+async def send_to_client(writer, data):
+    try:
+        if not writer.is_closing():
+            writer.write(data)
+            await asyncio.wait_for(writer.drain(), timeout=2.0)
+    except Exception:
+        if writer in state.clients:
+            logging.info(f"Removing unresponsive client: {state.clients[writer]['id']}")
+            del state.clients[writer]
 
 async def handle_client(reader, writer):
     user_id = str(uuid.uuid4())
+    # Add client immediately with default color
     state.clients[writer] = {"id": user_id, "color": "white"}
+    logging.info(f"Client connected: {user_id}")
 
     try:
         while True:
@@ -72,11 +84,24 @@ async def handle_client(reader, writer):
             if not line:
                 break
 
-            msg = json.loads(line.decode())
+            line_str = line.decode().strip()
+            if not line_str:
+                continue
+
+            try:
+                msg = json.loads(line_str)
+            except Exception as e:
+                logging.error(f"Error decoding JSON from {user_id}: {e} | Raw: {line_str}")
+                continue
+
             msg_type = msg.get("type")
+            logging.debug(f"Received from {user_id}: {msg_type}")
 
             if msg_type == "connect":
-                state.clients[writer]["color"] = msg.get("color", "white")
+                user_color = msg.get("color", "white")
+                state.clients[writer]["color"] = user_color
+                logging.info(f"Client authorized: {user_id} ({user_color})")
+
                 # Send initial state
                 init_msg = {
                     "type": "init",
@@ -87,12 +112,13 @@ async def handle_client(reader, writer):
                 writer.write(json.dumps(init_msg).encode() + b"\n")
                 await writer.drain()
 
-                await broadcast({"type": "user_join", "user_id": user_id, "color": state.clients[writer]["color"]})
+                await broadcast({"type": "user_join", "user_id": user_id, "color": user_color})
 
             elif msg_type == "submit":
                 mode = msg.get("mode")
                 content = msg.get("content")
                 cwd = msg.get("cwd", os.getcwd())
+                logging.info(f"Received submit from {user_id}: {mode} - {content[:50]}")
 
                 block = state.add_block(mode, content, cwd)
                 await broadcast({"type": "new_block", "block": block})
@@ -102,6 +128,7 @@ async def handle_client(reader, writer):
 
             elif msg_type == "edit_start":
                 block_id = msg.get("block_id")
+                print(f"Edit start from {user_id} on {block_id}")
                 block = state.get_block(block_id)
                 if block and not block["locked_by"]:
                     block["locked_by"] = user_id
