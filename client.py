@@ -265,7 +265,7 @@ class ClientApp(App):
             yield Static("[bold magenta]Gemmi-Shell Multi-User | Collaborative Notebook[/]")
         yield OptionList(id="palette")
         with Vertical(id="input_area"):
-            with Horizontal():
+            with Horizontal(id="input_header"):
                 self.mode_label = Label(f"[bold cyan]MODE: COMMAND[/]", id="mode_indicator")
                 yield self.mode_label
                 self.user_label = Label(f"User: [bold {self.user_color}]Me[/]", id="user_indicator")
@@ -274,8 +274,8 @@ class ClientApp(App):
         yield Footer()
 
     async def on_mount(self):
-        self.query_one("#main_input").focus()
         await self.connect_to_server()
+        self.query_one("#main_input").focus()
 
     async def connect_to_server(self):
         try:
