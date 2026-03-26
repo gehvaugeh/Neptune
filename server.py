@@ -6,10 +6,21 @@ import subprocess
 import uuid
 import signal
 import argparse
+import shutil
 from typing import Dict, List, Any
 
 DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
-DEFAULT_SHELL = os.environ.get("SHELL") or ("/data/data/com.termux/files/usr/bin/bash" if os.path.exists("/data/data/com.termux/files/usr/bin/bash") else "/bin/bash")
+
+def get_shell():
+    env_shell = os.environ.get("SHELL")
+    if env_shell and shutil.which(env_shell):
+        return env_shell
+    termux_bash = "/data/data/com.termux/files/usr/bin/bash"
+    if os.path.exists(termux_bash):
+        return termux_bash
+    return shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+
+DEFAULT_SHELL = get_shell()
 
 class ServerState:
     def __init__(self):

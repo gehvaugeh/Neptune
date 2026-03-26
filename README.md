@@ -31,6 +31,9 @@ python3 client.py [-s /path/to/socket]
 python3 main.py all [-s /path/to/socket]
 ```
 
+## Shell Recognition
+The server automatically detects your preferred shell by checking the `$SHELL` environment variable. If `$SHELL` is not set or invalid, it falls back to common shells like `bash` or `sh`, with specific support for the Termux environment.
+
 ## Keyboard Shortcuts
 
 - **Ctrl+N**: Toggle between **Command (CMD)** and **Note (NOTE)** mode.
