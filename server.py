@@ -60,22 +60,27 @@ state = ServerState()
 async def broadcast(message):
     data = json.dumps(message).encode() + b"\n"
     logging.debug(f"Broadcasting: {message.get('type')}")
-    for writer in list(state.clients.keys()):
-        asyncio.create_task(send_to_client(writer, data))
 
-async def send_to_client(writer, data):
+    clients = list(state.clients.items())
+    for writer, client_info in clients:
+        asyncio.create_task(send_to_client(writer, data, client_info['id']))
+
+async def send_to_client(writer, data, user_id):
     try:
         if not writer.is_closing():
             writer.write(data)
             await asyncio.wait_for(writer.drain(), timeout=2.0)
     except Exception as e:
+        logging.error(f"Removing unresponsive client {user_id}: {e}")
         if writer in state.clients:
-            logging.error(f"Removing unresponsive client {state.clients[writer]['id']}: {e}")
             del state.clients[writer]
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except: pass
 
 async def handle_client(reader, writer):
     user_id = str(uuid.uuid4())
-    # Add client immediately with default color
     state.clients[writer] = {"id": user_id, "color": "white"}
     logging.info(f"Client connected: {user_id}")
 
@@ -129,7 +134,7 @@ async def handle_client(reader, writer):
 
             elif msg_type == "edit_start":
                 block_id = msg.get("block_id")
-                print(f"Edit start from {user_id} on {block_id}")
+                logging.info(f"Edit start from {user_id} on {block_id}")
                 block = state.get_block(block_id)
                 if block and not block["locked_by"]:
                     block["locked_by"] = user_id
@@ -174,20 +179,18 @@ async def handle_client(reader, writer):
 
             elif msg_type == "import_blocks":
                 new_blocks = msg.get("blocks")
-                # Clear and replace or append? For import notebook, usually replace
                 state.blocks = []
                 for b_data in new_blocks:
                     block = state.add_block(b_data["type"], b_data["content"], b_data.get("cwd"))
                     block["output"] = b_data.get("output", "")
                     block["status"] = b_data.get("status", "ready")
 
-                # Broadcast reorder/refresh instead of init to avoid overwriting user_id
                 await broadcast({"type": "reorder", "blocks": state.blocks})
 
     except Exception as e:
-        print(f"Error handling client {user_id}: {e}")
+        logging.error(f"Error handling client {user_id}: {e}")
     finally:
-        print(f"Client disconnected: {user_id}")
+        logging.info(f"Client disconnected: {user_id}")
         if writer in state.clients:
             del state.clients[writer]
         await broadcast({"type": "user_leave", "user_id": user_id})
@@ -197,7 +200,9 @@ async def handle_client(reader, writer):
                 b["locked_by"] = None
                 await broadcast({"type": "unlock", "block_id": b["id"]})
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except: pass
 
 async def run_process(block, shell_exe):
     block_id = block["id"]
@@ -224,7 +229,6 @@ async def run_process(block, shell_exe):
         loop = asyncio.get_event_loop()
         while p.returncode is None:
             try:
-                # Use loop.run_in_executor to avoid blocking the event loop on os.read
                 data = await loop.run_in_executor(None, os.read, m, 4096)
                 if data:
                     decoded_data = data.decode(errors="replace")
@@ -254,7 +258,7 @@ async def main(socket_path):
     if os.path.exists(socket_path):
         os.remove(socket_path)
 
-    server = await asyncio.start_unix_server(handle_client, socket_path)
+    server = await asyncio.start_unix_server(handle_client, socket_path, limit=10 * 1024 * 1024)
     print(f"Server started on {socket_path}")
     print(f"Using shell: {DEFAULT_SHELL}")
 

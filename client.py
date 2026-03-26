@@ -5,6 +5,7 @@ import random
 import re
 import time
 import argparse
+import logging
 from typing import List, Dict
 
 from rich.text import Text
@@ -13,7 +14,19 @@ from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea,
 from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.binding import Binding
 from textual.screen import ModalScreen
-from textual import work, on, events
+from textual import work, on, events, message
+
+# Setup client logging
+logging.basicConfig(
+    filename='client_debug.log',
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s: %(message)s'
+)
+
+class ServerMessage(message.Message):
+    def __init__(self, data: Dict) -> None:
+        self.data = data
+        super().__init__()
 
 DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
 THEME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "theme.css")
@@ -147,7 +160,7 @@ class NoteBlock(BaseBlock):
         yield TextArea(self.content, id="block_text_edit", classes="hidden", language="markdown")
         yield Label("[dim]Note (e: edit | ctrl+j: save)[/]", classes="block-info")
 
-    def toggle_edit(self, remote=False):
+    async def toggle_edit(self, remote=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
             return # Block is locked by someone else
 
@@ -159,19 +172,19 @@ class NoteBlock(BaseBlock):
             edit.remove_class("hidden")
             if not remote:
                 edit.focus()
-                self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
+                await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
         else:
             if not remote:
                 self.content = edit.text
-                self.app_ref.send_message({"type": "edit_save", "block_id": self.block_id, "content": self.content})
+                await self.app_ref.send_message({"type": "edit_save", "block_id": self.block_id, "content": self.content})
 
             render.update(self.content)
             render.remove_class("hidden")
             edit.add_class("hidden")
 
-    def on_key(self, event: events.Key):
-        if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key == "ctrl+j": self.toggle_edit()
+    async def on_key(self, event: events.Key):
+        if not self.is_editing and event.key == "e": await self.toggle_edit()
+        elif self.is_editing and event.key == "ctrl+j": await self.toggle_edit()
 
 class CommandBlock(BaseBlock):
     def __init__(self, block_id, command, cwd, app_ref, **kwargs):
@@ -203,7 +216,7 @@ class CommandBlock(BaseBlock):
             info.update(f"[red]❌ {status.upper()}[/]")
             self.remove_class("running")
 
-    def toggle_edit(self, remote=False):
+    async def toggle_edit(self, remote=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
             return
 
@@ -215,19 +228,19 @@ class CommandBlock(BaseBlock):
             edit.remove_class("hidden")
             if not remote:
                 edit.focus()
-                self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
+                await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
         else:
             if not remote:
                 self.content = edit.text
-                self.app_ref.send_message({"type": "edit_save", "block_id": self.block_id, "content": self.content})
+                await self.app_ref.send_message({"type": "edit_save", "block_id": self.block_id, "content": self.content})
 
             label.update(f"[bold blue]{self.cwd}[/]\n[white]{self.content}[/]")
             label.remove_class("hidden")
             edit.add_class("hidden")
 
-    def on_key(self, event: events.Key):
-        if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key == "ctrl+j": self.toggle_edit()
+    async def on_key(self, event: events.Key):
+        if not self.is_editing and event.key == "e": await self.toggle_edit()
+        elif self.is_editing and event.key == "ctrl+j": await self.toggle_edit()
 
 # --- APP ---
 
@@ -275,52 +288,60 @@ class ClientApp(App):
 
     def on_mount(self):
         self.run_worker(self.connect_to_server())
-        # We need to wait a bit or use call_later to ensure the layout is settled
-        # before focusing, although query_one should work here.
         self.query_one("#main_input").focus()
 
     def on_ready(self):
-        # Explicitly focus again when app is ready
         self.query_one("#main_input").focus()
 
     async def connect_to_server(self):
         try:
-            self.reader, self.writer = await asyncio.open_unix_connection(self.socket_path)
-            self.send_message({"type": "connect", "color": self.user_color})
-            self.listen_to_server()
+            self.reader, self.writer = await asyncio.open_unix_connection(
+                self.socket_path, limit=10 * 1024 * 1024
+            )
+            await self.send_message({"type": "connect", "color": self.user_color})
+            await self.listen_to_server()
         except Exception as e:
             self.notify(f"Could not connect to server: {e}", variant="error")
 
-    @work(exclusive=True)
     async def listen_to_server(self):
-        while self.reader:
+        logging.info("Starting listener loop")
+        while self.reader and not self.reader.at_eof():
             try:
                 line = await self.reader.readline()
-                if not line: break
+                if not line:
+                    logging.info("Server closed connection")
+                    break
+
                 try:
-                    msg = json.loads(line.decode())
-                except json.JSONDecodeError as e:
-                    with open("client_error.log", "a") as f:
-                        f.write(f"{time.ctime()}: JSON Decode Error: {e} | Line: {line}\n")
+                    data = line.decode().strip()
+                    if not data: continue
+                    msg = json.loads(data)
+                    logging.debug(f"Received msg: {msg.get('type')}")
+                    self.post_message(ServerMessage(msg))
+                except Exception as e:
+                    logging.error(f"Error handling message: {e}")
                     continue
 
-                # We are already in an async worker (exclusive=True)
-                # handle_server_message must be awaited
-                await self.handle_server_message(msg)
+            except asyncio.LimitOverrunError as e:
+                logging.error(f"Buffer limit exceeded: {e}")
+                await self.reader.read(e.consumed)
             except Exception as e:
-                with open("client_error.log", "a") as f:
-                    f.write(f"{time.ctime()}: Listener loop error: {e}\n")
+                logging.error(f"Listener loop error: {e}")
                 break
+        logging.info("Listener loop stopped")
 
-    def send_message(self, msg):
+    async def send_message(self, msg):
         if self.writer:
-            self.writer.write(json.dumps(msg).encode() + b"\n")
-            asyncio.create_task(self.writer.drain())
+            try:
+                self.writer.write(json.dumps(msg).encode() + b"\n")
+                await self.writer.drain()
+            except Exception as e:
+                logging.error(f"Send error: {e}")
 
-    async def handle_server_message(self, msg):
+    async def on_server_message(self, event: ServerMessage):
+        msg = event.data
         msg_type = msg.get("type")
-        with open("client_debug.log", "a") as f:
-            f.write(f"{time.ctime()}: Handling {msg_type}\n")
+        logging.info(f"Processing server message: {msg_type}")
 
         if msg_type == "init":
             new_id = msg.get("your_id")
@@ -328,6 +349,7 @@ class ClientApp(App):
                 self.user_id = new_id
             self.users = msg.get("users", {})
             # Clear UI and local blocks to avoid duplicates
+            container = self.query_one("#command_history")
             for b_id in list(self.blocks.keys()):
                 try: self.blocks[b_id].remove()
                 except: pass
@@ -347,16 +369,20 @@ class ClientApp(App):
                 self.notify(f"User {u_id[:4]} left", variant="info")
 
         elif msg_type == "new_block":
+            logging.info(f"Adding new block from server: {msg.get('block', {}).get('id')}")
             await self.create_block(msg.get("block"))
+            self.refresh()
 
         elif msg_type == "reorder":
             # Clear all blocks and recreate in new order
+            container = self.query_one("#command_history")
             for b_id in list(self.blocks.keys()):
                 try: self.blocks[b_id].remove()
                 except: pass
             self.blocks = {}
             for block_data in msg.get("blocks", []):
                 await self.create_block(block_data)
+            self.refresh()
 
         elif msg_type == "update_block":
             data = msg.get("block")
@@ -393,8 +419,11 @@ class ClientApp(App):
 
     async def create_block(self, data):
         b_id = data["id"]
-        if b_id in self.blocks: return # Avoid duplicates
+        if b_id in self.blocks:
+            logging.debug(f"Block {b_id} already exists, skipping create")
+            return # Avoid duplicates
 
+        logging.info(f"Creating block: {b_id} ({data['type']})")
         if data["type"] == "NOTE":
             new_block = NoteBlock(b_id, data["content"], self)
         else:
@@ -405,6 +434,7 @@ class ClientApp(App):
 
         container = self.query_one("#command_history")
         await container.mount(new_block)
+        logging.info(f"Block {b_id} mounted to container")
 
         if data["type"] == "CMD":
             new_block.update_status(data["status"])
@@ -414,7 +444,7 @@ class ClientApp(App):
         if data["locked_by"]:
                 new_block.update_lock(data["locked_by"], self.users.get(data["locked_by"], "white"))
 
-        new_block.scroll_visible()
+        self.call_after_refresh(new_block.scroll_visible)
 
     def action_toggle_mode(self):
         self.input_mode = "NOTE" if self.input_mode == "CMD" else "CMD"
@@ -422,7 +452,7 @@ class ClientApp(App):
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
         self.query_one("#main_input").language = "markdown" if self.input_mode == "NOTE" else "bash"
 
-    def action_submit(self):
+    async def action_submit(self):
         ta = self.query_one("#main_input"); content = ta.text.strip()
         if not content: return
         ta.text = ""; self.query_one("#palette").remove_class("visible")
@@ -436,13 +466,14 @@ class ClientApp(App):
                 os.chdir(os.path.expanduser(target))
                 # Add a separator block or notification for the CD
                 container = self.query_one("#command_history")
-                container.mount(Label(f"[dim]➜ {os.getcwd()}[/]"))
+                await container.mount(Label(f"[dim]➜ {os.getcwd()}[/]"))
+                self.refresh()
                 return
             except Exception as e:
                 self.notify(f"CD Error: {e}", variant="error")
                 return
 
-        self.send_message({
+        await self.send_message({
             "type": "submit",
             "mode": self.input_mode,
             "content": content,
@@ -454,7 +485,7 @@ class ClientApp(App):
         self.push_screen(SaveNotebookModal(), self.export_notebook)
 
     def action_import_notebook_dialog(self):
-        self.push_screen(ImportNotebookModal(), self.import_notebook)
+        self.push_screen(ImportNotebookModal(), lambda f: asyncio.create_task(self.import_notebook(f)))
 
     def export_notebook(self, filename: str):
         if not filename: return
@@ -472,7 +503,7 @@ class ClientApp(App):
             self.notify(f"Notebook Saved: {filename}", variant="success")
         except Exception as e: self.notify(f"Save Error: {e}", variant="error")
 
-    def import_notebook(self, filename: str):
+    async def import_notebook(self, filename: str):
         if not filename or not os.path.exists(filename): return
         try:
             with open(filename, "r") as f: content = f.read()
@@ -498,20 +529,20 @@ class ClientApp(App):
                 clean_after = "\n".join(lines).strip()
                 if clean_after: new_blocks.append({"type": "NOTE", "content": clean_after})
 
-            self.send_message({"type": "import_blocks", "blocks": new_blocks})
+            await self.send_message({"type": "import_blocks", "blocks": new_blocks})
             self.notify(f"Notebook Imported: {filename}", variant="success")
         except Exception as e:
             self.notify(f"Import Error: {e}", variant="error")
 
-    def action_move_up(self):
+    async def action_move_up(self):
         focused = self.focused
         if focused and isinstance(focused, BaseBlock):
-            self.send_message({"type": "move_block", "block_id": focused.block_id, "direction": "up"})
+            await self.send_message({"type": "move_block", "block_id": focused.block_id, "direction": "up"})
 
-    def action_move_down(self):
+    async def action_move_down(self):
         focused = self.focused
         if focused and isinstance(focused, BaseBlock):
-            self.send_message({"type": "move_block", "block_id": focused.block_id, "direction": "down"})
+            await self.send_message({"type": "move_block", "block_id": focused.block_id, "direction": "down"})
 
     def action_save_wf_dialog(self):
         self.push_screen(SaveWorkflowModal(self.query_one("#main_input").text), lambda s: s and setattr(self, 'workflows', load_workflows()))
