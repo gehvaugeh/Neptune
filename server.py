@@ -53,16 +53,18 @@ async def broadcast(message):
     data = json.dumps(message).encode() + b"\n"
     for writer in list(state.clients.keys()):
         try:
-            writer.write(data)
-            await writer.drain()
-        except:
-            del state.clients[writer]
+            if not writer.is_closing():
+                writer.write(data)
+                # Use wait_for to prevent slow clients from blocking others
+                await asyncio.wait_for(writer.drain(), timeout=2.0)
+        except Exception as e:
+            # print(f"Broadcast error for {state.clients.get(writer)}: {e}")
+            if writer in state.clients:
+                del state.clients[writer]
 
 async def handle_client(reader, writer):
     user_id = str(uuid.uuid4())
     state.clients[writer] = {"id": user_id, "color": "white"}
-
-    print(f"Client connected: {user_id}")
 
     try:
         while True:

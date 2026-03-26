@@ -292,8 +292,11 @@ class ClientApp(App):
                 line = await self.reader.readline()
                 if not line: break
                 msg = json.loads(line.decode())
-                self.call_from_thread(self.handle_server_message, msg)
-            except: break
+                # Using call_from_thread is safer for UI updates from a worker
+                self.app.call_from_thread(self.handle_server_message, msg)
+            except Exception as e:
+                # print(f"Listener error: {e}")
+                break
 
     def send_message(self, msg):
         if self.writer:
@@ -384,17 +387,22 @@ class ClientApp(App):
             new_block.full_output = data["output"]
 
         self.blocks[b_id] = new_block
-        container.mount(new_block)
 
-        if data["type"] == "CMD":
-            new_block.update_status(data["status"])
-            if data["output"]:
-                new_block.query_one("#output").update(Text.from_ansi(data["output"]))
+        # Ensure we mount to the container
+        async def do_mount():
+            await container.mount(new_block)
 
-        if data["locked_by"]:
-             new_block.update_lock(data["locked_by"], self.users.get(data["locked_by"], "white"))
+            if data["type"] == "CMD":
+                new_block.update_status(data["status"])
+                if data["output"]:
+                    new_block.query_one("#output").update(Text.from_ansi(data["output"]))
 
-        new_block.scroll_visible()
+            if data["locked_by"]:
+                new_block.update_lock(data["locked_by"], self.users.get(data["locked_by"], "white"))
+
+            new_block.scroll_visible()
+
+        asyncio.create_task(do_mount())
 
     def action_toggle_mode(self):
         self.input_mode = "NOTE" if self.input_mode == "CMD" else "CMD"
