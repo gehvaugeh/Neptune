@@ -91,6 +91,28 @@ class ImportNotebookModal(ModalScreen):
     def import_nb(self):
         self.dismiss(self.query_one("#file_name").value)
 
+class SaveWorkflowModal(ModalScreen):
+    def __init__(self, text: str):
+        super().__init__()
+        self.text = text
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal_dialog"):
+            yield Label("[bold magenta]Save as Workflow[/]")
+            yield Input(placeholder="Name...", id="wf_name")
+            yield TextArea(self.text, id="wf_cmd", language="bash")
+            with Horizontal(id="modal_buttons"):
+                yield Button("Cancel", variant="error", id="cancel")
+                yield Button("Save", variant="success", id="save")
+    @on(Button.Pressed, "#cancel")
+    def cancel(self): self.dismiss(None)
+    @on(Button.Pressed, "#save")
+    def save(self):
+        n, c = self.query_one("#wf_name").value, self.query_one("#wf_cmd").text
+        if n and c:
+            wfs = load_workflows(); wfs.append({"name": n, "cmd": c})
+            with open(WORKFLOW_FILE, "w") as f: json.dump(wfs, f, indent=4)
+            self.dismiss(True)
+
 # --- BLOCKS ---
 
 class BaseBlock(Static):
@@ -214,6 +236,7 @@ class ClientApp(App):
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+n", "toggle_mode", "CMD/NOTE"),
         Binding("ctrl+j", "submit", "Execute"),
+        Binding("ctrl+s", "save_wf_dialog", "Save WF"),
         Binding("ctrl+e", "save_notebook_dialog", "Export MD"),
         Binding("ctrl+i", "import_notebook_dialog", "Import MD"),
         Binding("shift+up", "move_up", "Move Up"),
@@ -382,6 +405,21 @@ class ClientApp(App):
         if not content: return
         ta.text = ""; self.query_one("#palette").remove_class("visible")
         self.history.add(content)
+
+        # Handle local directory changes for CD commands
+        if self.input_mode == "CMD" and content.startswith("cd "):
+            try:
+                target = content[3:].strip()
+                if not target: target = "~"
+                os.chdir(os.path.expanduser(target))
+                # Add a separator block or notification for the CD
+                container = self.query_one("#command_history")
+                container.mount(Label(f"[dim]➜ {os.getcwd()}[/]"))
+                return
+            except Exception as e:
+                self.notify(f"CD Error: {e}", variant="error")
+                return
+
         self.send_message({
             "type": "submit",
             "mode": self.input_mode,
@@ -409,8 +447,8 @@ class ClientApp(App):
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
-            self.notify(f"Gespeichert: {filename}", variant="success")
-        except Exception as e: self.notify(f"Fehler: {e}", variant="error")
+            self.notify(f"Notebook Saved: {filename}", variant="success")
+        except Exception as e: self.notify(f"Save Error: {e}", variant="error")
 
     def import_notebook(self, filename: str):
         if not filename or not os.path.exists(filename): return
@@ -439,9 +477,9 @@ class ClientApp(App):
                 if clean_after: new_blocks.append({"type": "NOTE", "content": clean_after})
 
             self.send_message({"type": "import_blocks", "blocks": new_blocks})
-            self.notify(f"Importiert: {filename}", variant="success")
+            self.notify(f"Notebook Imported: {filename}", variant="success")
         except Exception as e:
-            self.notify(f"Fehler beim Import: {e}", variant="error")
+            self.notify(f"Import Error: {e}", variant="error")
 
     def action_move_up(self):
         focused = self.focused
@@ -452,6 +490,9 @@ class ClientApp(App):
         focused = self.focused
         if focused and isinstance(focused, BaseBlock):
             self.send_message({"type": "move_block", "block_id": focused.block_id, "direction": "down"})
+
+    def action_save_wf_dialog(self):
+        self.push_screen(SaveWorkflowModal(self.query_one("#main_input").text), lambda s: s and setattr(self, 'workflows', load_workflows()))
 
     # --- PALETTE LOGIC ---
     def _get_current_token(self, text: str) -> str:
