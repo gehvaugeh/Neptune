@@ -59,6 +59,38 @@ class HistoryManager:
         q = query.lower()
         return [c for c in self.cache if q in c.lower()][-15:]
 
+# --- MODALE DIALOGE ---
+
+class SaveNotebookModal(ModalScreen):
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal_dialog"):
+            yield Label("[bold cyan]Notebook exportieren (.md)[/]")
+            yield Input(placeholder="dateiname.md", id="file_name", value=f"session_{int(time.time())}.md")
+            with Horizontal(id="modal_buttons"):
+                yield Button("Abbrechen", variant="error", id="cancel")
+                yield Button("Exportieren", variant="success", id="export")
+    @on(Button.Pressed, "#cancel")
+    def cancel(self): self.dismiss(None)
+    @on(Button.Pressed, "#export")
+    def export(self):
+        name = self.query_one("#file_name").value
+        if not name.endswith(".md"): name += ".md"
+        self.dismiss(name)
+
+class ImportNotebookModal(ModalScreen):
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal_dialog"):
+            yield Label("[bold magenta]Notebook importieren (.md)[/]")
+            yield Input(placeholder="dateiname.md", id="file_name")
+            with Horizontal(id="modal_buttons"):
+                yield Button("Abbrechen", variant="error", id="cancel")
+                yield Button("Importieren", variant="success", id="import")
+    @on(Button.Pressed, "#cancel")
+    def cancel(self): self.dismiss(None)
+    @on(Button.Pressed, "#import")
+    def import_nb(self):
+        self.dismiss(self.query_one("#file_name").value)
+
 # --- BLOCKS ---
 
 class BaseBlock(Static):
@@ -182,6 +214,10 @@ class ClientApp(App):
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+n", "toggle_mode", "CMD/NOTE"),
         Binding("ctrl+j", "submit", "Execute"),
+        Binding("ctrl+e", "save_notebook_dialog", "Export MD"),
+        Binding("ctrl+i", "import_notebook_dialog", "Import MD"),
+        Binding("shift+up", "move_up", "Move Up"),
+        Binding("shift+down", "move_down", "Move Down"),
         Binding("escape", "close_palette", "Close")
     ]
 
@@ -243,8 +279,14 @@ class ClientApp(App):
         msg_type = msg.get("type")
 
         if msg_type == "init":
-            self.user_id = msg.get("your_id")
+            new_id = msg.get("your_id")
+            if new_id and new_id != "all":
+                self.user_id = new_id
             self.users = msg.get("users", {})
+            # Clear UI and local blocks to avoid duplicates
+            for b_id in list(self.blocks.keys()):
+                self.blocks[b_id].remove()
+            self.blocks = {}
             for block_data in msg.get("blocks", []):
                 self.create_block(block_data)
 
@@ -261,6 +303,16 @@ class ClientApp(App):
 
         elif msg_type == "new_block":
             self.create_block(msg.get("block"))
+
+        elif msg_type == "reorder":
+            container = self.query_one("#command_history")
+            # Clear all blocks and recreate in new order
+            # This is simpler than manual moving in Textual for now
+            for b_id in list(self.blocks.keys()):
+                self.blocks[b_id].remove()
+            self.blocks = {}
+            for block_data in msg.get("blocks", []):
+                self.create_block(block_data)
 
         elif msg_type == "update_block":
             data = msg.get("block")
@@ -337,11 +389,81 @@ class ClientApp(App):
             "cwd": os.getcwd()
         })
 
+    # --- EXPORT / IMPORT LOGIC ---
+    def action_save_notebook_dialog(self):
+        self.push_screen(SaveNotebookModal(), self.export_notebook)
+
+    def action_import_notebook_dialog(self):
+        self.push_screen(ImportNotebookModal(), self.import_notebook)
+
+    def export_notebook(self, filename: str):
+        if not filename: return
+        md_output = [f"# Shell Notebook Export - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
+        for block_id, widget in self.blocks.items():
+            if isinstance(widget, NoteBlock):
+                md_output.append(f"{widget.content}\n")
+            elif isinstance(widget, CommandBlock):
+                md_output.append(f"```bash\n{widget.content}\n```\n")
+                if widget.full_output.strip():
+                    clean = re.sub(r'\x1B[@-_][0-?]*[ -/]*[@-~]', '', widget.full_output)
+                    md_output.append(f"```text\n{clean.strip()}\n```\n")
+        try:
+            with open(filename, "w") as f: f.write("\n".join(md_output))
+            self.notify(f"Gespeichert: {filename}", variant="success")
+        except Exception as e: self.notify(f"Fehler: {e}", variant="error")
+
+    def import_notebook(self, filename: str):
+        if not filename or not os.path.exists(filename): return
+        try:
+            with open(filename, "r") as f: content = f.read()
+            pattern = re.compile(r'```(bash|text)\n(.*?)\n```', re.DOTALL)
+            last_pos = 0
+            new_blocks = []
+            matches = list(pattern.finditer(content))
+            for match in matches:
+                before = content[last_pos:match.start()].strip()
+                if before:
+                    lines = [l for l in before.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
+                    clean_before = "\n".join(lines).strip()
+                    if clean_before: new_blocks.append({"type": "NOTE", "content": clean_before})
+                lang, code = match.groups()
+                if lang == "bash":
+                    new_blocks.append({"type": "CMD", "content": code, "cwd": os.getcwd()})
+                elif lang == "text" and new_blocks and new_blocks[-1]["type"] == "CMD":
+                    new_blocks[-1]["output"] = code
+                last_pos = match.end()
+            after = content[last_pos:].strip()
+            if after:
+                lines = [l for l in after.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
+                clean_after = "\n".join(lines).strip()
+                if clean_after: new_blocks.append({"type": "NOTE", "content": clean_after})
+
+            self.send_message({"type": "import_blocks", "blocks": new_blocks})
+            self.notify(f"Importiert: {filename}", variant="success")
+        except Exception as e:
+            self.notify(f"Fehler beim Import: {e}", variant="error")
+
+    def action_move_up(self):
+        focused = self.focused
+        if focused and isinstance(focused, BaseBlock):
+            self.send_message({"type": "move_block", "block_id": focused.block_id, "direction": "up"})
+
+    def action_move_down(self):
+        focused = self.focused
+        if focused and isinstance(focused, BaseBlock):
+            self.send_message({"type": "move_block", "block_id": focused.block_id, "direction": "down"})
+
     # --- PALETTE LOGIC ---
+    def _get_current_token(self, text: str) -> str:
+        if not text or text.endswith(" "): return ""
+        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
+        return parts[-1] if parts else ""
+
     def update_palette(self, val: str):
         p = self.query_one("#palette"); p.clear_options()
-        if not val.strip(): p.remove_class("visible"); return
-        parts = val.split(); last = parts[-1] if parts else ""
+        if not val.strip() and not val.endswith(" "): p.remove_class("visible"); return
+        token = self._get_current_token(val)
+        last = token.strip("\"'")
         d_p = os.path.dirname(last) if last else ""; f_q = os.path.basename(last) if last else ""
         ex_d = os.path.expanduser(d_p) if d_p else "."
         try:
@@ -366,8 +488,13 @@ class ClientApp(App):
         label = str(option.prompt)
         inp = self.query_one("#main_input"); self._suppress_search = True
         if "[green]Path:[/]" in label:
-            path = label.split("] ")[1]; parts = inp.text.rsplit(None, 1)
-            inp.text = (parts[0] + " " + path) if len(parts) > 1 else path
+            path = label.split("] ")[1]
+            if " " in path: path = f'"{path}"'
+            token = self._get_current_token(inp.text)
+            if token:
+                inp.text = inp.text[:inp.text.rfind(token)] + path
+            else:
+                inp.text += path
         else:
             cmd = label.split("] ", 1)[1]
             if "[cyan]WF:[/]" in label:

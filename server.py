@@ -119,6 +119,29 @@ async def handle_client(reader, writer):
                     block["locked_by"] = None
                     await broadcast({"type": "unlock", "block_id": block_id})
 
+            elif msg_type == "move_block":
+                block_id = msg.get("block_id")
+                direction = msg.get("direction") # "up" or "down"
+
+                idx = next((i for i, b in enumerate(state.blocks) if b["id"] == block_id), -1)
+                if idx != -1:
+                    new_idx = idx - 1 if direction == "up" else idx + 1
+                    if 0 <= new_idx < len(state.blocks):
+                        state.blocks[idx], state.blocks[new_idx] = state.blocks[new_idx], state.blocks[idx]
+                        await broadcast({"type": "reorder", "blocks": state.blocks})
+
+            elif msg_type == "import_blocks":
+                new_blocks = msg.get("blocks")
+                # Clear and replace or append? For import notebook, usually replace
+                state.blocks = []
+                for b_data in new_blocks:
+                    block = state.add_block(b_data["type"], b_data["content"], b_data.get("cwd"))
+                    block["output"] = b_data.get("output", "")
+                    block["status"] = b_data.get("status", "ready")
+
+                # Broadcast reorder/refresh instead of init to avoid overwriting user_id
+                await broadcast({"type": "reorder", "blocks": state.blocks})
+
     except Exception as e:
         print(f"Error handling client {user_id}: {e}")
     finally:
