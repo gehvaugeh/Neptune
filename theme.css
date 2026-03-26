@@ -12,7 +12,9 @@ Screen {
 
 /* Fixierte Eingabe-Zone unten */
 #input_area {
-    height: 8;
+    height: auto;
+    min-height: 4;
+    max-height: 12;
     dock: bottom;
     background: #080808;
     border-top: solid #333;
@@ -20,7 +22,9 @@ Screen {
 }
 
 #main_input {
-    height: 5;
+    height: auto;
+    min-height: 3;
+    max-height: 10;
     border: solid #222;
     background: #080808;
     color: #00ff00;

@@ -273,8 +273,14 @@ class ClientApp(App):
             yield TextArea(language="bash", id="main_input")
         yield Footer()
 
-    async def on_mount(self):
-        await self.connect_to_server()
+    def on_mount(self):
+        self.run_worker(self.connect_to_server())
+        # We need to wait a bit or use call_later to ensure the layout is settled
+        # before focusing, although query_one should work here.
+        self.query_one("#main_input").focus()
+
+    def on_ready(self):
+        # Explicitly focus again when app is ready
         self.query_one("#main_input").focus()
 
     async def connect_to_server(self):
@@ -292,9 +298,12 @@ class ClientApp(App):
                 line = await self.reader.readline()
                 if not line: break
                 msg = json.loads(line.decode())
-                await self.handle_server_message(msg)
+                # Use call_from_thread to ensure handle_server_message runs in the main thread
+                # since it performs UI operations (mount, remove, etc.)
+                self.call_from_thread(self.handle_server_message, msg)
             except Exception as e:
-                # logging.error(f"Listener error: {e}")
+                with open("client_error.log", "a") as f:
+                    f.write(f"{time.ctime()}: Listener loop error: {e}\n")
                 break
 
     def send_message(self, msg):
@@ -304,6 +313,8 @@ class ClientApp(App):
 
     async def handle_server_message(self, msg):
         msg_type = msg.get("type")
+        with open("client_debug.log", "a") as f:
+            f.write(f"{time.ctime()}: Handling {msg_type}\n")
 
         if msg_type == "init":
             new_id = msg.get("your_id")
@@ -312,10 +323,11 @@ class ClientApp(App):
             self.users = msg.get("users", {})
             # Clear UI and local blocks to avoid duplicates
             for b_id in list(self.blocks.keys()):
-                self.blocks[b_id].remove()
+                try: self.blocks[b_id].remove()
+                except: pass
             self.blocks = {}
             for block_data in msg.get("blocks", []):
-                await self.create_block(block_data)
+                self.create_block(block_data)
 
         elif msg_type == "user_join":
             u_id, u_col = msg.get("user_id"), msg.get("color")
@@ -329,15 +341,16 @@ class ClientApp(App):
                 self.notify(f"User {u_id[:4]} left", variant="info")
 
         elif msg_type == "new_block":
-            await self.create_block(msg.get("block"))
+            self.create_block(msg.get("block"))
 
         elif msg_type == "reorder":
             # Clear all blocks and recreate in new order
             for b_id in list(self.blocks.keys()):
-                self.blocks[b_id].remove()
+                try: self.blocks[b_id].remove()
+                except: pass
             self.blocks = {}
             for block_data in msg.get("blocks", []):
-                await self.create_block(block_data)
+                self.create_block(block_data)
 
         elif msg_type == "update_block":
             data = msg.get("block")
@@ -372,7 +385,7 @@ class ClientApp(App):
             if b_id in self.blocks:
                 self.blocks[b_id].update_lock(None, None)
 
-    async def create_block(self, data):
+    def create_block(self, data):
         b_id = data["id"]
         if b_id in self.blocks: return # Avoid duplicates
 
@@ -385,7 +398,7 @@ class ClientApp(App):
         self.blocks[b_id] = new_block
 
         container = self.query_one("#command_history")
-        await container.mount(new_block)
+        container.mount(new_block)
 
         if data["type"] == "CMD":
             new_block.update_status(data["status"])
