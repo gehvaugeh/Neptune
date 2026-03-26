@@ -59,6 +59,7 @@ state = ServerState()
 
 async def broadcast(message):
     data = json.dumps(message).encode() + b"\n"
+    logging.debug(f"Broadcasting: {message.get('type')}")
     for writer in list(state.clients.keys()):
         asyncio.create_task(send_to_client(writer, data))
 
@@ -67,9 +68,9 @@ async def send_to_client(writer, data):
         if not writer.is_closing():
             writer.write(data)
             await asyncio.wait_for(writer.drain(), timeout=2.0)
-    except Exception:
+    except Exception as e:
         if writer in state.clients:
-            logging.info(f"Removing unresponsive client: {state.clients[writer]['id']}")
+            logging.error(f"Removing unresponsive client {state.clients[writer]['id']}: {e}")
             del state.clients[writer]
 
 async def handle_client(reader, writer):

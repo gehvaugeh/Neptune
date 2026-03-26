@@ -297,10 +297,16 @@ class ClientApp(App):
             try:
                 line = await self.reader.readline()
                 if not line: break
-                msg = json.loads(line.decode())
-                # Use call_from_thread to ensure handle_server_message runs in the main thread
-                # since it performs UI operations (mount, remove, etc.)
-                self.call_from_thread(self.handle_server_message, msg)
+                try:
+                    msg = json.loads(line.decode())
+                except json.JSONDecodeError as e:
+                    with open("client_error.log", "a") as f:
+                        f.write(f"{time.ctime()}: JSON Decode Error: {e} | Line: {line}\n")
+                    continue
+
+                # We are already in an async worker (exclusive=True)
+                # handle_server_message must be awaited
+                await self.handle_server_message(msg)
             except Exception as e:
                 with open("client_error.log", "a") as f:
                     f.write(f"{time.ctime()}: Listener loop error: {e}\n")
@@ -327,7 +333,7 @@ class ClientApp(App):
                 except: pass
             self.blocks = {}
             for block_data in msg.get("blocks", []):
-                self.create_block(block_data)
+                await self.create_block(block_data)
 
         elif msg_type == "user_join":
             u_id, u_col = msg.get("user_id"), msg.get("color")
@@ -341,7 +347,7 @@ class ClientApp(App):
                 self.notify(f"User {u_id[:4]} left", variant="info")
 
         elif msg_type == "new_block":
-            self.create_block(msg.get("block"))
+            await self.create_block(msg.get("block"))
 
         elif msg_type == "reorder":
             # Clear all blocks and recreate in new order
@@ -350,7 +356,7 @@ class ClientApp(App):
                 except: pass
             self.blocks = {}
             for block_data in msg.get("blocks", []):
-                self.create_block(block_data)
+                await self.create_block(block_data)
 
         elif msg_type == "update_block":
             data = msg.get("block")
@@ -385,7 +391,7 @@ class ClientApp(App):
             if b_id in self.blocks:
                 self.blocks[b_id].update_lock(None, None)
 
-    def create_block(self, data):
+    async def create_block(self, data):
         b_id = data["id"]
         if b_id in self.blocks: return # Avoid duplicates
 
@@ -398,7 +404,7 @@ class ClientApp(App):
         self.blocks[b_id] = new_block
 
         container = self.query_one("#command_history")
-        container.mount(new_block)
+        await container.mount(new_block)
 
         if data["type"] == "CMD":
             new_block.update_status(data["status"])
