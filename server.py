@@ -5,10 +5,11 @@ import pty
 import subprocess
 import uuid
 import signal
+import argparse
 from typing import Dict, List, Any
 
-SOCKET_PATH = "/tmp/gemmi_shell.sock"
-BASH_EXE = "/data/data/com.termux/files/usr/bin/bash" if os.path.exists("/data/data/com.termux/files/usr/bin/bash") else "/bin/bash"
+DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
+DEFAULT_SHELL = os.environ.get("SHELL") or ("/data/data/com.termux/files/usr/bin/bash" if os.path.exists("/data/data/com.termux/files/usr/bin/bash") else "/bin/bash")
 
 class ServerState:
     def __init__(self):
@@ -84,7 +85,7 @@ async def handle_client(reader, writer):
                 await broadcast({"type": "new_block", "block": block})
 
                 if mode == "CMD":
-                    asyncio.create_task(run_process(block))
+                    asyncio.create_task(run_process(block, DEFAULT_SHELL))
 
             elif msg_type == "edit_start":
                 block_id = msg.get("block_id")
@@ -110,7 +111,7 @@ async def handle_client(reader, writer):
 
                     if block["type"] == "CMD":
                         block["output"] = ""
-                        asyncio.create_task(run_process(block))
+                        asyncio.create_task(run_process(block, DEFAULT_SHELL))
 
             elif msg_type == "edit_cancel":
                 block_id = msg.get("block_id")
@@ -157,7 +158,7 @@ async def handle_client(reader, writer):
         writer.close()
         await writer.wait_closed()
 
-async def run_process(block):
+async def run_process(block, shell_exe):
     block_id = block["id"]
     cmd = block["content"]
     cwd = block["cwd"]
@@ -167,15 +168,12 @@ async def run_process(block):
 
     m, s = pty.openpty()
     try:
-        # We need to use os.chdir temporarily or pass cwd to Popen
-        # Note: changing global cwd might be risky if multiple processes start at same time
-        # But subprocess.Popen has cwd argument
         p = await asyncio.create_subprocess_shell(
             cmd,
             stdout=s,
             stderr=s,
             stdin=s,
-            executable=BASH_EXE,
+            executable=shell_exe,
             cwd=cwd,
             preexec_fn=os.setsid
         )
@@ -211,21 +209,27 @@ async def run_process(block):
         if block_id in state.active_processes:
             del state.active_processes[block_id]
 
-async def main():
-    if os.path.exists(SOCKET_PATH):
-        os.remove(SOCKET_PATH)
+async def main(socket_path):
+    if os.path.exists(socket_path):
+        os.remove(socket_path)
 
-    server = await asyncio.start_unix_server(handle_client, SOCKET_PATH)
-    print(f"Server started on {SOCKET_PATH}")
+    server = await asyncio.start_unix_server(handle_client, socket_path)
+    print(f"Server started on {socket_path}")
+    print(f"Using shell: {DEFAULT_SHELL}")
 
     async with server:
-        await server.serve_forever()
+        try:
+            await server.serve_forever()
+        finally:
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Gemmi-Shell Server")
+    parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
+    args = parser.parse_args()
+
     try:
-        asyncio.run(main())
+        asyncio.run(main(args.socket))
     except KeyboardInterrupt:
         pass
-    finally:
-        if os.path.exists(SOCKET_PATH):
-            os.remove(SOCKET_PATH)

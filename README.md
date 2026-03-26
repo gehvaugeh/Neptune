@@ -16,14 +16,19 @@ Gemmi-Shell is a notebook-style terminal and collaborative editor designed for T
 ### 1. Start the Server
 The server manages the session state and executes commands.
 ```bash
-python3 server.py
+python3 server.py [-s /path/to/socket]
 ```
 *The server listens on `/tmp/gemmi_shell.sock` by default.*
 
 ### 2. Start the Client
 Open a new terminal and start the client. You can start multiple clients to collaborate.
 ```bash
-python3 client.py
+python3 client.py [-s /path/to/socket]
+```
+
+### Alternatively, use the Launcher
+```bash
+python3 main.py all [-s /path/to/socket]
 ```
 
 ## Keyboard Shortcuts

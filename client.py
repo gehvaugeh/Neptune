@@ -4,6 +4,7 @@ import asyncio
 import random
 import re
 import time
+import argparse
 from typing import List, Dict
 
 from rich.text import Text
@@ -14,7 +15,7 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work, on, events
 
-SOCKET_PATH = "/tmp/gemmi_shell.sock"
+DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
 THEME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "theme.css")
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.txt")
 WORKFLOW_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "termux_workflows.json")
@@ -244,8 +245,9 @@ class ClientApp(App):
         Binding("escape", "close_palette", "Close")
     ]
 
-    def __init__(self):
+    def __init__(self, socket_path=DEFAULT_SOCKET_PATH):
         super().__init__()
+        self.socket_path = socket_path
         self.history = HistoryManager()
         self.input_mode = "CMD"
         self.user_color = get_random_bright_color()
@@ -277,7 +279,7 @@ class ClientApp(App):
 
     async def connect_to_server(self):
         try:
-            self.reader, self.writer = await asyncio.open_unix_connection(SOCKET_PATH)
+            self.reader, self.writer = await asyncio.open_unix_connection(self.socket_path)
             self.send_message({"type": "connect", "color": self.user_color})
             self.listen_to_server()
         except Exception as e:
@@ -593,4 +595,7 @@ class ClientApp(App):
         self.history.save()
 
 if __name__ == "__main__":
-    ClientApp().run()
+    parser = argparse.ArgumentParser(description="Gemmi-Shell Client")
+    parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
+    args = parser.parse_args()
+    ClientApp(socket_path=args.socket).run()
