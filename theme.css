@@ -1,8 +1,20 @@
 /* Basis-Setup für die Gemmi-Shell - Multi-User Vimify Theme */
 
+$bg-dark: #050505;
+$bg-input: #0a0a0a;
+$bg-block: #080808;
+$bg-focus: #0c0c0c;
+$purple-primary: #7c4dff;
+$purple-dim: #311b92;
+$text-main: #eeeeee;
+$text-dim: #757575;
+$success: #00e676;
+$error: #ff5252;
+$border: #1a1a1a;
+
 Screen {
-    background: #050505;
-    color: #eeeeee;
+    background: $bg-dark;
+    color: $text-main;
 }
 
 #command_history {
@@ -16,8 +28,8 @@ Screen {
     dock: bottom;
     height: auto;
     max-height: 12;
-    background: #0a0a0a;
-    border-top: solid #1a1a1a;
+    background: $bg-input;
+    border-top: solid $border;
     padding-bottom: 0;
 }
 
@@ -30,8 +42,8 @@ Screen {
     min-height: 1;
     max-height: 8;
     border: none;
-    background: #0a0a0a;
-    color: #eeeeee;
+    background: $bg-input;
+    color: $text-main;
 }
 
 #mode_indicator {
@@ -39,6 +51,7 @@ Screen {
     padding: 0 1;
     height: 1;
     text-style: bold;
+    color: $purple-primary;
 }
 
 #user_indicator {
@@ -54,19 +67,19 @@ CommandBlock, NoteBlock {
     height: auto;
     min-height: 1;
     width: 100%;
-    border-left: solid #311b92;
+    border-left: solid $purple-dim;
     border-right: none;
-    background: #080808;
+    background: $bg-block;
 }
 
 /* Visueller Fokus beim Editieren oder Auswählen */
 CommandBlock:focus, NoteBlock:focus {
-    background: #0c0c0c;
-    border-left: solid #7c4dff;
+    background: $bg-focus;
+    border-left: solid $purple-primary;
 }
 
 NoteBlock {
-    border-left: solid #311b92;
+    border-left: solid $purple-dim;
 }
 
 .block-header {
@@ -75,7 +88,7 @@ NoteBlock {
 }
 
 .prompt-symbol {
-    color: #00e676;
+    color: $success;
     margin-right: 1;
 }
 
@@ -85,7 +98,7 @@ NoteBlock {
 }
 
 .block-output {
-    color: #757575;
+    color: $text-dim;
     height: auto;
     max-height: 40;
     margin: 0 0 0 3;
@@ -94,7 +107,7 @@ NoteBlock {
 
 .block-info {
     text-align: right;
-    color: #757575;
+    color: $text-dim;
     height: 1;
     margin-right: 1;
     text-style: dim;
@@ -111,7 +124,7 @@ NoteBlock {
     min-height: 1;
     max-height: 15;
     border: none;
-    background: #0a0a0a;
+    background: $bg-input;
     margin: 0;
     padding: 0;
     width: 100%;
@@ -122,12 +135,11 @@ NoteBlock {
 }
 
 .running {
-    border-left: solid #00e676;
+    border-left: solid $success;
 }
 
 .locked-remote {
     background: #1a1010;
-    border-right: thick red;
 }
 
 .locked-local {
@@ -137,7 +149,7 @@ NoteBlock {
 #filter_bar {
     height: 3;
     background: #111;
-    border-bottom: solid #333;
+    border-bottom: solid $border;
     padding: 0 1;
     align: middle left;
 }
@@ -145,7 +157,7 @@ NoteBlock {
 #filter_input {
     width: 1fr;
     border: none;
-    background: #080808;
+    background: $bg-block;
 }
 
 .filtered-out {
@@ -156,9 +168,9 @@ NoteBlock {
 #palette {
     display: none;
     max-height: 10;
-    background: #080808;
-    border-bottom: solid #1a1a1a;
-    color: #eeeeee;
+    background: $bg-block;
+    border-bottom: solid $border;
+    color: $text-main;
 }
 
 #palette.visible {
@@ -168,8 +180,8 @@ NoteBlock {
 /* Modals */
 #modal_dialog {
     padding: 1 2;
-    background: #080808;
-    border: solid #1a1a1a;
+    background: $bg-block;
+    border: solid $border;
     width: 60;
     height: auto;
     align: center middle;
