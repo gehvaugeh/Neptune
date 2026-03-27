@@ -159,6 +159,10 @@ class BaseBlock(Static):
             self.remove_class("locked-remote")
             self.remove_class("locked-local")
 
+    def on_focus(self, event: events.Focus) -> None:
+        if self.is_editing:
+            self.query_one("#block_text_edit").focus()
+
 class NoteBlock(BaseBlock):
     def compose(self) -> ComposeResult:
         yield Markdown(self.content, id="md_render", classes="markdown-content")
@@ -190,6 +194,8 @@ class NoteBlock(BaseBlock):
     async def on_key(self, event: events.Key):
         if not self.is_editing and event.key == "e": await self.toggle_edit()
         elif self.is_editing and event.key == "ctrl+j": await self.toggle_edit()
+        elif not self.is_editing and event.key == "ctrl+c":
+            await self.app_ref.send_message({"type": "stop_process", "block_id": self.block_id})
 
 class CommandBlock(BaseBlock):
     def __init__(self, block_id, command, cwd, app_ref, **kwargs):
@@ -260,6 +266,7 @@ class ClientApp(App):
         Binding("ctrl+i", "import_notebook_dialog", "Import MD"),
         Binding("shift+up", "move_up", "Move Up"),
         Binding("shift+down", "move_down", "Move Down"),
+        Binding("ctrl+x", "delete_block", "Delete"),
         Binding("escape", "close_palette", "Close")
     ]
 
@@ -347,6 +354,10 @@ class ClientApp(App):
         logging.info(f"Processing server message: {msg_type}")
 
         if msg_type == "init":
+            focused_id = None
+            if self.focused and isinstance(self.focused, BaseBlock):
+                focused_id = self.focused.block_id
+
             new_id = msg.get("your_id")
             if new_id and new_id != "all":
                 self.user_id = new_id
@@ -359,6 +370,9 @@ class ClientApp(App):
             self.blocks = {}
             for block_data in msg.get("blocks", []):
                 await self.create_block(block_data)
+
+            if focused_id and focused_id in self.blocks:
+                self.blocks[focused_id].focus()
 
         elif msg_type == "user_join":
             u_id, u_col = msg.get("user_id"), msg.get("color")
@@ -422,6 +436,12 @@ class ClientApp(App):
             b_id = msg.get("block_id")
             if b_id in self.blocks:
                 self.blocks[b_id].update_lock(None, None)
+
+        elif msg_type == "remove_block":
+            b_id = msg.get("block_id")
+            if b_id in self.blocks:
+                self.blocks[b_id].remove()
+                del self.blocks[b_id]
 
     async def create_block(self, data):
         b_id = data["id"]
@@ -550,6 +570,14 @@ class ClientApp(App):
         if focused and isinstance(focused, BaseBlock):
             await self.send_message({"type": "move_block", "block_id": focused.block_id, "direction": "down"})
 
+    async def action_delete_block(self):
+        focused = self.focused
+        if focused and isinstance(focused, BaseBlock):
+            if focused.locked_by and focused.locked_by != self.user_id:
+                self.notify("Block is locked by another user", severity="warning")
+                return
+            await self.send_message({"type": "delete_block", "block_id": focused.block_id})
+
     def action_save_wf_dialog(self):
         self.push_screen(SaveWorkflowModal(self.query_one("#main_input").text), lambda s: s and setattr(self, 'workflows', load_workflows()))
 
@@ -641,7 +669,11 @@ class ClientApp(App):
                     if now - node.last_click_time < 0.4:
                         self.query_one("#main_input").text = node.content
                         self.query_one("#main_input").focus()
-                    else: node.focus()
+                    else:
+                        node.focus()
+                        # If already editing, focus the text area
+                        if node.is_editing:
+                            node.query_one("#block_text_edit").focus()
                     node.last_click_time = now; return
                 node = node.parent
         except: pass

@@ -177,6 +177,23 @@ async def handle_client(reader, writer):
                         state.blocks[idx], state.blocks[new_idx] = state.blocks[new_idx], state.blocks[idx]
                         await broadcast({"type": "reorder", "blocks": state.blocks})
 
+            elif msg_type == "delete_block":
+                block_id = msg.get("block_id")
+                state.blocks = [b for b in state.blocks if b["id"] != block_id]
+                if block_id in state.active_processes:
+                    p = state.active_processes[block_id]
+                    try: os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                    except: pass
+                    del state.active_processes[block_id]
+                await broadcast({"type": "remove_block", "block_id": block_id})
+
+            elif msg_type == "stop_process":
+                block_id = msg.get("block_id")
+                if block_id in state.active_processes:
+                    p = state.active_processes[block_id]
+                    try: os.killpg(os.getpgid(p.pid), signal.SIGINT)
+                    except: pass
+
             elif msg_type == "import_blocks":
                 new_blocks = msg.get("blocks")
                 state.blocks = []
