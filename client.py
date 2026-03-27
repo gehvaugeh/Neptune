@@ -171,7 +171,9 @@ class NoteBlock(BaseBlock):
 
     async def toggle_edit(self, remote=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
-            return # Block is locked by someone else
+            user_label = self.locked_by[:4] # Use short ID as fallback
+            self.app_ref.notify(f"Block is locked by user {user_label}", severity="warning")
+            return
 
         self.is_editing = not self.is_editing
         render, edit = self.query_one("#md_render"), self.query_one("#block_text_edit")
@@ -180,6 +182,9 @@ class NoteBlock(BaseBlock):
             render.add_class("hidden")
             edit.remove_class("hidden")
             if not remote:
+                # Move cursor to end
+                lines = edit.document.lines
+                edit.cursor_location = (len(lines)-1, len(lines[-1]))
                 edit.focus()
                 await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
         else:
@@ -229,6 +234,8 @@ class CommandBlock(BaseBlock):
 
     async def toggle_edit(self, remote=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
+            user_label = self.locked_by[:4]
+            self.app_ref.notify(f"Block is locked by user {user_label}", severity="warning")
             return
 
         self.is_editing = not self.is_editing
@@ -238,6 +245,8 @@ class CommandBlock(BaseBlock):
             label.add_class("hidden")
             edit.remove_class("hidden")
             if not remote:
+                lines = edit.document.lines
+                edit.cursor_location = (len(lines)-1, len(lines[-1]))
                 edit.focus()
                 await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
         else:
@@ -372,7 +381,7 @@ class ClientApp(App):
                 await self.create_block(block_data)
 
             if focused_id and focused_id in self.blocks:
-                self.blocks[focused_id].focus()
+                self.call_after_refresh(self.blocks[focused_id].focus)
 
         elif msg_type == "user_join":
             u_id, u_col = msg.get("user_id"), msg.get("color")
@@ -391,6 +400,10 @@ class ClientApp(App):
             self.refresh()
 
         elif msg_type == "reorder":
+            focused_id = None
+            if self.focused and isinstance(self.focused, BaseBlock):
+                focused_id = self.focused.block_id
+
             # Clear all blocks and recreate in new order
             container = self.query_one("#command_history")
             for b_id in list(self.blocks.keys()):
@@ -399,7 +412,10 @@ class ClientApp(App):
             self.blocks = {}
             for block_data in msg.get("blocks", []):
                 await self.create_block(block_data)
-            self.refresh()
+
+            if focused_id and focused_id in self.blocks:
+                # Use call_after_refresh to ensure focus is applied to the newly mounted widget
+                self.call_after_refresh(self.blocks[focused_id].focus)
 
         elif msg_type == "update_block":
             data = msg.get("block")
@@ -574,7 +590,8 @@ class ClientApp(App):
         focused = self.focused
         if focused and isinstance(focused, BaseBlock):
             if focused.locked_by and focused.locked_by != self.user_id:
-                self.notify("Block is locked by another user", severity="warning")
+                user_label = focused.locked_by[:4]
+                self.notify(f"Block is locked by user {user_label}", severity="warning")
                 return
             await self.send_message({"type": "delete_block", "block_id": focused.block_id})
 
