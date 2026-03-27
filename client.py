@@ -36,7 +36,7 @@ WORKFLOW_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "termux
 # --- UTILS ---
 
 def get_random_bright_color():
-    colors = ["cyan", "magenta", "yellow", "green", "bright_blue", "bright_red", "orange1", "spring_green1"]
+    colors = ["cyan", "magenta", "yellow", "green", "blue", "red", "orange", "springgreen"]
     return random.choice(colors)
 
 def fuzzy_match(query: str, target: str) -> bool:
@@ -145,14 +145,19 @@ class BaseBlock(Static):
         self.locked_by = user_id
         self.lock_color = user_color
         if user_id:
-            self.styles.border_right = ("solid", user_color)
+            # Visual feedback for lock: Right border in user's color
+            self.styles.border_right = ("thick", user_color)
             if user_id != self.app_ref.user_id:
                 self.query_one("#block_text_edit").disabled = True
+                self.add_class("locked-remote")
             else:
                 self.query_one("#block_text_edit").disabled = False
+                self.add_class("locked-local")
         else:
             self.styles.border_right = None
             self.query_one("#block_text_edit").disabled = False
+            self.remove_class("locked-remote")
+            self.remove_class("locked-local")
 
 class NoteBlock(BaseBlock):
     def compose(self) -> ComposeResult:
@@ -273,7 +278,6 @@ class ClientApp(App):
         self.workflows = load_workflows()
 
     def compose(self) -> ComposeResult:
-        yield Header()
         with ScrollableContainer(id="command_history"):
             yield Static("[bold magenta]Gemmi-Shell Multi-User | Collaborative Notebook[/]")
         yield OptionList(id="palette")
@@ -284,7 +288,6 @@ class ClientApp(App):
                 self.user_label = Label(f"User: [bold {self.user_color}]Me[/]", id="user_indicator")
                 yield self.user_label
             yield TextArea(language="bash", id="main_input")
-        yield Footer()
 
     def on_mount(self):
         self.run_worker(self.connect_to_server())

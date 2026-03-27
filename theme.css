@@ -125,6 +125,14 @@ NoteBlock:focus {
     border-left: solid yellow;
 }
 
+.locked-remote {
+    background: #1a1010;
+}
+
+.locked-local {
+    background: #101a10;
+}
+
 /* Autocomplete Palette */
 #palette {
     display: none;
