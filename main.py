@@ -8,6 +8,7 @@ import re
 from typing import List
 
 from rich.text import Text
+from rich.syntax import Syntax
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
 from textual.containers import Vertical, Horizontal, ScrollableContainer
@@ -30,6 +31,7 @@ def load_workflows():
     return [{"name": "System Update", "cmd": "pkg update && pkg upgrade"}]
 
 def fuzzy_match(query: str, target: str) -> bool:
+    if not query: return True
     query, target = query.lower(), target.lower()
     it = iter(target)
     return all(c in it for c in query)
@@ -53,8 +55,8 @@ class HistoryManager:
         with open(HISTORY_FILE, "w") as f:
             for cmd in self.cache: f.write(f"{cmd}\n")
     def get_matches(self, query: str):
-        q = query.lower()
-        return [c for c in self.cache if q in c.lower()][-15:]
+        if not query: return self.cache[-15:]
+        return [c for c in self.cache if fuzzy_match(query, c)][-15:]
 
 # --- MODALE DIALOGE ---
 
@@ -70,6 +72,22 @@ class SaveNotebookModal(ModalScreen):
     def cancel(self): self.dismiss(None)
     @on(Button.Pressed, "#export")
     def export(self):
+        name = self.query_one("#file_name").value
+        if not name.endswith(".md"): name += ".md"
+        self.dismiss(name)
+
+class ImportNotebookModal(ModalScreen):
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal_dialog"):
+            yield Label("[bold cyan]Notebook importieren (.md)[/]")
+            yield Input(placeholder="dateiname.md", id="file_name")
+            with Horizontal(id="modal_buttons"):
+                yield Button("Abbrechen", variant="error", id="cancel")
+                yield Button("Importieren", variant="success", id="import")
+    @on(Button.Pressed, "#cancel")
+    def cancel(self): self.dismiss(None)
+    @on(Button.Pressed, "#import")
+    def import_nb(self):
         name = self.query_one("#file_name").value
         if not name.endswith(".md"): name += ".md"
         self.dismiss(name)
@@ -125,35 +143,67 @@ class CommandBlock(Static):
         super().__init__(**kwargs)
         self.command, self.cwd, self.app_ref = command, cwd, app_ref
         self.full_output, self.proc_active, self.process, self.is_editing, self.last_click_time = "", False, None, False, 0
+        self.start_time = 0
     def compose(self) -> ComposeResult:
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
-            yield Label(f"[bold blue]{self.cwd}[/]\n[white]{self.command}[/]", id="cmd_label")
-            yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
+            with Vertical(classes="command-container"):
+                yield Label(f"[bold blue]{self.cwd}[/]", id="cwd_label")
+                with Static(id="cmd_wrapper"):
+                    yield Static(Syntax(self.command, "bash", theme="monokai"), id="cmd_syntax")
+                    yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
+
+    def update_status(self):
+        if self.proc_active:
+            elapsed = time.time() - self.start_time
+            self.query_one("#info").update(f"[yellow]⏳ {elapsed:.1f}s[/]")
     def append_output(self, text: str):
-        self.full_output += text
-        self.query_one("#output").update(Text.from_ansi(self.full_output))
+        # Basic terminal emulation for interactive commands like 'watch'
+        # \x1b[H (Home) or \x1b[2J (Clear Screen)
+        if "\x1b[H" in text or "\x1b[2J" in text:
+            idx = max(text.rfind("\x1b[H"), text.rfind("\x1b[2J"))
+            self.full_output = text[idx:]
+        else:
+            # Filter out some more problematic control sequences
+            # especially OSC sequences that might contain numbers and end with \x07 or \x1b\
+            text = re.sub(r'\x1b\][0-9]*;.*?\x07', '', text)
+            text = re.sub(r'\x1b\][0-9]*;.*?\x1b\\', '', text)
+            self.full_output += text
+
+        # Limit buffer to avoid performance issues
+        if len(self.full_output) > 30000:
+            self.full_output = "...(truncated)...\n" + self.full_output[-30000:]
+
+        try:
+            self.query_one("#output").update(Text.from_ansi(self.full_output))
+        except: pass
     def finish(self, code: int):
         self.proc_active = False
-        self.query_one("#info").update("[green]✅ OK[/]" if code == 0 else f"[red]❌ ERR({code})[/]")
+        elapsed = time.time() - self.start_time
+        status = "[green]✅ OK[/]" if code == 0 else f"[red]❌ ERR({code})[/]"
+        self.query_one("#info").update(f"{status} [dim]({elapsed:.1f}s)[/]")
         self.remove_class("running")
     def toggle_edit(self):
         self.is_editing = not self.is_editing
-        label, edit = self.query_one("#cmd_label"), self.query_one("#block_text_edit")
+        syntax, edit = self.query_one("#cmd_syntax"), self.query_one("#block_text_edit")
         if self.is_editing:
-            label.add_class("hidden"); edit.remove_class("hidden"); edit.focus()
+            syntax.add_class("hidden"); edit.remove_class("hidden"); edit.focus()
         else:
             self.command = edit.text
-            label.update(f"[bold blue]{self.cwd}[/]\n[white]{self.command}[/]")
-            label.remove_class("hidden"); edit.add_class("hidden"); self.run_process()
+            syntax.update(Syntax(self.command, "bash", theme="monokai"))
+            syntax.remove_class("hidden"); edit.add_class("hidden"); self.run_process()
+
     def run_process(self):
         self.full_output = ""; self.query_one("#output").update(""); self.add_class("running")
+        self.start_time = time.time()
         self.app_ref.start_process(self.command, self)
     def on_key(self, event: events.Key):
-        if not self.is_editing and event.key == "e": self.toggle_edit()
-        elif self.is_editing and event.key == "ctrl+j": self.toggle_edit()
+        if event.key == "e": self.toggle_edit()
+        elif event.key == "ctrl+j":
+            if self.is_editing: self.toggle_edit()
+            else: self.run_process()
         elif not self.is_editing and event.key == "ctrl+c" and self.process:
             try: os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
             except: pass
@@ -169,6 +219,11 @@ class ShellApp(App):
         Binding("ctrl+j", "submit", "Execute"),
         Binding("ctrl+s", "save_wf_dialog", "Save WF"),
         Binding("ctrl+e", "save_notebook_dialog", "Export MD"),
+        Binding("ctrl+l", "import_notebook_dialog", "Import MD"),
+        Binding("shift+up", "move_up", "Move Up"),
+        Binding("shift+down", "move_down", "Move Down"),
+        Binding("ctrl+x", "delete_block", "Delete Block"),
+        Binding("ctrl+f", "toggle_filter", "Filter"),
         Binding("escape", "close_palette", "Close")
     ]
 
@@ -179,29 +234,46 @@ class ShellApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        with Horizontal(id="filter_bar", classes="hidden"):
+            yield Label(" 🔍 Filter: ", id="filter_label")
+            yield Input(placeholder="Search blocks...", id="filter_input")
         with ScrollableContainer(id="command_history"):
-            yield Static("[bold magenta]Gemmi-Shell v12.0 | Notebook Chronicler[/]")
-        yield OptionList(id="palette")
-        with Vertical(id="input_area"):
-            self.mode_label = Label("[bold cyan]MODE: COMMAND[/]", id="mode_indicator")
+            yield Static("[bold #7c4dff]G E M M I - S H E L L[/] [bold #e1e1e6]v12.0[/] | [italic #88888e]Notebook Chronicler[/]")
+        with Vertical(id="bottom_dock"):
+            yield OptionList(id="palette")
+            self.mode_label = Label("[bold #7c4dff]MODE: COMMAND[/]", id="mode_indicator")
             yield self.mode_label
             yield TextArea(language="bash", id="main_input")
-        yield Footer()
 
     def on_mount(self):
         self.workflows = load_workflows(); self.query_one("#main_input").focus()
+        self.set_interval(0.5, self.update_running_statuses)
+
+    def update_running_statuses(self):
+        for widget in self.query_one("#command_history").children:
+            if isinstance(widget, CommandBlock) and widget.proc_active:
+                widget.update_status()
 
     def action_toggle_mode(self):
         self.input_mode = "NOTE" if self.input_mode == "CMD" else "CMD"
         c = "magenta" if self.input_mode == "NOTE" else "cyan"
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
-        self.query_one("#main_input").language = "markdown" if self.input_mode == "NOTE" else "bash"
+        inp = self.query_one("#main_input")
+        inp.language = "markdown" if self.input_mode == "NOTE" else "bash"
+        # Force re-render of input if possible or just focus
+        inp.focus()
 
     # --- PALETTE LOGIC ---
+    def _get_current_token(self, text: str) -> str:
+        if not text or text.endswith(" "): return ""
+        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
+        return parts[-1] if parts else ""
+
     def update_palette(self, val: str):
         p = self.query_one("#palette"); p.clear_options()
-        if not val.strip(): p.remove_class("visible"); return
-        parts = val.split(); last = parts[-1] if parts else ""
+        if not val.strip() and not val.endswith(" "): p.remove_class("visible"); return
+        token = self._get_current_token(val)
+        last = token.strip("\"'")
         d_p = os.path.dirname(last) if last else ""; f_q = os.path.basename(last) if last else ""
         ex_d = os.path.expanduser(d_p) if d_p else "."
         try:
@@ -226,8 +298,13 @@ class ShellApp(App):
         label = str(option.prompt)
         inp = self.query_one("#main_input"); self._suppress_search = True
         if "[green]Path:[/]" in label:
-            path = label.split("] ")[1]; parts = inp.text.rsplit(None, 1)
-            inp.text = (parts[0] + " " + path) if len(parts) > 1 else path
+            path = label.split("] ")[1]
+            if " " in path: path = f'"{path}"'
+            token = self._get_current_token(inp.text)
+            if token:
+                inp.text = inp.text[:inp.text.rfind(token)] + path
+            else:
+                inp.text += path
         else:
             cmd = label.split("] ", 1)[1]
             if "[cyan]WF:[/]" in label:
@@ -278,15 +355,22 @@ class ShellApp(App):
             if content.startswith("cd "):
                 try:
                     os.chdir(os.path.expanduser(content[3:].strip() or "~"))
-                    container.mount(Label(f"[dim]➜ {os.getcwd()}[/]")); return
+                    container.mount(Label(f"[dim]➜ {os.getcwd()}[/]"), after=0); return
                 except: pass
             new_block = CommandBlock(content, os.getcwd(), self)
-            container.mount(new_block); new_block.run_process()
+            container.mount(new_block)
+            new_block.run_process()
         new_block.scroll_visible()
 
     @work(exclusive=False, thread=True)
     def start_process(self, cmd: str, block: CommandBlock):
         m, s = pty.openpty()
+        # Set some sane terminal size to avoid weird wrapping/numbers (columns, rows)
+        try:
+            import fcntl, termios, struct
+            fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        except: pass
+
         try:
             p = subprocess.Popen(cmd, shell=True, executable=BASH_EXE, stdout=s, stderr=s, stdin=s,
                                  close_fds=True, preexec_fn=os.setsid)
@@ -302,9 +386,69 @@ class ShellApp(App):
             try: os.close(m)
             except: pass
 
-    # --- EXPORT LOGIC ---
+    # --- EXPORT / IMPORT LOGIC ---
     def action_save_notebook_dialog(self):
         self.push_screen(SaveNotebookModal(), self.export_notebook)
+
+    def action_import_notebook_dialog(self):
+        self.push_screen(ImportNotebookModal(), self.import_notebook)
+
+    def import_notebook(self, filename: str):
+        if not filename or not os.path.exists(filename): return
+        try:
+            with open(filename, "r") as f: content = f.read()
+            container = self.query_one("#command_history")
+            for child in container.children[1:]: child.remove()
+
+            # Match bash, sh, shell, or text blocks
+            pattern = re.compile(r'```(bash|sh|shell|text)\n(.*?)\n```', re.DOTALL)
+            last_pos = 0
+            last_command_block = None
+
+            matches = list(pattern.finditer(content))
+            for match in matches:
+                before = content[last_pos:match.start()].strip()
+                if before:
+                    # Filter out the generic header but keep other headers
+                    lines = [l for l in before.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
+                    clean_before = "\n".join(lines).strip()
+                    if clean_before:
+                        # Split by headers for better granularity if possible
+                        parts = re.split(r'(\n#+ .*)', "\n" + clean_before)
+                        current_part = ""
+                        for part in parts:
+                            if part.strip():
+                                if part.startswith("\n#"):
+                                    if current_part.strip(): container.mount(NoteBlock(current_part.strip()))
+                                    current_part = part
+                                else:
+                                    current_part += part
+                        if current_part.strip(): container.mount(NoteBlock(current_part.strip()))
+
+                lang, code = match.groups()
+                if lang in ("bash", "sh", "shell"):
+                    last_command_block = CommandBlock(code.strip(), os.getcwd(), self)
+                    container.mount(last_command_block)
+                elif lang == "text" and last_command_block:
+                    last_command_block.full_output = code.strip()
+                    try:
+                        last_command_block.query_one("#output").update(Text.from_ansi(last_command_block.full_output))
+                        last_command_block.query_one("#info").update("[blue]Imported[/]")
+                    except: pass
+                else:
+                    # Treat unknown or orphaned text block as a NoteBlock
+                    container.mount(NoteBlock(f"```text\n{code}\n```"))
+
+                last_pos = match.end()
+
+            after = content[last_pos:].strip()
+            if after:
+                lines = [l for l in after.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
+                clean_after = "\n".join(lines).strip()
+                if clean_after: container.mount(NoteBlock(clean_after))
+            self.notify(f"Importiert: {filename}", severity="information")
+        except Exception as e:
+            self.notify(f"Fehler beim Import: {e}", severity="error")
 
     def export_notebook(self, filename: str):
         if not filename: return
@@ -314,15 +458,17 @@ class ShellApp(App):
             if isinstance(widget, NoteBlock):
                 md_output.append(f"{widget.content}\n")
             elif isinstance(widget, CommandBlock):
-                md_output.append(f"{widget.content}\n")
+                md_output.append(f"```bash\n{widget.command}\n```\n")
 
                 if widget.full_output.strip():
-                    clean = re.sub(r'\x1B[@-_][0-?]*[ -/]*[@-~]', '', widget.full_output)
+                    # More comprehensive ANSI cleaning
+                    ansi_escape = re.compile(r'(?:\x1B[@-_]|[\x80-\x9F])[0-?]*[ -/]*[@-~]')
+                    clean = ansi_escape.sub('', widget.full_output)
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
-            self.notify(f"Gespeichert: {filename}", variant="success")
-        except Exception as e: self.notify(f"Fehler: {e}", variant="error")
+            self.notify(f"Gespeichert: {filename}", severity="information")
+        except Exception as e: self.notify(f"Fehler: {e}", severity="error")
 
     def on_click(self, event: events.Click):
         try:
@@ -341,6 +487,56 @@ class ShellApp(App):
 
     def action_save_wf_dialog(self):
         self.push_screen(SaveWorkflowModal(self.query_one("#main_input").text), lambda s: s and setattr(self, 'workflows', load_workflows()))
+    def action_move_up(self):
+        container = self.query_one("#command_history")
+        focused = self.focused
+        if focused and isinstance(focused, (CommandBlock, NoteBlock)):
+            idx = container.children.index(focused)
+            if idx > 1: container.move_child(focused, before=idx-1)
+
+    def action_move_down(self):
+        container = self.query_one("#command_history")
+        focused = self.focused
+        if focused and isinstance(focused, (CommandBlock, NoteBlock)):
+            idx = container.children.index(focused)
+            if idx < len(container.children) - 1: container.move_child(focused, after=idx+1)
+
+    def action_delete_block(self):
+        focused = self.focused
+        if focused and isinstance(focused, (CommandBlock, NoteBlock)):
+            if isinstance(focused, CommandBlock) and focused.process:
+                try: os.killpg(os.getpgid(focused.process.pid), signal.SIGTERM)
+                except: pass
+            focused.remove()
+            self.notify("Block gelöscht", severity="information")
+
+    def action_toggle_filter(self):
+        bar = self.query_one("#filter_bar")
+        if bar.has_class("hidden"):
+            bar.remove_class("hidden")
+            self.query_one("#filter_input").focus()
+        else:
+            bar.add_class("hidden")
+            self.query_one("#filter_input").value = ""
+            self.query_one("#main_input").focus()
+
+    @on(Input.Changed, "#filter_input")
+    def filter_blocks(self, event: Input.Changed):
+        query = event.value.lower()
+        container = self.query_one("#command_history")
+        for widget in container.children:
+            if isinstance(widget, (CommandBlock, NoteBlock)):
+                search_text = ""
+                if isinstance(widget, CommandBlock):
+                    search_text = (widget.command + widget.full_output).lower()
+                else:
+                    search_text = widget.content.lower()
+
+                if not query or query in search_text:
+                    widget.remove_class("filtered-out")
+                else:
+                    widget.add_class("filtered-out")
+
     def action_close_palette(self): self.query_one("#palette").remove_class("visible")
     def on_unmount(self): 
         self.history.save()

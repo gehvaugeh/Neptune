@@ -1,31 +1,50 @@
-/* Basis-Setup für die Gemmi-Shell */
+/* Basis-Setup für die Gemmi-Shell - Ultra Dark Theme */
+
+$bg-dark: #050505;
+$bg-input: #0a0a0a;
+$bg-block: #080808;
+$bg-focus: #0c0c0c;
+$purple-primary: #7c4dff;
+$purple-dim: #311b92;
+$text-main: #eeeeee;
+$text-dim: #757575;
+$success: #00e676;
+$error: #ff5252;
+$border: #1a1a1a;
+
 Screen {
-    background: #0c0c0c;
-    color: #eeeeee;
+    background: $bg-dark;
+    color: $text-main;
 }
 
 #command_history {
     height: 1fr;
     scrollbar-gutter: stable;
-    padding: 1 1 0 1;
+    padding: 0 1;
+    overflow-y: scroll;
 }
 
 /* Fixierte Eingabe-Zone unten */
+#bottom_dock {
+    dock: bottom;
+    height: auto;
+    max-height: 10;
+    background: $bg-input;
+    border-top: solid $border;
+    padding-bottom: 1;
+}
+
 #input_area {
     height: auto;
-    max-height: 15;
-    dock: bottom;
-    background: #080808;
-    border-top: solid #333;
-    padding: 0 1;
 }
 
 #main_input {
     height: auto;
-    min-height: 3;
+    min-height: 1;
+    max-height: 8;
     border: none;
-    background: #080808;
-    color: #00ff00;
+    background: $bg-input;
+    color: $text-main;
 }
 
 #mode_indicator {
@@ -33,6 +52,7 @@ Screen {
     padding: 0 1;
     height: 1;
     text-style: bold;
+    color: $purple-primary;
 }
 
 /* Block-Struktur für Notebook-Feeling */
@@ -40,84 +60,127 @@ CommandBlock, NoteBlock {
     margin: 0 0 1 0;
     padding: 0 0 0 1;
     height: auto;
+    min-height: 1;
     width: 100%;
-    border-left: solid #333;
+    border-left: solid $purple-dim;
+    background: $bg-block;
 }
 
 /* Visueller Fokus beim Editieren oder Auswählen */
 CommandBlock:focus, NoteBlock:focus {
-    background: #161616;
-    border-left: solid cyan;
+    background: $bg-focus;
+    border-left: solid $purple-primary;
 }
 
 NoteBlock {
-    border-left: double magenta;
-}
-
-NoteBlock:focus {
-    border-left: double magenta;
+    border-left: solid $purple-dim;
 }
 
 .block-header {
     height: auto;
-    padding-top: 1;
+    padding-top: 0;
 }
 
 .prompt-symbol {
-    color: #00ff00;
+    color: $success;
     margin-right: 1;
-    text-style: bold;
 }
 
-#cmd_label {
+#cwd_label {
+    width: 100%;
+    height: 1;
+    color: $text-dim;
+    text-style: italic;
+}
+
+#cmd_syntax {
     width: 100%;
     height: auto;
+    padding: 0;
+    margin: 0;
 }
 
 .block-output {
-    color: #cccccc;
+    color: $text-dim;
     height: auto;
-    max-height: 60;
+    max-height: 40;
     margin: 0 0 0 3;
     background: transparent;
 }
 
 .block-info {
     text-align: right;
-    color: #444;
+    color: $text-dim;
     height: 1;
     margin-right: 1;
+    text-style: dim;
 }
 
 .markdown-content {
     background: transparent;
-    padding: 1 2;
+    padding: 0 1;
+}
+
+.command-container {
+    width: 100%;
+    height: auto;
+}
+
+#cmd_wrapper {
+    height: auto;
+    width: 100%;
 }
 
 /* Editor innerhalb eines Blocks */
 #block_text_edit {
     height: auto;
-    min-height: 3;
+    min-height: 1;
     max-height: 15;
-    border: solid #444;
-    background: #111;
-    margin: 1 0;
+    border: none;
+    background: $bg-input;
+    margin: 0;
+    padding: 0;
+    width: 100%;
 }
 
 .hidden {
     display: none !important;
 }
 
-.running {
-    border-left: solid yellow;
+.filtered-out {
+    display: none !important;
 }
 
-/* Autocomplete Palette */
+#filter_bar {
+    height: 3;
+    background: $bg-input;
+    border-bottom: solid $purple-dim;
+    padding: 0 1;
+    align: left middle;
+}
+
+#filter_label {
+    color: $purple-primary;
+    text-style: bold;
+}
+
+#filter_input {
+    width: 1fr;
+    border: none;
+    background: $bg-input;
+    color: $text-main;
+}
+
+.running {
+    border-left: solid $success;
+}
+
 #palette {
     display: none;
     max-height: 10;
-    background: #1a1a1a;
-    border: solid #333;
+    background: $bg-block;
+    border-bottom: solid $border;
+    color: $text-main;
 }
 
 #palette.visible {
@@ -127,8 +190,8 @@ NoteBlock:focus {
 /* Modals */
 #modal_dialog {
     padding: 1 2;
-    background: #1e1e1e;
-    border: thick #444;
+    background: $bg-block;
+    border: solid $border;
     width: 60;
     height: auto;
     align: center middle;
@@ -139,5 +202,3 @@ NoteBlock:focus {
     height: 3;
     align: right middle;
 }
-
-
