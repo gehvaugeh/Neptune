@@ -24,6 +24,20 @@ def test_prefix_logic():
     # For now, let's just check if the logic in action_submit works as expected
     pass
 
+def test_modes():
+    app = ShellApp()
+    assert app.input_mode == "NORMAL"
+
+    # Simple mode change tests without TUI dependency
+    app.input_mode = "INPUT"
+    assert app.input_mode == "INPUT"
+
+    app.input_mode = "NORMAL"
+    assert app.input_mode == "NORMAL"
+
+    app.input_mode = "SELECTION"
+    assert app.input_mode == "SELECTION"
+
 def test_yank_paste_logic():
     app = ShellApp()
     nb = NoteBlock("test note")

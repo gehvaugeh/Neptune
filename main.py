@@ -134,7 +134,7 @@ class NoteBlock(Static):
             if save: self.content = edit.text
             else: edit.text = self.content
             render.update(self.content); render.remove_class("hidden"); edit.add_class("hidden")
-            self.app.focus_input()
+            self.app.enter_normal_mode()
     def on_key(self, event: events.Key):
         if self.is_editing:
             if event.key == "escape":
@@ -149,17 +149,14 @@ class NotebookInput(TextArea):
             event.prevent_default()
             self.app.action_submit()
         elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m"):
-            # Note: ctrl+m and ctrl+j are often Enter.
-            # If user wants newline with ctrl+return, we try to catch it.
-            # Most terminals send ctrl+j for ctrl+enter.
-            if event.key == "enter": return # already handled
+            if event.key == "enter": return
             event.stop()
             event.prevent_default()
             self.insert("\n")
-        elif event.key == "s" and not self.text and self.app.input_mode == "INPUT":
+        elif event.key == "escape":
             event.stop()
             event.prevent_default()
-            self.app.enter_selection_mode()
+            self.app.enter_normal_mode()
 
 class CommandBlock(Static):
     can_focus = True
@@ -216,7 +213,7 @@ class CommandBlock(Static):
             syntax.update(Syntax(self.command, "bash", theme="monokai"))
             syntax.remove_class("hidden"); edit.add_class("hidden")
             if save and run: self.run_process()
-            self.app.focus_input()
+            self.app.enter_normal_mode()
 
     def run_process(self):
         self.full_output = ""; self.query_one("#output").update(""); self.add_class("running")
@@ -250,7 +247,7 @@ class ShellApp(App):
     def __init__(self):
         super().__init__()
         self.history = HistoryManager()
-        self.input_mode = "INPUT" # INPUT, SELECTION
+        self.input_mode = "NORMAL" # NORMAL, INPUT, SELECTION
         self.active_processes, self._suppress_search = [], False
         self.yank_buffer = None
         self.count_str = ""
@@ -268,10 +265,8 @@ class ShellApp(App):
 
     def on_mount(self):
         self.workflows = load_workflows()
-        # Initialize TextArea with language
-        inp = self.query_one("#main_input")
-        inp.language = "bash"
-        inp.focus()
+        self.query_one("#main_input").language = "bash"
+        self.enter_normal_mode()
         self.set_interval(0.5, self.update_running_statuses)
 
     def focus_input(self):
@@ -283,10 +278,16 @@ class ShellApp(App):
                 widget.update_status()
 
     def action_esc_pressed(self):
-        if self.input_mode == "SELECTION":
-            self.enter_input_mode()
-        else:
-            self.query_one("#palette").remove_class("visible")
+        self.enter_normal_mode()
+
+    def enter_normal_mode(self):
+        self.input_mode = "NORMAL"
+        self.count_str = ""
+        self.update_mode_label()
+        self.query_one("#palette").remove_class("visible")
+        self.query_one("#main_input").text = ""
+        # Ensure nothing focusable in blocks or input is focused
+        self.screen.focus()
 
     def enter_selection_mode(self):
         self.input_mode = "SELECTION"
@@ -308,7 +309,8 @@ class ShellApp(App):
         self.focus_input()
 
     def update_mode_label(self):
-        colors = {"INPUT": "#7c4dff", "SELECTION": "#00e676"}
+        if not hasattr(self, "mode_label"): return
+        colors = {"NORMAL": "#757575", "INPUT": "#7c4dff", "SELECTION": "#00e676"}
         c = colors.get(self.input_mode, "#7c4dff")
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
 
@@ -381,6 +383,17 @@ class ShellApp(App):
     def on_key(self, event: events.Key):
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
 
+        if self.input_mode == "NORMAL":
+            if event.key == "!":
+                self.enter_input_mode(prefix="!")
+            elif event.key == ":":
+                self.enter_input_mode(prefix=":")
+            elif event.key == ";":
+                self.enter_input_mode(prefix=";")
+            elif event.key == "s":
+                self.enter_selection_mode()
+            return
+
         if self.input_mode == "INPUT":
             # Palette logic
             vis = p.has_class("visible")
@@ -412,7 +425,7 @@ class ShellApp(App):
             count = int(self.count_str) if self.count_str else 1
             self.count_str = ""
 
-            if event.key in (":", "!", "#"):
+            if event.key in (":", "!", ";"):
                 self.enter_input_mode(prefix=event.key)
                 return
 
@@ -447,7 +460,7 @@ class ShellApp(App):
             elif event.key == "ctrl+up": self.action_move_up()
             elif event.key == "ctrl+down": self.action_move_down()
             elif event.key == "escape":
-                self.input_mode = "INPUT"; self.update_mode_label(); self.focus_input()
+                self.enter_normal_mode()
 
     def _create_block_from_yank(self):
         if not self.yank_buffer: return None
@@ -459,9 +472,9 @@ class ShellApp(App):
     @on(TextArea.Changed, "#main_input")
     def in_ch(self, event):
         txt = event.text_area.text
-        if txt.startswith(":"): event.text_area.language = "bash" # for internal cmds
+        if txt.startswith(":"): event.text_area.language = "bash"
         elif txt.startswith("!"): event.text_area.language = "bash"
-        elif txt.startswith("#"): event.text_area.language = "markdown"
+        elif txt.startswith(";"): event.text_area.language = "markdown"
 
         if not self._suppress_search and self.query_one("#palette").has_class("visible"):
             self.update_palette(txt)
@@ -477,6 +490,7 @@ class ShellApp(App):
 
         if full_text.startswith(":"):
             self.handle_internal_command(full_text[1:])
+            self.enter_normal_mode()
             return
 
         if full_text.startswith("!"):
@@ -484,20 +498,16 @@ class ShellApp(App):
             self.history.add(content)
             new_block = CommandBlock(content, os.getcwd(), self)
             container.mount(new_block); new_block.run_process()
-        elif full_text.startswith("#"):
+        elif full_text.startswith(";"):
             content = full_text[1:].strip()
             new_block = NoteBlock(content); container.mount(new_block)
         else:
-            # Default to bash if no prefix? User said "entrypoints for typing stuff",
-            # implies prefixes are needed now. Let's assume no prefix = bash for compatibility,
-            # but the prompt suggests prefix-based entry.
-            # "! enables the bash command typing", "# enables the markdown note typing"
-            # Let's stick to prefixes for now as requested.
-            self.notify("Use ! for bash, # for note, : for commands", severity="warning")
-            ta.text = full_text # put it back
+            self.notify("Use ! for bash, ; for note, : for commands", severity="warning")
+            ta.text = full_text
             return
 
         new_block.scroll_visible()
+        self.enter_normal_mode()
 
     def handle_internal_command(self, cmd_line):
         parts = cmd_line.split(" ", 1)
