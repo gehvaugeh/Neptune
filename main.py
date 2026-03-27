@@ -259,7 +259,7 @@ class ShellApp(App):
             yield Static("[bold #7c4dff]G E M M I - S H E L L[/] [bold #e1e1e6]v12.0[/] | [italic #88888e]Notebook Chronicler[/]")
         with Vertical(id="bottom_dock"):
             yield OptionList(id="palette")
-            self.mode_label = Label("[bold #7c4dff]MODE: INPUT[/]", id="mode_indicator")
+            self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
             yield self.mode_label
             with Horizontal(id="input_container"):
                 yield Label("", id="mode_prefix")
@@ -289,13 +289,18 @@ class ShellApp(App):
         self.update_mode_label()
         self.query_one("#mode_prefix").update("")
         self.query_one("#palette").remove_class("visible")
-        self.query_one("#main_input").text = ""
+
+        inp = self.query_one("#main_input")
+        inp.text = ""
+        inp.disabled = True
+
         # Ensure nothing focusable in blocks or input is focused
         self.screen.focus()
 
     def enter_selection_mode(self):
         self.input_mode = "SELECTION"
         self.update_mode_label()
+        self.query_one("#main_input").disabled = True
         container = self.query_one("#command_history")
         blocks = [c for c in container.children if isinstance(c, (CommandBlock, NoteBlock))]
         if blocks:
@@ -312,6 +317,7 @@ class ShellApp(App):
         pref_label.update(prefix)
 
         inp = self.query_one("#main_input")
+        inp.disabled = False
         if prefix == ":": inp.language = "bash"
         elif prefix == "!": inp.language = "bash"
         elif prefix == ";": inp.language = "markdown"

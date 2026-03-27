@@ -59,6 +59,10 @@ Screen {
     color: $text-main;
 }
 
+#main_input:disabled {
+    color: transparent;
+}
+
 #mode_indicator {
     width: 100%;
     padding: 0 1;
