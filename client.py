@@ -301,7 +301,7 @@ class ClientApp(App):
             await self.send_message({"type": "connect", "color": self.user_color})
             await self.listen_to_server()
         except Exception as e:
-            self.notify(f"Could not connect to server: {e}", variant="error")
+            self.notify(f"Could not connect to server: {e}", severity="error")
 
     async def listen_to_server(self):
         logging.info("Starting listener loop")
@@ -360,13 +360,13 @@ class ClientApp(App):
         elif msg_type == "user_join":
             u_id, u_col = msg.get("user_id"), msg.get("color")
             self.users[u_id] = u_col
-            self.notify(f"User {u_id[:4]} joined", variant="info")
+            self.notify(f"User {u_id[:4]} joined", severity="information")
 
         elif msg_type == "user_leave":
             u_id = msg.get("user_id")
             if u_id in self.users:
                 del self.users[u_id]
-                self.notify(f"User {u_id[:4]} left", variant="info")
+                self.notify(f"User {u_id[:4]} left", severity="information")
 
         elif msg_type == "new_block":
             logging.info(f"Adding new block from server: {msg.get('block', {}).get('id')}")
@@ -470,7 +470,7 @@ class ClientApp(App):
                 self.refresh()
                 return
             except Exception as e:
-                self.notify(f"CD Error: {e}", variant="error")
+                self.notify(f"CD Error: {e}", severity="error")
                 return
 
         await self.send_message({
@@ -500,8 +500,8 @@ class ClientApp(App):
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
-            self.notify(f"Notebook Saved: {filename}", variant="success")
-        except Exception as e: self.notify(f"Save Error: {e}", variant="error")
+            self.notify(f"Notebook Saved: {filename}", severity="information")
+        except Exception as e: self.notify(f"Save Error: {e}", severity="error")
 
     async def import_notebook(self, filename: str):
         if not filename or not os.path.exists(filename): return
@@ -530,9 +530,9 @@ class ClientApp(App):
                 if clean_after: new_blocks.append({"type": "NOTE", "content": clean_after})
 
             await self.send_message({"type": "import_blocks", "blocks": new_blocks})
-            self.notify(f"Notebook Imported: {filename}", variant="success")
+            self.notify(f"Notebook Imported: {filename}", severity="information")
         except Exception as e:
-            self.notify(f"Import Error: {e}", variant="error")
+            self.notify(f"Import Error: {e}", severity="error")
 
     async def action_move_up(self):
         focused = self.focused
