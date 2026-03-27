@@ -17,7 +17,8 @@ def main():
 
     if mode == "server":
         import server
-        server.asyncio.run(server.main(socket_path))
+        s = server.Server(socket_path=socket_path)
+        server.asyncio.run(s.start())
     elif mode == "client":
         import client
         client.ClientApp(socket_path=socket_path).run()

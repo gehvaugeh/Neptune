@@ -131,12 +131,14 @@ class SaveWorkflowModal(ModalScreen):
 
 class BaseBlock(Static):
     can_focus = True
-    def __init__(self, block_id, content, app_ref, **kwargs):
+    def __init__(self, block_id, content, app_ref, is_editing=False, editing_content=None, cursor_pos=None, **kwargs):
         super().__init__(**kwargs)
         self.block_id = block_id
         self.content = content
         self.app_ref = app_ref
-        self.is_editing = False
+        self.is_editing = is_editing
+        self.editing_content = editing_content or content
+        self.cursor_pos = cursor_pos
         self.locked_by = None
         self.lock_color = None
         self.last_click_time = 0
@@ -163,30 +165,44 @@ class BaseBlock(Static):
         if self.is_editing:
             self.query_one("#block_text_edit").focus()
 
+    def on_mount(self) -> None:
+        if self.is_editing and self.cursor_pos:
+            edit = self.query_one("#block_text_edit")
+            edit.cursor_location = self.cursor_pos
+
 class NoteBlock(BaseBlock):
     def compose(self) -> ComposeResult:
-        yield Markdown(self.content, id="md_render", classes="markdown-content")
-        yield TextArea(self.content, id="block_text_edit", classes="hidden", language="markdown")
+        render_classes = "markdown-content" + (" hidden" if self.is_editing else "")
+        edit_classes = "" if self.is_editing else "hidden"
+
+        yield Markdown(self.content, id="md_render", classes=render_classes)
+        yield TextArea(self.editing_content, id="block_text_edit", classes=edit_classes, language="markdown")
         yield Label("[dim]Note (e: edit | ctrl+j: save)[/]", classes="block-info")
 
-    async def toggle_edit(self, remote=False):
+    async def toggle_edit(self, remote=False, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
-            user_label = self.locked_by[:4] # Use short ID as fallback
+            user_info = self.app_ref.users.get(self.locked_by, {})
+            user_label = user_info.get("name", self.locked_by[:4])
             self.app_ref.notify(f"Block is locked by user {user_label}", severity="warning")
             return
 
-        self.is_editing = not self.is_editing
+        if not restore:
+            self.is_editing = not self.is_editing
+
         render, edit = self.query_one("#md_render"), self.query_one("#block_text_edit")
 
         if self.is_editing:
             render.add_class("hidden")
             edit.remove_class("hidden")
             if not remote:
-                # Move cursor to end
-                lines = edit.document.lines
-                edit.cursor_location = (len(lines)-1, len(lines[-1]))
+                if not restore:
+                    # Move cursor to end only on first enter
+                    lines = edit.document.lines
+                    if lines:
+                        edit.cursor_location = (len(lines)-1, len(lines[-1]))
                 edit.focus()
-                await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
+                if not restore:
+                    await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
         else:
             if not remote:
                 self.content = edit.text
@@ -203,16 +219,19 @@ class NoteBlock(BaseBlock):
             await self.app_ref.send_message({"type": "stop_process", "block_id": self.block_id})
 
 class CommandBlock(BaseBlock):
-    def __init__(self, block_id, command, cwd, app_ref, **kwargs):
-        super().__init__(block_id, command, app_ref, **kwargs)
+    def __init__(self, block_id, command, cwd, app_ref, is_editing=False, editing_content=None, cursor_pos=None, **kwargs):
+        super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
 
     def compose(self) -> ComposeResult:
+        label_classes = "" if not self.is_editing else "hidden"
+        edit_classes = "" if self.is_editing else "hidden"
+
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
-            yield Label(f"[bold blue]{self.cwd}[/]\n[white]{self.content}[/]", id="cmd_label")
-            yield TextArea(self.content, id="block_text_edit", classes="hidden", language="bash")
+            yield Label(f"[bold blue]{self.cwd}[/]\n[white]{self.content}[/]", id="cmd_label", classes=label_classes)
+            yield TextArea(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
@@ -232,23 +251,29 @@ class CommandBlock(BaseBlock):
             info.update(f"[red]❌ {status.upper()}[/]")
             self.remove_class("running")
 
-    async def toggle_edit(self, remote=False):
+    async def toggle_edit(self, remote=False, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
-            user_label = self.locked_by[:4]
+            user_info = self.app_ref.users.get(self.locked_by, {})
+            user_label = user_info.get("name", self.locked_by[:4])
             self.app_ref.notify(f"Block is locked by user {user_label}", severity="warning")
             return
 
-        self.is_editing = not self.is_editing
+        if not restore:
+            self.is_editing = not self.is_editing
+
         label, edit = self.query_one("#cmd_label"), self.query_one("#block_text_edit")
 
         if self.is_editing:
             label.add_class("hidden")
             edit.remove_class("hidden")
             if not remote:
-                lines = edit.document.lines
-                edit.cursor_location = (len(lines)-1, len(lines[-1]))
+                if not restore:
+                    lines = edit.document.lines
+                    if lines:
+                        edit.cursor_location = (len(lines)-1, len(lines[-1]))
                 edit.focus()
-                await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
+                if not restore:
+                    await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
         else:
             if not remote:
                 self.content = edit.text
@@ -285,9 +310,10 @@ class ClientApp(App):
         self.history = HistoryManager()
         self.input_mode = "CMD"
         self.user_color = get_random_bright_color()
+        self.user_name = os.environ.get("USER", "User")
         self.user_id = None
         self.blocks = {} # id: widget
-        self.users = {} # id: color
+        self.users = {} # id: {color, name}
         self.reader = None
         self.writer = None
         self._suppress_search = False
@@ -317,7 +343,11 @@ class ClientApp(App):
             self.reader, self.writer = await asyncio.open_unix_connection(
                 self.socket_path, limit=10 * 1024 * 1024
             )
-            await self.send_message({"type": "connect", "color": self.user_color})
+            await self.send_message({
+                "type": "connect",
+                "color": self.user_color,
+                "user": self.user_name
+            })
             await self.listen_to_server()
         except Exception as e:
             self.notify(f"Could not connect to server: {e}", severity="error")
@@ -363,30 +393,54 @@ class ClientApp(App):
         logging.info(f"Processing server message: {msg_type}")
 
         if msg_type == "init":
-            focused_id = None
-            if self.focused and isinstance(self.focused, BaseBlock):
-                focused_id = self.focused.block_id
+            focused_id, editing_id, editing_content, cursor_pos = None, None, None, None
+            focused = self.focused
+            temp_focused = focused
+            while temp_focused and not isinstance(temp_focused, BaseBlock):
+                temp_focused = temp_focused.parent
+            if isinstance(temp_focused, BaseBlock):
+                focused_id = temp_focused.block_id
+                if temp_focused.is_editing:
+                    editing_id = focused_id
+                    try:
+                        edit_widget = temp_focused.query_one("#block_text_edit")
+                        editing_content = edit_widget.text
+                        cursor_pos = edit_widget.cursor_location
+                    except: pass
+            elif focused and focused.id == "main_input":
+                focused_id = "main_input"
 
             new_id = msg.get("your_id")
             if new_id and new_id != "all":
                 self.user_id = new_id
             self.users = msg.get("users", {})
+
             # Clear UI and local blocks to avoid duplicates
             container = self.query_one("#command_history")
             for b_id in list(self.blocks.keys()):
                 try: self.blocks[b_id].remove()
                 except: pass
             self.blocks = {}
-            for block_data in msg.get("blocks", []):
-                await self.create_block(block_data)
 
-            if focused_id and focused_id in self.blocks:
+            for block_data in msg.get("blocks", []):
+                b_id = block_data["id"]
+                is_editing = (b_id == editing_id)
+                await self.create_block(
+                    block_data,
+                    is_editing=is_editing,
+                    editing_content=editing_content if is_editing else None,
+                    cursor_pos=cursor_pos if is_editing else None
+                )
+
+            if focused_id == "main_input":
+                self.query_one("#main_input").focus()
+            elif focused_id and focused_id in self.blocks:
                 self.call_after_refresh(self.blocks[focused_id].focus)
 
         elif msg_type == "user_join":
-            u_id, u_col = msg.get("user_id"), msg.get("color")
-            self.users[u_id] = u_col
-            self.notify(f"User {u_id[:4]} joined", severity="information")
+            u_id, u_col, u_name = msg.get("user_id"), msg.get("color"), msg.get("name")
+            self.users[u_id] = {"color": u_col, "name": u_name}
+            self.notify(f"User {u_name} joined", severity="information")
 
         elif msg_type == "user_leave":
             u_id = msg.get("user_id")
@@ -400,22 +454,29 @@ class ClientApp(App):
             self.refresh()
 
         elif msg_type == "reorder":
-            focused_id = None
-            if self.focused and isinstance(self.focused, BaseBlock):
-                focused_id = self.focused.block_id
-
-            # Clear all blocks and recreate in new order
+            # Just reorder existing widgets to avoid flickering
             container = self.query_one("#command_history")
-            for b_id in list(self.blocks.keys()):
-                try: self.blocks[b_id].remove()
-                except: pass
-            self.blocks = {}
-            for block_data in msg.get("blocks", []):
-                await self.create_block(block_data)
+            new_blocks_data = msg.get("blocks", [])
+            new_ids = [b["id"] for b in new_blocks_data]
 
-            if focused_id and focused_id in self.blocks:
-                # Use call_after_refresh to ensure focus is applied to the newly mounted widget
-                self.call_after_refresh(self.blocks[focused_id].focus)
+            # Remove blocks that are no longer present
+            for b_id in list(self.blocks.keys()):
+                if b_id not in new_ids:
+                    self.blocks[b_id].remove()
+                    del self.blocks[b_id]
+
+            # Reorder existing or create new
+            for i, b_data in enumerate(new_blocks_data):
+                b_id = b_data["id"]
+                if b_id in self.blocks:
+                    # Move child to correct index
+                    container.move_child(self.blocks[b_id], i)
+                else:
+                    # This shouldn't typically happen on reorder, but handle it
+                    await self.create_block(b_data)
+                    container.move_child(self.blocks[b_id], i)
+
+            self.refresh()
 
         elif msg_type == "update_block":
             data = msg.get("block")
@@ -446,7 +507,11 @@ class ClientApp(App):
         elif msg_type == "lock":
             b_id = msg.get("block_id")
             if b_id in self.blocks:
-                self.blocks[b_id].update_lock(msg.get("user_id"), msg.get("user_color"))
+                u_id = msg.get("user_id")
+                u_col = msg.get("user_color")
+                u_name = msg.get("user_name")
+                self.users[u_id] = {"color": u_col, "name": u_name}
+                self.blocks[b_id].update_lock(u_id, u_col)
 
         elif msg_type == "unlock":
             b_id = msg.get("block_id")
@@ -459,17 +524,17 @@ class ClientApp(App):
                 self.blocks[b_id].remove()
                 del self.blocks[b_id]
 
-    async def create_block(self, data):
+    async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data["id"]
         if b_id in self.blocks:
             logging.debug(f"Block {b_id} already exists, skipping create")
             return # Avoid duplicates
 
-        logging.info(f"Creating block: {b_id} ({data['type']})")
+        logging.info(f"Creating block: {b_id} ({data['type']}), is_editing={is_editing}")
         if data["type"] == "NOTE":
-            new_block = NoteBlock(b_id, data["content"], self)
+            new_block = NoteBlock(b_id, data["content"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
         else:
-            new_block = CommandBlock(b_id, data["content"], data["cwd"], self)
+            new_block = CommandBlock(b_id, data["content"], data["cwd"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
             new_block.full_output = data["output"]
 
         self.blocks[b_id] = new_block
@@ -478,13 +543,17 @@ class ClientApp(App):
         await container.mount(new_block)
         logging.info(f"Block {b_id} mounted to container")
 
+        # is_editing state is already applied via constructor and compose.
+        # We don't need to call toggle_edit(restore=True) here.
+
         if data["type"] == "CMD":
             new_block.update_status(data["status"])
             if data["output"]:
                 new_block.query_one("#output").update(Text.from_ansi(data["output"]))
 
         if data["locked_by"]:
-                new_block.update_lock(data["locked_by"], self.users.get(data["locked_by"], "white"))
+                user_info = self.users.get(data["locked_by"], {})
+                new_block.update_lock(data["locked_by"], user_info.get("color", "white"))
 
         self.call_after_refresh(new_block.scroll_visible)
 
@@ -588,9 +657,13 @@ class ClientApp(App):
 
     async def action_delete_block(self):
         focused = self.focused
+        while focused and not isinstance(focused, BaseBlock):
+            focused = focused.parent
+
         if focused and isinstance(focused, BaseBlock):
             if focused.locked_by and focused.locked_by != self.user_id:
-                user_label = focused.locked_by[:4]
+                user_info = self.users.get(focused.locked_by, {})
+                user_label = user_info.get("name", focused.locked_by[:4])
                 self.notify(f"Block is locked by user {user_label}", severity="warning")
                 return
             await self.send_message({"type": "delete_block", "block_id": focused.block_id})

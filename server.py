@@ -30,10 +30,11 @@ def get_shell():
 
 DEFAULT_SHELL = get_shell()
 
-class ServerState:
-    def __init__(self):
+class Server:
+    def __init__(self, socket_path=DEFAULT_SOCKET_PATH):
+        self.socket_path = socket_path
         self.blocks = []  # List of dicts: {id, type, content, cwd, output, status, locked_by}
-        self.clients = {} # writer: {id, color}
+        self.clients = {} # writer: {id, color, name}
         self.active_processes = {} # block_id: process
 
     def add_block(self, block_type, content, cwd=None):
@@ -55,243 +56,251 @@ class ServerState:
                 return b
         return None
 
-state = ServerState()
+    async def broadcast(self, message):
+        data = json.dumps(message).encode() + b"\n"
+        logging.debug(f"Broadcasting: {message.get('type')}")
 
-async def broadcast(message):
-    data = json.dumps(message).encode() + b"\n"
-    logging.debug(f"Broadcasting: {message.get('type')}")
+        # Copy clients to avoid mutation during iteration
+        clients = list(self.clients.items())
+        for writer, client_info in clients:
+            asyncio.create_task(self.send_to_client(writer, data, client_info['id']))
 
-    clients = list(state.clients.items())
-    for writer, client_info in clients:
-        asyncio.create_task(send_to_client(writer, data, client_info['id']))
-
-async def send_to_client(writer, data, user_id):
-    try:
-        if not writer.is_closing():
-            writer.write(data)
-            await asyncio.wait_for(writer.drain(), timeout=2.0)
-    except Exception as e:
-        logging.error(f"Removing unresponsive client {user_id}: {e}")
-        if writer in state.clients:
-            del state.clients[writer]
+    async def send_to_client(self, writer, data, user_id):
         try:
-            writer.close()
-            await writer.wait_closed()
-        except: pass
-
-async def handle_client(reader, writer):
-    user_id = str(uuid.uuid4())
-    state.clients[writer] = {"id": user_id, "color": "white"}
-    logging.info(f"Client connected: {user_id}")
-
-    try:
-        while True:
-            line = await reader.readline()
-            if not line:
-                break
-
-            line_str = line.decode().strip()
-            if not line_str:
-                continue
-
+            if not writer.is_closing():
+                writer.write(data)
+                await asyncio.wait_for(writer.drain(), timeout=2.0)
+        except Exception as e:
+            logging.error(f"Removing unresponsive client {user_id}: {e}")
+            if writer in self.clients:
+                del self.clients[writer]
             try:
-                msg = json.loads(line_str)
-            except Exception as e:
-                logging.error(f"Error decoding JSON from {user_id}: {e} | Raw: {line_str}")
-                continue
+                writer.close()
+                await writer.wait_closed()
+            except: pass
 
-            msg_type = msg.get("type")
-            logging.debug(f"Received from {user_id}: {msg_type}")
+    async def handle_client(self, reader, writer):
+        user_id = str(uuid.uuid4())
+        self.clients[writer] = {"id": user_id, "color": "white"}
+        logging.info(f"Client connected: {user_id}")
 
-            if msg_type == "connect":
-                user_color = msg.get("color", "white")
-                state.clients[writer]["color"] = user_color
-                logging.info(f"Client authorized: {user_id} ({user_color})")
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
 
-                # Send initial state
-                init_msg = {
-                    "type": "init",
-                    "blocks": state.blocks,
-                    "users": {c["id"]: c["color"] for c in state.clients.values()},
-                    "your_id": user_id
-                }
-                writer.write(json.dumps(init_msg).encode() + b"\n")
-                await writer.drain()
+                line_str = line.decode().strip()
+                if not line_str:
+                    continue
 
-                await broadcast({"type": "user_join", "user_id": user_id, "color": user_color})
+                try:
+                    msg = json.loads(line_str)
+                except Exception as e:
+                    logging.error(f"Error decoding JSON from {user_id}: {e} | Raw: {line_str}")
+                    continue
 
-            elif msg_type == "submit":
-                mode = msg.get("mode")
-                content = msg.get("content")
-                cwd = msg.get("cwd", os.getcwd())
-                logging.info(f"Received submit from {user_id}: {mode} - {content[:50]}")
+                msg_type = msg.get("type")
+                logging.debug(f"Received from {user_id}: {msg_type}")
 
-                block = state.add_block(mode, content, cwd)
-                await broadcast({"type": "new_block", "block": block})
+                if msg_type == "connect":
+                    user_color = msg.get("color", "white")
+                    user_name = msg.get("user", user_id[:4])
+                    self.clients[writer]["color"] = user_color
+                    self.clients[writer]["name"] = user_name
+                    logging.info(f"Client authorized: {user_id} ({user_name}, {user_color})")
 
-                if mode == "CMD":
-                    asyncio.create_task(run_process(block, DEFAULT_SHELL))
+                    # Send initial state
+                    init_msg = {
+                        "type": "init",
+                        "blocks": self.blocks,
+                        "users": {c["id"]: {"color": c["color"], "name": c.get("name", c["id"][:4])} for c in self.clients.values()},
+                        "your_id": user_id
+                    }
+                    writer.write(json.dumps(init_msg).encode() + b"\n")
+                    await writer.drain()
 
-            elif msg_type == "edit_start":
-                block_id = msg.get("block_id")
-                logging.info(f"Edit start from {user_id} on {block_id}")
-                block = state.get_block(block_id)
-                if block and not block["locked_by"]:
-                    block["locked_by"] = user_id
-                    await broadcast({
-                        "type": "lock",
-                        "block_id": block_id,
+                    await self.broadcast({
+                        "type": "user_join",
                         "user_id": user_id,
-                        "user_color": state.clients[writer]["color"]
+                        "color": user_color,
+                        "name": user_name
                     })
 
-            elif msg_type == "edit_save":
-                block_id = msg.get("block_id")
-                content = msg.get("content")
-                block = state.get_block(block_id)
-                if block and block["locked_by"] == user_id:
-                    block["content"] = content
-                    block["locked_by"] = None
-                    await broadcast({"type": "update_block", "block": block})
-                    await broadcast({"type": "unlock", "block_id": block_id})
+                elif msg_type == "submit":
+                    mode = msg.get("mode")
+                    content = msg.get("content")
+                    cwd = msg.get("cwd", os.getcwd())
+                    logging.info(f"Received submit from {user_id}: {mode} - {content[:50]}")
 
-                    if block["type"] == "CMD":
-                        block["output"] = ""
-                        asyncio.create_task(run_process(block, DEFAULT_SHELL))
+                    block = self.add_block(mode, content, cwd)
+                    await self.broadcast({"type": "new_block", "block": block})
 
-            elif msg_type == "edit_cancel":
-                block_id = msg.get("block_id")
-                block = state.get_block(block_id)
-                if block and block["locked_by"] == user_id:
-                    block["locked_by"] = None
-                    await broadcast({"type": "unlock", "block_id": block_id})
+                    if mode == "CMD":
+                        asyncio.create_task(self.run_process(block, DEFAULT_SHELL))
 
-            elif msg_type == "move_block":
-                block_id = msg.get("block_id")
-                direction = msg.get("direction") # "up" or "down"
+                elif msg_type == "edit_start":
+                    block_id = msg.get("block_id")
+                    logging.info(f"Edit start from {user_id} on {block_id}")
+                    block = self.get_block(block_id)
+                    if block and not block["locked_by"]:
+                        block["locked_by"] = user_id
+                        await self.broadcast({
+                            "type": "lock",
+                            "block_id": block_id,
+                            "user_id": user_id,
+                            "user_color": self.clients[writer]["color"],
+                            "user_name": self.clients[writer].get("name", user_id[:4])
+                        })
 
-                idx = next((i for i, b in enumerate(state.blocks) if b["id"] == block_id), -1)
-                if idx != -1:
-                    new_idx = idx - 1 if direction == "up" else idx + 1
-                    if 0 <= new_idx < len(state.blocks):
-                        state.blocks[idx], state.blocks[new_idx] = state.blocks[new_idx], state.blocks[idx]
-                        await broadcast({"type": "reorder", "blocks": state.blocks})
+                elif msg_type == "edit_save":
+                    block_id = msg.get("block_id")
+                    content = msg.get("content")
+                    block = self.get_block(block_id)
+                    if block and block["locked_by"] == user_id:
+                        block["content"] = content
+                        block["locked_by"] = None
+                        await self.broadcast({"type": "update_block", "block": block})
+                        await self.broadcast({"type": "unlock", "block_id": block_id})
 
-            elif msg_type == "delete_block":
-                block_id = msg.get("block_id")
-                state.blocks = [b for b in state.blocks if b["id"] != block_id]
-                if block_id in state.active_processes:
-                    p = state.active_processes[block_id]
-                    try: os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                    except: pass
-                    del state.active_processes[block_id]
-                await broadcast({"type": "remove_block", "block_id": block_id})
+                        if block["type"] == "CMD":
+                            block["output"] = ""
+                            asyncio.create_task(self.run_process(block, DEFAULT_SHELL))
 
-            elif msg_type == "stop_process":
-                block_id = msg.get("block_id")
-                if block_id in state.active_processes:
-                    p = state.active_processes[block_id]
-                    try: os.killpg(os.getpgid(p.pid), signal.SIGINT)
-                    except: pass
+                elif msg_type == "edit_cancel":
+                    block_id = msg.get("block_id")
+                    block = self.get_block(block_id)
+                    if block and block["locked_by"] == user_id:
+                        block["locked_by"] = None
+                        await self.broadcast({"type": "unlock", "block_id": block_id})
 
-            elif msg_type == "import_blocks":
-                new_blocks = msg.get("blocks")
-                state.blocks = []
-                for b_data in new_blocks:
-                    block = state.add_block(b_data["type"], b_data["content"], b_data.get("cwd"))
-                    block["output"] = b_data.get("output", "")
-                    block["status"] = b_data.get("status", "ready")
+                elif msg_type == "move_block":
+                    block_id = msg.get("block_id")
+                    direction = msg.get("direction") # "up" or "down"
 
-                await broadcast({"type": "reorder", "blocks": state.blocks})
+                    idx = next((i for i, b in enumerate(self.blocks) if b["id"] == block_id), -1)
+                    if idx != -1:
+                        new_idx = idx - 1 if direction == "up" else idx + 1
+                        if 0 <= new_idx < len(self.blocks):
+                            self.blocks[idx], self.blocks[new_idx] = self.blocks[new_idx], self.blocks[idx]
+                            await self.broadcast({"type": "reorder", "blocks": self.blocks})
 
-    except Exception as e:
-        logging.error(f"Error handling client {user_id}: {e}")
-    finally:
-        logging.info(f"Client disconnected: {user_id}")
-        if writer in state.clients:
-            del state.clients[writer]
-        await broadcast({"type": "user_leave", "user_id": user_id})
-        # Unlock any blocks locked by this user
-        for b in state.blocks:
-            if b["locked_by"] == user_id:
-                b["locked_by"] = None
-                await broadcast({"type": "unlock", "block_id": b["id"]})
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except: pass
+                elif msg_type == "delete_block":
+                    block_id = msg.get("block_id")
+                    self.blocks = [b for b in self.blocks if b["id"] != block_id]
+                    if block_id in self.active_processes:
+                        p = self.active_processes[block_id]
+                        try: os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                        except: pass
+                        del self.active_processes[block_id]
+                    await self.broadcast({"type": "remove_block", "block_id": block_id})
 
-async def run_process(block, shell_exe):
-    block_id = block["id"]
-    cmd = block["content"]
-    cwd = block["cwd"]
+                elif msg_type == "stop_process":
+                    block_id = msg.get("block_id")
+                    if block_id in self.active_processes:
+                        p = self.active_processes[block_id]
+                        try: os.killpg(os.getpgid(p.pid), signal.SIGINT)
+                        except: pass
 
-    block["status"] = "running"
-    await broadcast({"type": "update_block", "block": block})
+                elif msg_type == "import_blocks":
+                    new_blocks = msg.get("blocks")
+                    self.blocks = []
+                    for b_data in new_blocks:
+                        block = self.add_block(b_data["type"], b_data["content"], b_data.get("cwd"))
+                        block["output"] = b_data.get("output", "")
+                        block["status"] = b_data.get("status", "ready")
 
-    m, s = pty.openpty()
-    try:
-        p = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=s,
-            stderr=s,
-            stdin=s,
-            executable=shell_exe,
-            cwd=cwd,
-            preexec_fn=os.setsid
-        )
-        state.active_processes[block_id] = p
-        os.close(s)
+                    await self.broadcast({"type": "reorder", "blocks": self.blocks})
 
-        loop = asyncio.get_event_loop()
-        while p.returncode is None:
-            try:
-                data = await loop.run_in_executor(None, os.read, m, 4096)
-                if data:
-                    decoded_data = data.decode(errors="replace")
-                    block["output"] += decoded_data
-                    await broadcast({"type": "output", "block_id": block_id, "data": decoded_data})
-                else:
-                    break
-            except OSError:
-                break
-
-        exit_code = await p.wait()
-        block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
-        await broadcast({"type": "update_block", "block": block})
-    except Exception as e:
-        err_msg = f"\nError: {e}"
-        block["output"] += err_msg
-        block["status"] = "error"
-        await broadcast({"type": "output", "block_id": block_id, "data": err_msg})
-        await broadcast({"type": "update_block", "block": block})
-    finally:
-        try: os.close(m)
-        except: pass
-        if block_id in state.active_processes:
-            del state.active_processes[block_id]
-
-async def main(socket_path):
-    if os.path.exists(socket_path):
-        os.remove(socket_path)
-
-    server = await asyncio.start_unix_server(handle_client, socket_path, limit=10 * 1024 * 1024)
-    print(f"Server started on {socket_path}")
-    print(f"Using shell: {DEFAULT_SHELL}")
-
-    async with server:
-        try:
-            await server.serve_forever()
+        except Exception as e:
+            logging.error(f"Error handling client {user_id}: {e}")
         finally:
-            if os.path.exists(socket_path):
-                os.remove(socket_path)
+            logging.info(f"Client disconnected: {user_id}")
+            if writer in self.clients:
+                del self.clients[writer]
+            await self.broadcast({"type": "user_leave", "user_id": user_id})
+            # Unlock any blocks locked by this user
+            for b in self.blocks:
+                if b["locked_by"] == user_id:
+                    b["locked_by"] = None
+                    await self.broadcast({"type": "unlock", "block_id": b["id"]})
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except: pass
+
+    async def run_process(self, block, shell_exe):
+        block_id = block["id"]
+        cmd = block["content"]
+        cwd = block["cwd"]
+
+        block["status"] = "running"
+        await self.broadcast({"type": "update_block", "block": block})
+
+        m, s = pty.openpty()
+        try:
+            p = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=s,
+                stderr=s,
+                stdin=s,
+                executable=shell_exe,
+                cwd=cwd,
+                preexec_fn=os.setsid
+            )
+            self.active_processes[block_id] = p
+            os.close(s)
+
+            loop = asyncio.get_event_loop()
+            while p.returncode is None:
+                try:
+                    data = await loop.run_in_executor(None, os.read, m, 4096)
+                    if data:
+                        decoded_data = data.decode(errors="replace")
+                        block["output"] += decoded_data
+                        await self.broadcast({"type": "output", "block_id": block_id, "data": decoded_data})
+                    else:
+                        break
+                except OSError:
+                    break
+
+            exit_code = await p.wait()
+            block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
+            await self.broadcast({"type": "update_block", "block": block})
+        except Exception as e:
+            err_msg = f"\nError: {e}"
+            block["output"] += err_msg
+            block["status"] = "error"
+            await self.broadcast({"type": "output", "block_id": block_id, "data": err_msg})
+            await self.broadcast({"type": "update_block", "block": block})
+        finally:
+            try: os.close(m)
+            except: pass
+            if block_id in self.active_processes:
+                del self.active_processes[block_id]
+
+    async def start(self):
+        if os.path.exists(self.socket_path):
+            os.remove(self.socket_path)
+
+        server = await asyncio.start_unix_server(self.handle_client, self.socket_path, limit=10 * 1024 * 1024)
+        print(f"Server started on {self.socket_path}")
+        print(f"Using shell: {DEFAULT_SHELL}")
+
+        async with server:
+            try:
+                await server.serve_forever()
+            finally:
+                if os.path.exists(self.socket_path):
+                    os.remove(self.socket_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Gemmi-Shell Server")
     parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
     args = parser.parse_args()
 
+    server = Server(socket_path=args.socket)
     try:
-        asyncio.run(main(args.socket))
+        asyncio.run(server.start())
     except KeyboardInterrupt:
         pass
