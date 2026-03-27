@@ -309,12 +309,17 @@ class ShellApp(App):
             blocks[-1].scroll_visible()
 
     def enter_input_mode(self, prefix=""):
-        self.input_mode = "INPUT"
+        mode_map = {"!": "BASH", ":": "CMD", ";": "NOTE"}
+        self.input_mode = mode_map.get(prefix, "INPUT")
         self.current_prefix = prefix
         self.update_mode_label()
 
         pref_label = self.query_one("#mode_prefix")
         pref_label.update(prefix)
+
+        colors = {"BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252"}
+        c = colors.get(self.input_mode, "#7c4dff")
+        pref_label.styles.color = c
 
         inp = self.query_one("#main_input")
         inp.disabled = False
@@ -326,7 +331,7 @@ class ShellApp(App):
 
     def update_mode_label(self):
         if not hasattr(self, "mode_label"): return
-        colors = {"NORMAL": "#757575", "INPUT": "#7c4dff", "SELECTION": "#00e676"}
+        colors = {"NORMAL": "#757575", "BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252", "SELECTION": "#00b0ff"}
         c = colors.get(self.input_mode, "#7c4dff")
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
 
@@ -340,28 +345,27 @@ class ShellApp(App):
         p = self.query_one("#palette"); p.clear_options()
         if not val.strip() and not val.endswith(" "): p.remove_class("visible"); return
 
-        if val.startswith(":"):
-            cmd_part = val[1:].split(" ")[0]
+        if self.input_mode == "CMD":
             for c in self.available_commands:
-                if fuzzy_match(cmd_part, c):
+                if fuzzy_match(val, c):
                     p.add_option(f"[bold cyan]CMD:[/] {c}")
-
-        token = self._get_current_token(val)
-        last = token.strip("\"'")
-        d_p = os.path.dirname(last) if last else ""; f_q = os.path.basename(last) if last else ""
-        ex_d = os.path.expanduser(d_p) if d_p else "."
-        try:
-            if os.path.isdir(ex_d):
-                for f in os.listdir(ex_d):
-                    if fuzzy_match(f_q, f):
-                        full = os.path.join(d_p, f) if d_p else f
-                        if os.path.isdir(os.path.join(ex_d, f)): full += "/"
-                        p.add_option(f"[green]Path:[/] {full}")
-        except: pass
-        for h in self.history.get_matches(val): p.add_option(f"[yellow]Hist:[/] {h}")
-        for wf in self.workflows:
-            if fuzzy_match(val, wf['name']) or fuzzy_match(val, wf['cmd']):
-                p.add_option(f"[cyan]WF:[/] {wf['name']} ([dim]{wf['cmd'][:20]}...[/])")
+        elif self.input_mode == "BASH":
+            token = self._get_current_token(val)
+            last = token.strip("\"'")
+            d_p = os.path.dirname(last) if last else ""; f_q = os.path.basename(last) if last else ""
+            ex_d = os.path.expanduser(d_p) if d_p else "."
+            try:
+                if os.path.isdir(ex_d):
+                    for f in os.listdir(ex_d):
+                        if fuzzy_match(f_q, f):
+                            full = os.path.join(d_p, f) if d_p else f
+                            if os.path.isdir(os.path.join(ex_d, f)): full += "/"
+                            p.add_option(f"[green]Path:[/] {full}")
+            except: pass
+            for h in self.history.get_matches(val): p.add_option(f"[yellow]Hist:[/] {h}")
+            for wf in self.workflows:
+                if fuzzy_match(val, wf['name']) or fuzzy_match(val, wf['cmd']):
+                    p.add_option(f"[cyan]WF:[/] {wf['name']} ([dim]{wf['cmd'][:20]}...[/])")
 
         if p.option_count > 0: p.add_class("visible")
         else: p.remove_class("visible")
@@ -419,7 +423,7 @@ class ShellApp(App):
                 event.stop(); event.prevent_default()
             return
 
-        if self.input_mode == "INPUT":
+        if self.input_mode in ("BASH", "CMD", "NOTE", "INPUT"):
             # Palette logic
             vis = p.has_class("visible")
             if event.key == "ctrl+p":
@@ -499,38 +503,33 @@ class ShellApp(App):
         txt = event.text_area.text
 
         if not self._suppress_search and self.query_one("#palette").has_class("visible"):
-            search_val = txt
-            if self.current_prefix == ":": search_val = ":" + txt
-            self.update_palette(search_val)
+            self.update_palette(txt)
         self._suppress_search = False
 
     # --- CORE ACTIONS ---
     def action_submit(self):
         ta = self.query_one("#main_input"); text = ta.text
-        prefix = self.current_prefix
+        mode = self.input_mode
 
-        if not text.strip() and not prefix:
-            ta.text = ""; return
+        if not text.strip():
+            self.enter_normal_mode(); return
 
         ta.text = ""; self.query_one("#palette").remove_class("visible")
         container = self.query_one("#command_history")
 
-        if prefix == ":":
+        if mode == "CMD":
             self.handle_internal_command(text.strip())
             self.enter_normal_mode()
             return
 
-        if prefix == "!":
+        if mode == "BASH":
             content = text.strip()
-            if not content: self.enter_normal_mode(); return
             self.history.add(content)
             new_block = CommandBlock(content, os.getcwd(), self)
             container.mount(new_block)
-            # Need to wait for mount or call later
             self.call_after_refresh(new_block.run_process)
-        elif prefix == ";":
+        elif mode == "NOTE":
             content = text.strip()
-            if not content: self.enter_normal_mode(); return
             new_block = NoteBlock(content); container.mount(new_block)
         else:
             self.notify("Unknown mode", severity="error")
