@@ -149,7 +149,6 @@ class NotebookInput(TextArea):
             event.prevent_default()
             self.app.action_submit()
         elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m"):
-            if event.key == "enter": return
             event.stop()
             event.prevent_default()
             self.insert("\n")
@@ -381,16 +380,21 @@ class ShellApp(App):
         self.sync_input(); self.query_one("#palette").remove_class("visible"); self.query_one("#main_input").focus()
 
     def on_key(self, event: events.Key):
+        # Global escape to normal mode
+        if event.key == "escape":
+            self.enter_normal_mode()
+            return
+
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
 
         if self.input_mode == "NORMAL":
-            if event.key == "!":
+            if event.character == "!":
                 self.enter_input_mode(prefix="!")
-            elif event.key == ":":
+            elif event.character == ":":
                 self.enter_input_mode(prefix=":")
-            elif event.key == ";":
+            elif event.character == ";":
                 self.enter_input_mode(prefix=";")
-            elif event.key == "s":
+            elif event.character == "s":
                 self.enter_selection_mode()
             return
 
@@ -425,8 +429,8 @@ class ShellApp(App):
             count = int(self.count_str) if self.count_str else 1
             self.count_str = ""
 
-            if event.key in (":", "!", ";"):
-                self.enter_input_mode(prefix=event.key)
+            if event.character in (":", "!", ";"):
+                self.enter_input_mode(prefix=event.character)
                 return
 
             if event.key in ("up", "down", "k", "j") and not (event.key == "j" and isinstance(focused, CommandBlock)):
@@ -483,7 +487,7 @@ class ShellApp(App):
     # --- CORE ACTIONS ---
     def action_submit(self):
         ta = self.query_one("#main_input"); full_text = ta.text
-        if not full_text.strip() and not full_text.startswith(("#", "!", ":")):
+        if not full_text.strip() and not any(full_text.startswith(p) for p in ("!", ":", ";")):
             ta.text = ""; return
         ta.text = ""; self.query_one("#palette").remove_class("visible")
         container = self.query_one("#command_history")
