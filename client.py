@@ -396,6 +396,9 @@ class ClientApp(App):
                 if isinstance(block, CommandBlock):
                     block.cwd = data["cwd"]
                     block.update_status(data["status"])
+                    # Sync output to handle reruns properly
+                    block.full_output = data.get("output", "")
+                    block.query_one("#output").update(Text.from_ansi(block.full_output))
                 # Refresh UI
                 if not block.is_editing:
                    if isinstance(block, NoteBlock):
