@@ -147,6 +147,30 @@ NoteBlock {
     display: none !important;
 }
 
+.filtered-out {
+    display: none !important;
+}
+
+#filter_bar {
+    height: 3;
+    background: $bg-input;
+    border-bottom: solid $purple-dim;
+    padding: 0 1;
+    align: left middle;
+}
+
+#filter_label {
+    color: $purple-primary;
+    text-style: bold;
+}
+
+#filter_input {
+    width: 1fr;
+    border: none;
+    background: $bg-input;
+    color: $text-main;
+}
+
 .running {
     border-left: solid $success;
 }

@@ -223,6 +223,7 @@ class ShellApp(App):
         Binding("shift+up", "move_up", "Move Up"),
         Binding("shift+down", "move_down", "Move Down"),
         Binding("ctrl+x", "delete_block", "Delete Block"),
+        Binding("ctrl+f", "toggle_filter", "Filter"),
         Binding("escape", "close_palette", "Close")
     ]
 
@@ -233,6 +234,9 @@ class ShellApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        with Horizontal(id="filter_bar", classes="hidden"):
+            yield Label(" 🔍 Filter: ", id="filter_label")
+            yield Input(placeholder="Search blocks...", id="filter_input")
         with ScrollableContainer(id="command_history"):
             yield Static("[bold #7c4dff]G E M M I - S H E L L[/] [bold #e1e1e6]v12.0[/] | [italic #88888e]Notebook Chronicler[/]")
         with Vertical(id="bottom_dock"):
@@ -505,6 +509,34 @@ class ShellApp(App):
                 except: pass
             focused.remove()
             self.notify("Block gelöscht", severity="information")
+
+    def action_toggle_filter(self):
+        bar = self.query_one("#filter_bar")
+        if bar.has_class("hidden"):
+            bar.remove_class("hidden")
+            self.query_one("#filter_input").focus()
+        else:
+            bar.add_class("hidden")
+            self.query_one("#filter_input").value = ""
+            self.query_one("#main_input").focus()
+
+    @on(Input.Changed, "#filter_input")
+    def filter_blocks(self, event: Input.Changed):
+        query = event.value.lower()
+        container = self.query_one("#command_history")
+        for widget in container.children:
+            if isinstance(widget, (CommandBlock, NoteBlock)):
+                search_text = ""
+                if isinstance(widget, CommandBlock):
+                    search_text = (widget.command + widget.full_output).lower()
+                else:
+                    search_text = widget.content.lower()
+
+                if not query or query in search_text:
+                    widget.remove_class("filtered-out")
+                else:
+                    widget.add_class("filtered-out")
+
     def action_close_palette(self): self.query_one("#palette").remove_class("visible")
     def on_unmount(self): 
         self.history.save()
