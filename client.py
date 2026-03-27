@@ -468,13 +468,17 @@ class ClientApp(App):
             # Reorder existing or create new
             for i, b_data in enumerate(new_blocks_data):
                 b_id = b_data["id"]
-                if b_id in self.blocks:
-                    # Move child to correct index
-                    container.move_child(self.blocks[b_id], i)
-                else:
-                    # This shouldn't typically happen on reorder, but handle it
+                if b_id not in self.blocks:
                     await self.create_block(b_data)
-                    container.move_child(self.blocks[b_id], i)
+
+                block = self.blocks[b_id]
+                if i == 0:
+                    if container.children and container.children[0] != block:
+                        container.move_child(block, before=container.children[0])
+                else:
+                    prev_id = new_blocks_data[i-1]["id"]
+                    if prev_id in self.blocks:
+                        container.move_child(block, after=self.blocks[prev_id])
 
             self.refresh()
 
