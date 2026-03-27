@@ -13,7 +13,8 @@ Screen {
 /* Fixierte Eingabe-Zone unten */
 #input_area {
     height: auto;
-    max-height: 15;
+    min-height: 4;
+    max-height: 12;
     dock: bottom;
     background: #080808;
     border-top: solid #333;
@@ -23,16 +24,27 @@ Screen {
 #main_input {
     height: auto;
     min-height: 3;
-    border: none;
+    max-height: 10;
+    border: solid #222;
     background: #080808;
     color: #00ff00;
 }
 
 #mode_indicator {
-    width: 100%;
+    width: 1fr;
     padding: 0 1;
     height: 1;
     text-style: bold;
+}
+
+#user_indicator {
+    width: auto;
+    padding: 0 1;
+    height: 1;
+}
+
+#input_header {
+    height: 1;
 }
 
 /* Block-Struktur für Notebook-Feeling */
@@ -42,6 +54,7 @@ CommandBlock, NoteBlock {
     height: auto;
     width: 100%;
     border-left: solid #333;
+    border-right: none;
 }
 
 /* Visueller Fokus beim Editieren oder Auswählen */
@@ -110,6 +123,14 @@ NoteBlock:focus {
 
 .running {
     border-left: solid yellow;
+}
+
+.locked-remote {
+    background: #1a1010;
+}
+
+.locked-local {
+    background: #101a10;
 }
 
 /* Autocomplete Palette */
