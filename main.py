@@ -116,6 +116,24 @@ class SaveWorkflowModal(ModalScreen):
 
 # --- BLÖCKE ---
 
+class BlockEditor(TextArea):
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            event.prevent_default()
+            # Find the actual block (CommandBlock or NoteBlock)
+            node = self.parent
+            while node and not hasattr(node, "toggle_edit"):
+                node = node.parent
+            if node: node.toggle_edit(save=False)
+        elif event.key == "ctrl+j":
+            event.stop()
+            event.prevent_default()
+            node = self.parent
+            while node and not hasattr(node, "toggle_edit"):
+                node = node.parent
+            if node: node.toggle_edit(save=True)
+
 class NoteBlock(Static):
     can_focus = True
     def __init__(self, content: str, **kwargs):
@@ -123,24 +141,19 @@ class NoteBlock(Static):
         self.content, self.is_editing, self.last_click_time = content, False, 0
     def compose(self) -> ComposeResult:
         yield Markdown(self.content, id="md_render", classes="markdown-content")
-        yield TextArea(self.content, id="block_text_edit", classes="hidden", language="markdown")
+        yield BlockEditor(self.content, id="block_text_edit", classes="hidden", language="markdown")
         yield Label("[dim]Note (esc: leave edit | ctrl+j: save)[/]", classes="block-info")
     def toggle_edit(self, save=True):
         self.is_editing = not self.is_editing
         render, edit = self.query_one("#md_render"), self.query_one("#block_text_edit")
         if self.is_editing:
             render.add_class("hidden"); edit.remove_class("hidden"); edit.focus()
+            self.app.enter_blockedit_mode()
         else:
             if save: self.content = edit.text
             else: edit.text = self.content
             render.update(self.content); render.remove_class("hidden"); edit.add_class("hidden")
             self.app.enter_normal_mode()
-    def on_key(self, event: events.Key):
-        if self.is_editing:
-            if event.key == "escape":
-                event.stop(); event.prevent_default(); self.toggle_edit(save=False)
-            elif event.key == "ctrl+j":
-                event.stop(); event.prevent_default(); self.toggle_edit(save=True)
 
 class NotebookInput(TextArea):
     def on_key(self, event: events.Key) -> None:
@@ -171,7 +184,7 @@ class CommandBlock(Static):
                 yield Label(f"[bold blue]{self.cwd}[/]", id="cwd_label")
                 with Static(id="cmd_wrapper"):
                     yield Static(Syntax(self.command, "bash", theme="monokai"), id="cmd_syntax")
-                    yield TextArea(self.command, id="block_text_edit", classes="hidden", language="bash")
+                    yield BlockEditor(self.command, id="block_text_edit", classes="hidden", language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
@@ -206,6 +219,7 @@ class CommandBlock(Static):
         syntax, edit = self.query_one("#cmd_syntax"), self.query_one("#block_text_edit")
         if self.is_editing:
             syntax.add_class("hidden"); edit.remove_class("hidden"); edit.focus()
+            self.app.enter_blockedit_mode()
         else:
             if save: self.command = edit.text
             else: edit.text = self.command
@@ -219,12 +233,7 @@ class CommandBlock(Static):
         self.start_time = time.time()
         self.app_ref.start_process(self.command, self)
     def on_key(self, event: events.Key):
-        if self.is_editing:
-            if event.key == "escape":
-                event.stop(); event.prevent_default(); self.toggle_edit(save=False)
-            elif event.key == "ctrl+j":
-                event.stop(); event.prevent_default(); self.toggle_edit(save=True)
-        elif event.key == "ctrl+c" and self.process:
+        if not self.is_editing and event.key == "ctrl+c" and self.process:
             try: os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
             except: pass
 
@@ -308,6 +317,11 @@ class ShellApp(App):
             blocks[-1].focus()
             blocks[-1].scroll_visible()
 
+    def enter_blockedit_mode(self):
+        self.input_mode = "BLOCKEDIT"
+        self.update_mode_label()
+        self.query_one("#main_input").disabled = True
+
     def enter_input_mode(self, prefix=""):
         mode_map = {"!": "BASH", ":": "CMD", ";": "NOTE"}
         self.input_mode = mode_map.get(prefix, "INPUT")
@@ -331,7 +345,7 @@ class ShellApp(App):
 
     def update_mode_label(self):
         if not hasattr(self, "mode_label"): return
-        colors = {"NORMAL": "#757575", "BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252", "SELECTION": "#00b0ff"}
+        colors = {"NORMAL": "#757575", "BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252", "SELECTION": "#00b0ff", "BLOCKEDIT": "#ffab40"}
         c = colors.get(self.input_mode, "#7c4dff")
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
 
