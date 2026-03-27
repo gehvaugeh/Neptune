@@ -38,12 +38,24 @@ Screen {
     height: auto;
 }
 
+#input_container {
+    height: auto;
+    background: $bg-input;
+}
+
+#mode_prefix {
+    width: auto;
+    padding: 0 1;
+    color: $purple-primary;
+    text-style: bold;
+}
+
 #main_input {
     height: auto;
     min-height: 1;
     max-height: 8;
     border: none;
-    background: $bg-input;
+    background: transparent;
     color: $text-main;
 }
 

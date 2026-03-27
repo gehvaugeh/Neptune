@@ -250,6 +250,7 @@ class ShellApp(App):
         self.active_processes, self._suppress_search = [], False
         self.yank_buffer = None
         self.count_str = ""
+        self.current_prefix = ""
         self.available_commands = ["export", "import", "exit", "save_wf", "help", "clear"]
 
     def compose(self) -> ComposeResult:
@@ -260,7 +261,9 @@ class ShellApp(App):
             yield OptionList(id="palette")
             self.mode_label = Label("[bold #7c4dff]MODE: INPUT[/]", id="mode_indicator")
             yield self.mode_label
-            yield NotebookInput(language="bash", id="main_input")
+            with Horizontal(id="input_container"):
+                yield Label("", id="mode_prefix")
+                yield NotebookInput(language="bash", id="main_input")
 
     def on_mount(self):
         self.workflows = load_workflows()
@@ -282,7 +285,9 @@ class ShellApp(App):
     def enter_normal_mode(self):
         self.input_mode = "NORMAL"
         self.count_str = ""
+        self.current_prefix = ""
         self.update_mode_label()
+        self.query_one("#mode_prefix").update("")
         self.query_one("#palette").remove_class("visible")
         self.query_one("#main_input").text = ""
         # Ensure nothing focusable in blocks or input is focused
@@ -300,11 +305,17 @@ class ShellApp(App):
 
     def enter_input_mode(self, prefix=""):
         self.input_mode = "INPUT"
+        self.current_prefix = prefix
         self.update_mode_label()
+
+        pref_label = self.query_one("#mode_prefix")
+        pref_label.update(prefix)
+
         inp = self.query_one("#main_input")
-        if prefix:
-            inp.text = prefix
-            inp.cursor_location = (0, len(prefix))
+        if prefix == ":": inp.language = "bash"
+        elif prefix == "!": inp.language = "bash"
+        elif prefix == ";": inp.language = "markdown"
+
         self.focus_input()
 
     def update_mode_label(self):
@@ -357,7 +368,7 @@ class ShellApp(App):
         inp = self.query_one("#main_input"); self._suppress_search = True
         if "[bold cyan]CMD:[/] " in label:
             cmd = label.split("] ")[1]
-            inp.text = ":" + cmd
+            inp.text = cmd
         elif "[green]Path:[/]" in label:
             path = label.split("] ")[1]
             if " " in path: path = f'"{path}"'
@@ -390,12 +401,16 @@ class ShellApp(App):
         if self.input_mode == "NORMAL":
             if event.character == "!":
                 self.enter_input_mode(prefix="!")
+                event.stop(); event.prevent_default()
             elif event.character == ":":
                 self.enter_input_mode(prefix=":")
+                event.stop(); event.prevent_default()
             elif event.character == ";":
                 self.enter_input_mode(prefix=";")
+                event.stop(); event.prevent_default()
             elif event.character == "s":
                 self.enter_selection_mode()
+                event.stop(); event.prevent_default()
             return
 
         if self.input_mode == "INPUT":
@@ -476,38 +491,44 @@ class ShellApp(App):
     @on(TextArea.Changed, "#main_input")
     def in_ch(self, event):
         txt = event.text_area.text
-        if txt.startswith(":"): event.text_area.language = "bash"
-        elif txt.startswith("!"): event.text_area.language = "bash"
-        elif txt.startswith(";"): event.text_area.language = "markdown"
 
         if not self._suppress_search and self.query_one("#palette").has_class("visible"):
-            self.update_palette(txt)
+            search_val = txt
+            if self.current_prefix == ":": search_val = ":" + txt
+            self.update_palette(search_val)
         self._suppress_search = False
 
     # --- CORE ACTIONS ---
     def action_submit(self):
-        ta = self.query_one("#main_input"); full_text = ta.text
-        if not full_text.strip() and not any(full_text.startswith(p) for p in ("!", ":", ";")):
+        ta = self.query_one("#main_input"); text = ta.text
+        prefix = self.current_prefix
+
+        if not text.strip() and not prefix:
             ta.text = ""; return
+
         ta.text = ""; self.query_one("#palette").remove_class("visible")
         container = self.query_one("#command_history")
 
-        if full_text.startswith(":"):
-            self.handle_internal_command(full_text[1:])
+        if prefix == ":":
+            self.handle_internal_command(text.strip())
             self.enter_normal_mode()
             return
 
-        if full_text.startswith("!"):
-            content = full_text[1:].strip()
+        if prefix == "!":
+            content = text.strip()
+            if not content: self.enter_normal_mode(); return
             self.history.add(content)
             new_block = CommandBlock(content, os.getcwd(), self)
-            container.mount(new_block); new_block.run_process()
-        elif full_text.startswith(";"):
-            content = full_text[1:].strip()
+            container.mount(new_block)
+            # Need to wait for mount or call later
+            self.call_after_refresh(new_block.run_process)
+        elif prefix == ";":
+            content = text.strip()
+            if not content: self.enter_normal_mode(); return
             new_block = NoteBlock(content); container.mount(new_block)
         else:
-            self.notify("Use ! for bash, ; for note, : for commands", severity="warning")
-            ta.text = full_text
+            self.notify("Unknown mode", severity="error")
+            self.enter_normal_mode()
             return
 
         new_block.scroll_visible()

@@ -7,5 +7,5 @@ git init
 git add .
 git status
 echi"hi"
-ls
 ls -la
+ls
