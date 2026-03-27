@@ -3,9 +3,6 @@ import os
 import subprocess
 import signal
 import argparse
-import asyncio
-
-from common import THEME_FILE
 
 def main():
     parser = argparse.ArgumentParser(description="Gemmi-Shell Multi-User Launcher")
@@ -20,7 +17,8 @@ def main():
 
     if mode == "server":
         import server
-        asyncio.run(server.main(socket_path))
+        s = server.Server(socket_path=socket_path)
+        server.asyncio.run(s.start())
     elif mode == "client":
         import client
         client.ClientApp(socket_path=socket_path).run()

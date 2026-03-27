@@ -85,14 +85,33 @@ class SaveWorkflowModal(ModalScreen):
 
 # --- BLOCKS ---
 
+class BlockEditor(TextArea):
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            event.prevent_default()
+            node = self.parent
+            while node and not hasattr(node, "toggle_edit"):
+                node = node.parent
+            if node: asyncio.create_task(node.toggle_edit(save=False))
+        elif event.key == "ctrl+j":
+            event.stop()
+            event.prevent_default()
+            node = self.parent
+            while node and not hasattr(node, "toggle_edit"):
+                node = node.parent
+            if node: asyncio.create_task(node.toggle_edit(save=True))
+
 class BaseBlock(Static):
     can_focus = True
-    def __init__(self, block_id, content, app_ref, **kwargs):
+    def __init__(self, block_id, content, app_ref, is_editing=False, editing_content=None, cursor_pos=None, **kwargs):
         super().__init__(**kwargs)
         self.block_id = block_id
         self.content = content
         self.app_ref = app_ref
-        self.is_editing = False
+        self.is_editing = is_editing
+        self.editing_content = editing_content or content
+        self.cursor_pos = cursor_pos
         self.locked_by = None
         self.lock_color = None
         self.last_click_time = 0
@@ -101,6 +120,7 @@ class BaseBlock(Static):
         self.locked_by = user_id
         self.lock_color = user_color
         if user_id:
+            # Visual feedback for lock: Right border in user's color
             self.styles.border_right = ("thick", user_color)
             if user_id != self.app_ref.user_id:
                 self.query_one("#block_text_edit").disabled = True
@@ -118,29 +138,44 @@ class BaseBlock(Static):
         if self.is_editing:
             self.query_one("#block_text_edit").focus()
 
+    def on_mount(self) -> None:
+        if self.is_editing and self.cursor_pos:
+            edit = self.query_one("#block_text_edit")
+            edit.cursor_location = self.cursor_pos
+
 class NoteBlock(BaseBlock):
     def compose(self) -> ComposeResult:
-        yield Markdown(self.content, id="md_render", classes="markdown-content")
-        yield TextArea(self.content, id="block_text_edit", classes="hidden", language="markdown")
+        render_classes = "markdown-content" + (" hidden" if self.is_editing else "")
+        edit_classes = "" if self.is_editing else "hidden"
+
+        yield Markdown(self.content, id="md_render", classes=render_classes)
+        yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="markdown")
         yield Label("[dim]Note (esc: leave edit | ctrl+j: save)[/]", classes="block-info")
 
-    async def toggle_edit(self, remote=False, save=True):
+    async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
-            user_label = self.locked_by[:4]
+            user_info = self.app_ref.users.get(self.locked_by, {})
+            user_label = user_info.get("name", self.locked_by[:4])
             self.app_ref.notify(f"Block is locked by user {user_label}", severity="warning")
             return
 
-        self.is_editing = not self.is_editing
+        if not restore:
+            self.is_editing = not self.is_editing
+
         render, edit = self.query_one("#md_render"), self.query_one("#block_text_edit")
 
         if self.is_editing:
             render.add_class("hidden")
             edit.remove_class("hidden")
             if not remote:
-                lines = edit.document.lines
-                edit.cursor_location = (len(lines)-1, len(lines[-1]))
+                if not restore:
+                    lines = edit.document.lines
+                    if lines:
+                        edit.cursor_location = (len(lines)-1, len(lines[-1]))
                 edit.focus()
-                await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
+                self.app_ref.enter_blockedit_mode()
+                if not restore:
+                    await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
         else:
             if not remote:
                 if save:
@@ -154,14 +189,7 @@ class NoteBlock(BaseBlock):
             render.remove_class("hidden")
             edit.add_class("hidden")
             if not remote:
-                self.app.enter_normal_mode()
-
-    async def on_key(self, event: events.Key):
-        if self.is_editing:
-            if event.key == "escape":
-                event.stop(); event.prevent_default(); await self.toggle_edit(save=False)
-            elif event.key == "ctrl+j":
-                event.stop(); event.prevent_default(); await self.toggle_edit(save=True)
+                self.app_ref.enter_normal_mode()
 
 class NotebookInput(TextArea):
     def on_key(self, event: events.Key) -> None:
@@ -179,16 +207,19 @@ class NotebookInput(TextArea):
             self.app.enter_normal_mode()
 
 class CommandBlock(BaseBlock):
-    def __init__(self, block_id, command, cwd, app_ref, **kwargs):
-        super().__init__(block_id, command, app_ref, **kwargs)
+    def __init__(self, block_id, command, cwd, app_ref, is_editing=False, editing_content=None, cursor_pos=None, **kwargs):
+        super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
 
     def compose(self) -> ComposeResult:
+        label_classes = "" if not self.is_editing else "hidden"
+        edit_classes = "" if self.is_editing else "hidden"
+
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
-            yield Label(f"[bold blue]{self.cwd}[/]\n[white]{self.content}[/]", id="cmd_label")
-            yield TextArea(self.content, id="block_text_edit", classes="hidden", language="bash")
+            yield Label(f"[bold blue]{self.cwd}[/]\n[white]{self.content}[/]", id="cmd_label", classes=label_classes)
+            yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
@@ -208,23 +239,30 @@ class CommandBlock(BaseBlock):
             info.update(f"[red]❌ {status.upper()}[/]")
             self.remove_class("running")
 
-    async def toggle_edit(self, remote=False, save=True):
+    async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
-            user_label = self.locked_by[:4]
+            user_info = self.app_ref.users.get(self.locked_by, {})
+            user_label = user_info.get("name", self.locked_by[:4])
             self.app_ref.notify(f"Block is locked by user {user_label}", severity="warning")
             return
 
-        self.is_editing = not self.is_editing
+        if not restore:
+            self.is_editing = not self.is_editing
+
         label, edit = self.query_one("#cmd_label"), self.query_one("#block_text_edit")
 
         if self.is_editing:
             label.add_class("hidden")
             edit.remove_class("hidden")
             if not remote:
-                lines = edit.document.lines
-                edit.cursor_location = (len(lines)-1, len(lines[-1]))
+                if not restore:
+                    lines = edit.document.lines
+                    if lines:
+                        edit.cursor_location = (len(lines)-1, len(lines[-1]))
                 edit.focus()
-                await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
+                self.app_ref.enter_blockedit_mode()
+                if not restore:
+                    await self.app_ref.send_message({"type": "edit_start", "block_id": self.block_id})
         else:
             if not remote:
                 if save:
@@ -238,16 +276,7 @@ class CommandBlock(BaseBlock):
             label.remove_class("hidden")
             edit.add_class("hidden")
             if not remote:
-                self.app.enter_normal_mode()
-
-    async def on_key(self, event: events.Key):
-        if self.is_editing:
-            if event.key == "escape":
-                event.stop(); event.prevent_default(); await self.toggle_edit(save=False)
-            elif event.key == "ctrl+j":
-                event.stop(); event.prevent_default(); await self.toggle_edit(save=True)
-        elif event.key == "ctrl+c":
-            await self.app_ref.send_message({"type": "stop_process", "block_id": self.block_id})
+                self.app_ref.enter_normal_mode()
 
 # --- APP ---
 
@@ -270,6 +299,7 @@ class ClientApp(App):
         self.history = HistoryManager()
         self.input_mode = "NORMAL"
         self.user_color = get_random_bright_color()
+        self.user_name = os.environ.get("USER", "User")
         self.user_id = None
         self.blocks = {}
         self.users = {}
@@ -289,20 +319,17 @@ class ClientApp(App):
             yield Static("[bold magenta]Gemmi-Shell Multi-User | Collaborative Notebook[/]")
         with Vertical(id="bottom_dock"):
             yield OptionList(id="palette")
-            with Horizontal(id="input_header"):
-                self.mode_indicator = Label(f"[bold cyan]MODE: NORMAL[/]", id="mode_indicator")
-                yield self.mode_indicator
+            self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
+            yield self.mode_label
+            with Horizontal(id="input_container"):
+                yield Label("", id="mode_prefix")
                 self.user_label = Label(f"User: [bold {self.user_color}]Me[/]", id="user_indicator")
                 yield self.user_label
-            yield NotebookInput(language="bash", id="main_input")
+                yield NotebookInput(language="bash", id="main_input")
 
     def on_mount(self):
         self.run_worker(self.connect_to_server())
         self.enter_normal_mode()
-        self.set_interval(0.5, self.update_running_statuses)
-
-    def update_running_statuses(self):
-        pass
 
     def on_ready(self):
         self.query_one("#main_input").focus()
@@ -312,7 +339,11 @@ class ClientApp(App):
             self.reader, self.writer = await asyncio.open_unix_connection(
                 self.socket_path, limit=10 * 1024 * 1024
             )
-            await self.send_message({"type": "connect", "color": self.user_color})
+            await self.send_message({
+                "type": "connect",
+                "color": self.user_color,
+                "user": self.user_name
+            })
             await self.listen_to_server()
         except Exception as e:
             self.notify(f"Could not connect to server: {e}", severity="error")
@@ -342,9 +373,23 @@ class ClientApp(App):
         msg_type = msg.get("type")
 
         if msg_type == "init":
-            focused_id = None
-            if self.focused and isinstance(self.focused, BaseBlock):
-                focused_id = self.focused.block_id
+            focused_id, editing_id, editing_content, cursor_pos = None, None, None, None
+            focused = self.focused
+            temp_focused = focused
+            while temp_focused and not isinstance(temp_focused, BaseBlock):
+                temp_focused = temp_focused.parent
+            if isinstance(temp_focused, BaseBlock):
+                focused_id = temp_focused.block_id
+                if temp_focused.is_editing:
+                    editing_id = focused_id
+                    try:
+                        edit_widget = temp_focused.query_one("#block_text_edit")
+                        editing_content = edit_widget.text
+                        cursor_pos = edit_widget.cursor_location
+                    except: pass
+            elif focused and focused.id == "main_input":
+                focused_id = "main_input"
+
             new_id = msg.get("your_id")
             if new_id and new_id != "all": self.user_id = new_id
             self.users = msg.get("users", {})
@@ -354,14 +399,23 @@ class ClientApp(App):
                 except: pass
             self.blocks = {}
             for block_data in msg.get("blocks", []):
-                await self.create_block(block_data)
-            if focused_id and focused_id in self.blocks:
+                b_id = block_data["id"]
+                is_editing = (b_id == editing_id)
+                await self.create_block(
+                    block_data,
+                    is_editing=is_editing,
+                    editing_content=editing_content if is_editing else None,
+                    cursor_pos=cursor_pos if is_editing else None
+                )
+            if focused_id == "main_input":
+                self.query_one("#main_input").focus()
+            elif focused_id and focused_id in self.blocks:
                 self.call_after_refresh(self.blocks[focused_id].focus)
 
         elif msg_type == "user_join":
-            u_id, u_col = msg.get("user_id"), msg.get("color")
-            self.users[u_id] = u_col
-            self.notify(f"User {u_id[:4]} joined", severity="information")
+            u_id, u_col, u_name = msg.get("user_id"), msg.get("color"), msg.get("name")
+            self.users[u_id] = {"color": u_col, "name": u_name}
+            self.notify(f"User {u_name} joined", severity="information")
 
         elif msg_type == "user_leave":
             u_id = msg.get("user_id")
@@ -374,18 +428,25 @@ class ClientApp(App):
             self.refresh()
 
         elif msg_type == "reorder":
-            focused_id = None
-            if self.focused and isinstance(self.focused, BaseBlock):
-                focused_id = self.focused.block_id
             container = self.query_one("#command_history")
+            new_blocks_data = msg.get("blocks", [])
+            new_ids = [b["id"] for b in new_blocks_data]
+
             for b_id in list(self.blocks.keys()):
-                try: self.blocks[b_id].remove()
-                except: pass
-            self.blocks = {}
-            for block_data in msg.get("blocks", []):
-                await self.create_block(block_data)
-            if focused_id and focused_id in self.blocks:
-                self.call_after_refresh(self.blocks[focused_id].focus)
+                if b_id not in new_ids:
+                    self.blocks[b_id].remove()
+                    del self.blocks[b_id]
+
+            for i, b_data in enumerate(new_blocks_data):
+                b_id = b_data["id"]
+                if b_id not in self.blocks: await self.create_block(b_data)
+                block = self.blocks[b_id]
+                if i == 0:
+                    if container.children and container.children[0] != block: container.move_child(block, before=container.children[0])
+                else:
+                    prev_id = new_blocks_data[i-1]["id"]
+                    if prev_id in self.blocks: container.move_child(block, after=self.blocks[prev_id])
+            self.refresh()
 
         elif msg_type == "update_block":
             data = msg.get("block")
@@ -414,7 +475,9 @@ class ClientApp(App):
         elif msg_type == "lock":
             b_id = msg.get("block_id")
             if b_id in self.blocks:
-                self.blocks[b_id].update_lock(msg.get("user_id"), msg.get("user_color"))
+                u_id, u_col, u_name = msg.get("user_id"), msg.get("user_color"), msg.get("user_name")
+                self.users[u_id] = {"color": u_col, "name": u_name}
+                self.blocks[b_id].update_lock(u_id, u_col)
 
         elif msg_type == "unlock":
             b_id = msg.get("block_id")
@@ -427,12 +490,12 @@ class ClientApp(App):
                 self.blocks[b_id].remove()
                 del self.blocks[b_id]
 
-    async def create_block(self, data):
+    async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data["id"]
         if b_id in self.blocks: return
-        if data["type"] == "NOTE": new_block = NoteBlock(b_id, data["content"], self)
+        if data["type"] == "NOTE": new_block = NoteBlock(b_id, data["content"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
         else:
-            new_block = CommandBlock(b_id, data["content"], data["cwd"], self)
+            new_block = CommandBlock(b_id, data["content"], data["cwd"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
             new_block.full_output = data["output"]
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
@@ -441,7 +504,8 @@ class ClientApp(App):
             new_block.update_status(data["status"])
             if data["output"]: new_block.query_one("#output").update(Text.from_ansi(data["output"]))
         if data["locked_by"]:
-                new_block.update_lock(data["locked_by"], self.users.get(data["locked_by"], "white"))
+                user_info = self.users.get(data["locked_by"], {})
+                new_block.update_lock(data["locked_by"], user_info.get("color", "white"))
         self.call_after_refresh(new_block.scroll_visible)
 
     def action_esc_pressed(self):
@@ -453,8 +517,11 @@ class ClientApp(App):
         self.input_mode = "NORMAL"
         self.count_str = ""
         self.update_mode_label()
+        self.query_one("#mode_prefix").update("")
         self.query_one("#palette").remove_class("visible")
-        self.query_one("#main_input").text = ""
+        inp = self.query_one("#main_input")
+        inp.text = ""
+        inp.disabled = True
         try:
             self.screen.focus()
         except: pass
@@ -462,56 +529,30 @@ class ClientApp(App):
     def enter_selection_mode(self):
         self.input_mode = "SELECTION"
         self.update_mode_label()
+        self.query_one("#main_input").disabled = True
         container = self.query_one("#command_history")
         blocks = [c for c in container.children if isinstance(c, BaseBlock)]
         if blocks:
             blocks[-1].focus()
             blocks[-1].scroll_visible()
 
-    def enter_input_mode(self, prefix=""):
-        self.input_mode = "INPUT"
+    def enter_blockedit_mode(self):
+        self.input_mode = "BLOCKEDIT"
         self.update_mode_label()
+        self.query_one("#main_input").disabled = True
+
+    def enter_input_mode(self, prefix=""):
+        mode_map = {"!": "BASH", ":": "CMD", ";": "NOTE"}
+        self.input_mode = mode_map.get(prefix, "INPUT")
+        self.update_mode_label()
+        pref_label = self.query_one("#mode_prefix")
+        pref_label.update(prefix)
+        colors = {"BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252"}
+        pref_label.styles.color = colors.get(self.input_mode, "#7c4dff")
         inp = self.query_one("#main_input")
-        if prefix:
-            inp.text = prefix
-            inp.cursor_location = (0, len(prefix))
+        inp.disabled = False
+        inp.language = "bash" if prefix in ("!", ":") else "markdown"
         inp.focus()
-
-    def update_mode_label(self):
-        if not hasattr(self, "mode_indicator"): return
-        colors = {"NORMAL": "#757575", "INPUT": "#7c4dff", "SELECTION": "#00e676"}
-        c = colors.get(self.input_mode, "#7c4dff")
-        self.mode_indicator.update(f"[bold {c}]MODE: {self.input_mode}[/]")
-
-    async def action_submit(self):
-        ta = self.query_one("#main_input"); full_text = ta.text
-        if not full_text.strip() and not any(full_text.startswith(p) for p in ("!", ":", ";")):
-            ta.text = ""; return
-        ta.text = ""; self.query_one("#palette").remove_class("visible")
-        if full_text.startswith(":"):
-            await self.handle_internal_command(full_text[1:])
-            self.enter_normal_mode()
-            return
-        if full_text.startswith("!"):
-            content = full_text[1:].strip()
-            self.history.add(content)
-            if content.startswith("cd "):
-                try:
-                    target = content[3:].strip() or "~"
-                    os.chdir(os.path.expanduser(target))
-                    container = self.query_one("#command_history")
-                    await container.mount(Label(f"[dim]➜ {os.getcwd()}[/]"))
-                    self.enter_normal_mode(); return
-                except Exception as e:
-                    self.notify(f"CD Error: {e}", severity="error"); return
-            await self.send_message({"type": "submit", "mode": "CMD", "content": content, "cwd": os.getcwd()})
-        elif full_text.startswith(";"):
-            content = full_text[1:].strip()
-            await self.send_message({"type": "submit", "mode": "NOTE", "content": content, "cwd": os.getcwd()})
-        else:
-            self.notify("Use ! for bash, ; for note, : for commands", severity="warning")
-            ta.text = full_text; return
-        self.enter_normal_mode()
 
     def action_toggle_filter(self):
         bar = self.query_one("#filter_bar")
@@ -533,6 +574,40 @@ class ClientApp(App):
             search_text = (block.content + block.full_output).lower() if isinstance(block, CommandBlock) else block.content.lower()
             if not query or query in search_text: block.remove_class("filtered-out")
             else: block.add_class("filtered-out")
+
+    def update_mode_label(self):
+        if not hasattr(self, "mode_label"): return
+        colors = {"NORMAL": "#757575", "BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252", "SELECTION": "#00b0ff", "BLOCKEDIT": "#ffab40"}
+        c = colors.get(self.input_mode, "#7c4dff")
+        self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
+
+    async def action_submit(self):
+        ta = self.query_one("#main_input"); text = ta.text
+        if not text.strip(): self.enter_normal_mode(); return
+        ta.text = ""; self.query_one("#palette").remove_class("visible")
+
+        if self.input_mode == "CMD":
+            await self.handle_internal_command(text.strip())
+            self.enter_normal_mode()
+            return
+
+        if self.input_mode == "BASH":
+            content = text.strip()
+            self.history.add(content)
+            if content.startswith("cd "):
+                try:
+                    target = content[3:].strip() or "~"
+                    os.chdir(os.path.expanduser(target))
+                    container = self.query_one("#command_history")
+                    await container.mount(Label(f"[dim]➜ {os.getcwd()}[/]"))
+                    self.enter_normal_mode(); return
+                except Exception as e:
+                    self.notify(f"CD Error: {e}", severity="error"); return
+            await self.send_message({"type": "submit", "mode": "CMD", "content": content, "cwd": os.getcwd()})
+        elif self.input_mode == "NOTE":
+            await self.send_message({"type": "submit", "mode": "NOTE", "content": text.strip(), "cwd": os.getcwd()})
+
+        self.enter_normal_mode()
 
     async def handle_internal_command(self, cmd_line):
         parts = cmd_line.split(" ", 1)
@@ -589,9 +664,11 @@ class ClientApp(App):
     async def action_move_down(self):
         if self.focused and isinstance(self.focused, BaseBlock): await self.send_message({"type": "move_block", "block_id": self.focused.block_id, "direction": "down"})
     async def action_delete_block(self):
-        if self.focused and isinstance(self.focused, BaseBlock):
-            if self.focused.locked_by and self.focused.locked_by != self.user_id: self.notify(f"Locked by {self.focused.locked_by[:4]}", severity="warning"); return
-            await self.send_message({"type": "delete_block", "block_id": self.focused.block_id})
+        focused = self.focused
+        while focused and not isinstance(focused, BaseBlock): focused = focused.parent
+        if focused and isinstance(focused, BaseBlock):
+            if focused.locked_by and focused.locked_by != self.user_id: self.notify(f"Locked by {self.focused.locked_by[:4]}", severity="warning"); return
+            await self.send_message({"type": "delete_block", "block_id": focused.block_id})
 
     def action_save_wf_dialog(self):
         self.push_screen(SaveWorkflowModal(self.query_one("#main_input").text), lambda s: s and asyncio.create_task(self._save_wf(s)))
@@ -608,22 +685,23 @@ class ClientApp(App):
     def update_palette(self, val: str):
         p = self.query_one("#palette"); p.clear_options()
         if not val.strip() and not val.endswith(" "): p.remove_class("visible"); return
-        if val.startswith(":"):
+        if self.input_mode == "CMD":
             for c in self.available_commands:
-                if fuzzy_match(val[1:].split(" ")[0], c): p.add_option(f"[bold cyan]CMD:[/] {c}")
-        token = self._get_current_token(val); last = token.strip("\"'")
-        d_p, f_q = os.path.dirname(last), os.path.basename(last)
-        try:
-            ex_d = os.path.expanduser(d_p) if d_p else "."
-            if os.path.isdir(ex_d):
-                for f in os.listdir(ex_d):
-                    if fuzzy_match(f_q, f):
-                        full = os.path.join(d_p, f) if d_p else f
-                        p.add_option(f"[green]Path:[/] {full}{'/' if os.path.isdir(os.path.join(ex_d, f)) else ''}")
-        except: pass
-        for h in self.history.get_matches(val): p.add_option(f"[yellow]Hist:[/] {h}")
-        for wf in self.workflows:
-            if fuzzy_match(val, wf['name']) or fuzzy_match(val, wf['cmd']): p.add_option(f"[cyan]WF:[/] {wf['name']} ([dim]{wf['cmd'][:20]}...[/])")
+                if fuzzy_match(val, c): p.add_option(f"[bold cyan]CMD:[/] {c}")
+        elif self.input_mode == "BASH":
+            token = self._get_current_token(val); last = token.strip("\"'")
+            d_p, f_q = os.path.dirname(last), os.path.basename(last)
+            try:
+                ex_d = os.path.expanduser(d_p) if d_p else "."
+                if os.path.isdir(ex_d):
+                    for f in os.listdir(ex_d):
+                        if fuzzy_match(f_q, f):
+                            full = os.path.join(d_p, f) if d_p else f
+                            p.add_option(f"[green]Path:[/] {full}{'/' if os.path.isdir(os.path.join(ex_d, f)) else ''}")
+            except: pass
+            for h in self.history.get_matches(val): p.add_option(f"[yellow]Hist:[/] {h}")
+            for wf in self.workflows:
+                if fuzzy_match(val, wf['name']) or fuzzy_match(val, wf['cmd']): p.add_option(f"[cyan]WF:[/] {wf['name']} ([dim]{wf['cmd'][:20]}...[/])")
         if p.option_count > 0: p.add_class("visible")
         else: p.remove_class("visible")
 
@@ -632,7 +710,7 @@ class ClientApp(App):
         if p.highlighted is None: return
         label = str(p.get_option_at_index(p.highlighted).prompt)
         inp = self.query_one("#main_input"); self._suppress_search = True
-        if "[bold cyan]CMD:[/] " in label: inp.text = ":" + label.split("] ")[1]
+        if "[bold cyan]CMD:[/] " in label: inp.text = label.split("] ")[1]
         elif "[green]Path:[/]" in label:
             path = label.split("] ")[1]
             if " " in path: path = f'"{path}"'
@@ -653,11 +731,11 @@ class ClientApp(App):
         if event.key == "escape": self.enter_normal_mode(); return
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
         if self.input_mode == "NORMAL":
-            if event.character == "!": self.enter_input_mode(prefix="!")
-            elif event.character == ":": self.enter_input_mode(prefix=":")
-            elif event.character == ";": self.enter_input_mode(prefix=";")
-            elif event.character == "s": self.enter_selection_mode()
-        elif self.input_mode == "INPUT":
+            if event.character == "!": self.enter_input_mode(prefix="!"); event.stop(); event.prevent_default()
+            elif event.character == ":": self.enter_input_mode(prefix=":"); event.stop(); event.prevent_default()
+            elif event.character == ";": self.enter_input_mode(prefix=";"); event.stop(); event.prevent_default()
+            elif event.character == "s": self.enter_selection_mode(); event.stop(); event.prevent_default()
+        elif self.input_mode in ("BASH", "CMD", "NOTE", "INPUT"):
             vis = p.has_class("visible")
             if event.key == "ctrl+p":
                 event.prevent_default()
