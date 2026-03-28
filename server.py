@@ -43,6 +43,7 @@ class Server:
         self.master_proc = None
         self.command_queue = asyncio.Queue()
         self.current_block_id = None
+        self.current_sentinel = None
         self.current_command_finished = asyncio.Event()
         self.shell_cwd = os.getcwd()
 
@@ -281,6 +282,9 @@ class Server:
         if self.master_proc and self.master_proc.returncode is None:
             return
 
+        if hasattr(self, 'reader_task') and not self.reader_task.done():
+            self.reader_task.cancel()
+
         m, s = pty.openpty()
         try:
             attr = termios.tcgetattr(s)
@@ -307,13 +311,15 @@ class Server:
         os.close(s)
         logging.info(f"Master shell started (PID: {self.master_proc.pid})")
 
+        # Disable echo to avoid double output and simplify parsing
+        os.write(self.master_fd, b"stty -echo\n")
+
         self.reader_task = asyncio.create_task(self.master_shell_reader())
         if not hasattr(self, 'executor_task') or self.executor_task.done():
             self.executor_task = asyncio.create_task(self.master_shell_executor())
 
     async def master_shell_reader(self):
         loop = asyncio.get_event_loop()
-        sentinel_pattern = re.compile(r'__GEMMI_END_(-?\d+)_([^\n\r]+)__')
         buffer = ""
 
         try:
@@ -324,48 +330,53 @@ class Server:
                         logging.info("Master shell PTY closed")
                         break
 
-                decoded_data = data.decode(errors="replace")
-                buffer += decoded_data
+                    decoded_data = data.decode(errors="replace")
+                    buffer += decoded_data
 
-                if self.current_block_id:
-                    block = self.get_block(self.current_block_id)
-                    if block:
-                        while True:
-                            match = sentinel_pattern.search(buffer)
-                            if match:
-                                before_sentinel = buffer[:match.start()]
-                                if before_sentinel:
-                                    block["output"] += before_sentinel
-                                    await self.broadcast({"type": "output", "block_id": self.current_block_id, "data": before_sentinel})
+                    # Capture current context to handle possible transitions
+                    active_block_id = self.current_block_id
+                    active_sentinel = self.current_sentinel
 
-                                exit_code = int(match.group(1))
-                                new_cwd = match.group(2).strip()
+                    if active_block_id and active_sentinel:
+                        block = self.get_block(active_block_id)
+                        if block:
+                            while True:
+                                pattern = rf'{active_sentinel}_(-?\d+)_([^\n\r]+)__'
+                                match = re.search(pattern, buffer)
+                                if match:
+                                    before_sentinel = buffer[:match.start()]
+                                    if before_sentinel:
+                                        block["output"] += before_sentinel
+                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
 
-                                block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
-                                block["cwd"] = new_cwd
-                                self.shell_cwd = new_cwd
+                                    exit_code = int(match.group(1))
+                                    new_cwd = match.group(2).strip()
 
-                                await self.broadcast({"type": "update_block", "block": block})
+                                    block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
+                                    block["cwd"] = new_cwd
+                                    self.shell_cwd = new_cwd
 
-                                buffer = buffer[match.end():]
-                                self.current_command_finished.set()
-                            else:
-                                split_idx = buffer.find("__GEMMI_END_")
-                                if split_idx == -1:
-                                    await self.broadcast({"type": "output", "block_id": self.current_block_id, "data": buffer})
-                                    block["output"] += buffer
-                                    buffer = ""
-                                elif split_idx > 0:
-                                    to_send = buffer[:split_idx]
-                                    await self.broadcast({"type": "output", "block_id": self.current_block_id, "data": to_send})
-                                    block["output"] += to_send
-                                    buffer = buffer[split_idx:]
-                                break
-                else:
-                    if buffer:
-                        logging.debug(f"Unrouted shell output: {buffer!r}")
-                        buffer = ""
+                                    await self.broadcast({"type": "update_block", "block": block})
 
+                                    buffer = buffer[match.end():]
+                                    self.current_command_finished.set()
+                                else:
+                                    # Partial sentinel detection
+                                    split_idx = buffer.find(active_sentinel)
+                                    if split_idx == -1:
+                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
+                                        block["output"] += buffer
+                                        buffer = ""
+                                    elif split_idx > 0:
+                                        to_send = buffer[:split_idx]
+                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                        block["output"] += to_send
+                                        buffer = buffer[split_idx:]
+                                    break
+                    else:
+                        if buffer:
+                            logging.debug(f"Unrouted shell output: {buffer!r}")
+                            buffer = ""
                 except OSError:
                     logging.info("Master shell PTY error/closed")
                     break
@@ -385,14 +396,14 @@ class Server:
                     await self.start_master_shell()
 
                 self.current_block_id = block["id"]
+                self.current_sentinel = f"__GEMMI_END_{str(uuid.uuid4())[:8]}"
                 self.current_command_finished.clear()
 
                 block["status"] = "running"
                 await self.broadcast({"type": "update_block", "block": block})
 
                 cmd = block["content"]
-                sentinel = f"__GEMMI_END_$?_$(pwd)__"
-                full_cmd = f"{cmd}\necho {sentinel}\n"
+                full_cmd = f"{cmd}\necho {self.current_sentinel}_$?_$(pwd)__\n"
 
                 try:
                     os.write(self.master_fd, full_cmd.encode())
