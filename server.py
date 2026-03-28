@@ -8,7 +8,9 @@ import signal
 import argparse
 import shutil
 import logging
-from typing import Dict, List, Any
+import termios
+import re
+from typing import Dict, List, Any, Optional
 
 # Setup logging
 logging.basicConfig(
@@ -35,7 +37,14 @@ class Server:
         self.socket_path = socket_path
         self.blocks = []  # List of dicts: {id, type, content, cwd, output, status, locked_by}
         self.clients = {} # writer: {id, color, name}
-        self.active_processes = {} # block_id: process
+        self.active_processes = {} # block_id: process (maintained for compatibility/tracking)
+
+        self.master_fd = None
+        self.master_proc = None
+        self.command_queue = asyncio.Queue()
+        self.current_block_id = None
+        self.current_command_finished = asyncio.Event()
+        self.shell_cwd = os.getcwd()
 
     def add_block(self, block_type, content, cwd=None):
         block = {
@@ -134,10 +143,11 @@ class Server:
                     logging.info(f"Received submit from {user_id}: {mode} - {content[:50]}")
 
                     block = self.add_block(mode, content, cwd)
+                    block["cwd"] = self.shell_cwd
                     await self.broadcast({"type": "new_block", "block": block})
 
                     if mode == "CMD":
-                        asyncio.create_task(self.run_process(block, DEFAULT_SHELL))
+                        await self.command_queue.put(block)
 
                 elif msg_type == "edit_start":
                     block_id = msg.get("block_id")
@@ -165,7 +175,7 @@ class Server:
 
                         if block["type"] == "CMD":
                             block["output"] = ""
-                            asyncio.create_task(self.run_process(block, DEFAULT_SHELL))
+                            await self.command_queue.put(block)
 
                 elif msg_type == "edit_cancel":
                     block_id = msg.get("block_id")
@@ -197,10 +207,11 @@ class Server:
 
                 elif msg_type == "stop_process":
                     block_id = msg.get("block_id")
-                    if block_id in self.active_processes:
-                        p = self.active_processes[block_id]
-                        try: os.killpg(os.getpgid(p.pid), signal.SIGINT)
-                        except: pass
+                    if self.current_block_id == block_id and self.master_proc:
+                        try:
+                            os.killpg(os.getpgid(self.master_proc.pid), signal.SIGINT)
+                        except Exception as e:
+                            logging.error(f"Error stopping process: {e}")
 
                 elif msg_type == "paste_block":
                     target_id = msg.get("target_id")
@@ -233,16 +244,10 @@ class Server:
                     block = self.get_block(block_id)
                     if block and block["type"] == "CMD":
                         block["output"] = ""
-                        asyncio.create_task(self.run_process(block, DEFAULT_SHELL))
+                        await self.command_queue.put(block)
 
                 elif msg_type == "clear_session":
-                    # Stop all processes
-                    for b_id in list(self.active_processes.keys()):
-                        p = self.active_processes[b_id]
-                        try: os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                        except: pass
                     self.blocks = []
-                    self.active_processes = {}
                     await self.broadcast({"type": "reorder", "blocks": self.blocks})
 
                 elif msg_type == "import_blocks":
@@ -272,57 +277,145 @@ class Server:
                 await writer.wait_closed()
             except: pass
 
-    async def run_process(self, block, shell_exe):
-        block_id = block["id"]
-        cmd = block["content"]
-        cwd = block["cwd"]
-
-        block["status"] = "running"
-        await self.broadcast({"type": "update_block", "block": block})
+    async def start_master_shell(self):
+        if self.master_proc and self.master_proc.returncode is None:
+            return
 
         m, s = pty.openpty()
         try:
-            p = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=s,
-                stderr=s,
-                stdin=s,
-                executable=shell_exe,
-                cwd=cwd,
-                preexec_fn=os.setsid
-            )
-            self.active_processes[block_id] = p
-            os.close(s)
-
-            loop = asyncio.get_event_loop()
-            while p.returncode is None:
-                try:
-                    data = await loop.run_in_executor(None, os.read, m, 4096)
-                    if data:
-                        decoded_data = data.decode(errors="replace")
-                        block["output"] += decoded_data
-                        await self.broadcast({"type": "output", "block_id": block_id, "data": decoded_data})
-                    else:
-                        break
-                except OSError:
-                    break
-
-            exit_code = await p.wait()
-            block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
-            await self.broadcast({"type": "update_block", "block": block})
+            attr = termios.tcgetattr(s)
+            attr[3] &= ~termios.ECHO
+            termios.tcsetattr(s, termios.TCSANOW, attr)
         except Exception as e:
-            err_msg = f"\nError: {e}"
-            block["output"] += err_msg
-            block["status"] = "error"
-            await self.broadcast({"type": "output", "block_id": block_id, "data": err_msg})
-            await self.broadcast({"type": "update_block", "block": block})
+            logging.error(f"Failed to set TTY attributes: {e}")
+
+        self.master_fd = m
+        # Set PS1 and PROMPT_COMMAND to empty to suppress prompts as much as possible
+        env = dict(os.environ)
+        env["PS1"] = ""
+        env["PROMPT_COMMAND"] = ""
+        env["TERM"] = "xterm-256color"
+
+        self.master_proc = await asyncio.create_subprocess_exec(
+            DEFAULT_SHELL,
+            stdin=s,
+            stdout=s,
+            stderr=s,
+            preexec_fn=os.setsid,
+            env=env
+        )
+        os.close(s)
+        logging.info(f"Master shell started (PID: {self.master_proc.pid})")
+
+        self.reader_task = asyncio.create_task(self.master_shell_reader())
+        if not hasattr(self, 'executor_task') or self.executor_task.done():
+            self.executor_task = asyncio.create_task(self.master_shell_executor())
+
+    async def master_shell_reader(self):
+        loop = asyncio.get_event_loop()
+        sentinel_pattern = re.compile(r'__GEMMI_END_(-?\d+)_([^\n\r]+)__')
+        buffer = ""
+
+        try:
+            while True:
+                try:
+                    data = await loop.run_in_executor(None, os.read, self.master_fd, 4096)
+                    if not data:
+                        logging.info("Master shell PTY closed")
+                        break
+
+                decoded_data = data.decode(errors="replace")
+                buffer += decoded_data
+
+                if self.current_block_id:
+                    block = self.get_block(self.current_block_id)
+                    if block:
+                        while True:
+                            match = sentinel_pattern.search(buffer)
+                            if match:
+                                before_sentinel = buffer[:match.start()]
+                                if before_sentinel:
+                                    block["output"] += before_sentinel
+                                    await self.broadcast({"type": "output", "block_id": self.current_block_id, "data": before_sentinel})
+
+                                exit_code = int(match.group(1))
+                                new_cwd = match.group(2).strip()
+
+                                block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
+                                block["cwd"] = new_cwd
+                                self.shell_cwd = new_cwd
+
+                                await self.broadcast({"type": "update_block", "block": block})
+
+                                buffer = buffer[match.end():]
+                                self.current_command_finished.set()
+                            else:
+                                split_idx = buffer.find("__GEMMI_END_")
+                                if split_idx == -1:
+                                    await self.broadcast({"type": "output", "block_id": self.current_block_id, "data": buffer})
+                                    block["output"] += buffer
+                                    buffer = ""
+                                elif split_idx > 0:
+                                    to_send = buffer[:split_idx]
+                                    await self.broadcast({"type": "output", "block_id": self.current_block_id, "data": to_send})
+                                    block["output"] += to_send
+                                    buffer = buffer[split_idx:]
+                                break
+                else:
+                    if buffer:
+                        logging.debug(f"Unrouted shell output: {buffer!r}")
+                        buffer = ""
+
+                except OSError:
+                    logging.info("Master shell PTY error/closed")
+                    break
+                except Exception as e:
+                    logging.error(f"Error in master_shell_reader: {e}")
+                    break
         finally:
-            try: os.close(m)
-            except: pass
-            if block_id in self.active_processes:
-                del self.active_processes[block_id]
+            self.current_command_finished.set() # Wake up any waiting executor
+
+    async def master_shell_executor(self):
+        while True:
+            try:
+                block = await self.command_queue.get()
+
+                # Ensure master shell and reader are alive
+                if not self.master_proc or self.master_proc.returncode is not None or self.reader_task.done():
+                    await self.start_master_shell()
+
+                self.current_block_id = block["id"]
+                self.current_command_finished.clear()
+
+                block["status"] = "running"
+                await self.broadcast({"type": "update_block", "block": block})
+
+                cmd = block["content"]
+                sentinel = f"__GEMMI_END_$?_$(pwd)__"
+                full_cmd = f"{cmd}\necho {sentinel}\n"
+
+                try:
+                    os.write(self.master_fd, full_cmd.encode())
+                    # Wait for sentinel, but check if process dies
+                    while not self.current_command_finished.is_set():
+                        if self.master_proc.returncode is not None or self.reader_task.done():
+                            block["status"] = "error (shell died)"
+                            await self.broadcast({"type": "update_block", "block": block})
+                            break
+                        await asyncio.sleep(0.1)
+                except Exception as e:
+                    logging.error(f"Error executing command: {e}")
+                    block["status"] = "error"
+                    await self.broadcast({"type": "update_block", "block": block})
+                finally:
+                    self.current_block_id = None
+                    self.command_queue.task_done()
+            except Exception as e:
+                logging.error(f"Error in executor loop: {e}")
+                await asyncio.sleep(1)
 
     async def start(self):
+        await self.start_master_shell()
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
 
