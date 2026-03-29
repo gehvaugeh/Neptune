@@ -594,15 +594,7 @@ class ClientApp(App):
         if self.input_mode == "BASH":
             content = text.strip()
             self.history.add(content)
-            if content.startswith("cd "):
-                try:
-                    target = content[3:].strip() or "~"
-                    os.chdir(os.path.expanduser(target))
-                    container = self.query_one("#command_history")
-                    await container.mount(Label(f"[dim]➜ {os.getcwd()}[/]"))
-                    self.enter_normal_mode(); return
-                except Exception as e:
-                    self.notify(f"CD Error: {e}", severity="error"); return
+            # No longer intercepting 'cd' here; it will be handled by the server's master shell.
             await self.send_message({"type": "submit", "mode": "CMD", "content": content, "cwd": os.getcwd()})
         elif self.input_mode == "NOTE":
             await self.send_message({"type": "submit", "mode": "NOTE", "content": text.strip(), "cwd": os.getcwd()})
