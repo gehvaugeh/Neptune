@@ -214,8 +214,8 @@ class CommandBlock(BaseBlock):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
-        self.screen = pyte.Screen(80, 24)
-        self.stream = pyte.Stream(self.screen)
+        self.terminal_screen = pyte.Screen(80, 24)
+        self.stream = pyte.Stream(self.terminal_screen)
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -240,7 +240,7 @@ class CommandBlock(BaseBlock):
 
         # If we are in CONTROL mode, use the terminal screen rendering
         if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
-            screen_text = "\n".join(line.rstrip() for line in self.screen.display)
+            screen_text = "\n".join(line.rstrip() for line in self.terminal_screen.display)
             self.query_one("#output").update(Text(screen_text))
         else:
             # For regular command blocks, use the scrolling ANSI output
