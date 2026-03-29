@@ -5,6 +5,7 @@ import re
 import time
 import argparse
 import logging
+import pyte
 from typing import List, Dict
 
 from rich.text import Text
@@ -213,6 +214,8 @@ class CommandBlock(BaseBlock):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
+        self.screen = pyte.Screen(80, 24)
+        self.stream = pyte.Stream(self.screen)
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -226,8 +229,22 @@ class CommandBlock(BaseBlock):
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
     def append_output(self, text: str):
+        if not isinstance(text, str):
+            text = text.decode(errors="replace")
+
         self.full_output += text
-        self.query_one("#output").update(Text.from_ansi(self.full_output))
+        if len(self.full_output) > 1_000_000:
+            self.full_output = self.full_output[-1_000_000:]
+
+        self.stream.feed(text)
+
+        # If we are in CONTROL mode, use the terminal screen rendering
+        if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
+            screen_text = "\n".join(line.rstrip() for line in self.screen.display)
+            self.query_one("#output").update(Text(screen_text))
+        else:
+            # For regular command blocks, use the scrolling ANSI output
+            self.query_one("#output").update(Text.from_ansi(self.full_output))
 
     def update_status(self, status):
         info = self.query_one("#info")
@@ -591,9 +608,32 @@ class ClientApp(App):
 
     def update_mode_label(self):
         if not hasattr(self, "mode_label"): return
-        colors = {"NORMAL": "#757575", "BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252", "SELECTION": "#00b0ff", "BLOCKEDIT": "#ffab40"}
+        colors = {
+            "NORMAL": "#757575",
+            "BASH": "#00e676",
+            "CMD": "#7c4dff",
+            "NOTE": "#ff5252",
+            "SELECTION": "#00b0ff",
+            "BLOCKEDIT": "#ffab40",
+            "CONTROL": "#f44336"
+        }
         c = colors.get(self.input_mode, "#7c4dff")
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
+
+    def enter_control_mode(self, block):
+        if not isinstance(block, CommandBlock):
+            return
+        self.input_mode = "CONTROL"
+        self.update_mode_label()
+        self.query_one("#main_input").disabled = True
+        block.focus()
+        # Request terminal resize to match block width
+        try:
+            # Approximate size based on widget size
+            cols = block.size.width - 4 # minus padding/border
+            rows = 24 # Default rows
+            asyncio.create_task(self.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
+        except: pass
 
     async def action_submit(self):
         ta = self.query_one("#main_input"); text = ta.text
@@ -774,9 +814,47 @@ class ClientApp(App):
             elif event.key == "P":
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "before", "yank_data": self.yank_buffer}))
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
+            elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
             elif event.key == "j" and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
             elif event.key == "ctrl+up": asyncio.create_task(self.action_move_up())
             elif event.key == "ctrl+down": asyncio.create_task(self.action_move_down())
+        elif self.input_mode == "CONTROL":
+            if event.key == "ctrl+escape":
+                self.enter_normal_mode()
+                return
+
+            # Map common keys to ANSI sequences
+            key_map = {
+                "enter": "\r",
+                "backspace": "\x7f",
+                "tab": "\t",
+                "up": "\x1b[A",
+                "down": "\x1b[B",
+                "right": "\x1b[C",
+                "left": "\x1b[D",
+                "home": "\x1b[H",
+                "end": "\x1b[F",
+                "pageup": "\x1b[5~",
+                "pagedown": "\x1b[6~",
+                "delete": "\x1b[3~",
+            }
+
+            data = None
+            if event.key in key_map:
+                data = key_map[event.key]
+            elif event.character:
+                data = event.character
+            elif len(event.key) == 1:
+                data = event.key
+            elif event.key.startswith("ctrl+"):
+                char = event.key.split("+")[1]
+                if len(char) == 1:
+                    data = chr(ord(char.lower()) - ord('a') + 1)
+
+            if data:
+                asyncio.create_task(self.send_message({"type": "terminal_input", "data": data}))
+                event.stop()
+                event.prevent_default()
 
     @on(TextArea.Changed, "#main_input")
     def in_ch(self, event):
