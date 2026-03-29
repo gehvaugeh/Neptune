@@ -8,6 +8,7 @@ import signal
 import argparse
 import shutil
 import logging
+import re
 from typing import Dict, List, Any
 
 # Setup logging
@@ -35,7 +36,14 @@ class Server:
         self.socket_path = socket_path
         self.blocks = []  # List of dicts: {id, type, content, cwd, output, status, locked_by}
         self.clients = {} # writer: {id, color, name}
-        self.active_processes = {} # block_id: process
+        self.active_processes = {} # legacy
+        self.master_fd = None
+        self.master_process = None
+        self.command_queue = asyncio.Queue()
+        self.current_block = None
+        self.current_sentinel = None
+        self.done_event = None
+        self.init_done = asyncio.Event()
 
     def add_block(self, block_type, content, cwd=None):
         block = {
@@ -137,7 +145,7 @@ class Server:
                     await self.broadcast({"type": "new_block", "block": block})
 
                     if mode == "CMD":
-                        asyncio.create_task(self.run_process(block, DEFAULT_SHELL))
+                        await self.command_queue.put(block)
 
                 elif msg_type == "edit_start":
                     block_id = msg.get("block_id")
@@ -165,7 +173,7 @@ class Server:
 
                         if block["type"] == "CMD":
                             block["output"] = ""
-                            asyncio.create_task(self.run_process(block, DEFAULT_SHELL))
+                            await self.command_queue.put(block)
 
                 elif msg_type == "edit_cancel":
                     block_id = msg.get("block_id")
@@ -188,19 +196,14 @@ class Server:
                 elif msg_type == "delete_block":
                     block_id = msg.get("block_id")
                     self.blocks = [b for b in self.blocks if b["id"] != block_id]
-                    if block_id in self.active_processes:
-                        p = self.active_processes[block_id]
-                        try: os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                        except: pass
-                        del self.active_processes[block_id]
+                    if self.current_block and self.current_block["id"] == block_id:
+                        if self.master_fd:
+                            os.write(self.master_fd, b'\x03')
                     await self.broadcast({"type": "remove_block", "block_id": block_id})
 
                 elif msg_type == "stop_process":
-                    block_id = msg.get("block_id")
-                    if block_id in self.active_processes:
-                        p = self.active_processes[block_id]
-                        try: os.killpg(os.getpgid(p.pid), signal.SIGINT)
-                        except: pass
+                    if self.master_fd:
+                        os.write(self.master_fd, b'\x03')
 
                 elif msg_type == "paste_block":
                     target_id = msg.get("target_id")
@@ -233,16 +236,12 @@ class Server:
                     block = self.get_block(block_id)
                     if block and block["type"] == "CMD":
                         block["output"] = ""
-                        asyncio.create_task(self.run_process(block, DEFAULT_SHELL))
+                        await self.command_queue.put(block)
 
                 elif msg_type == "clear_session":
-                    # Stop all processes
-                    for b_id in list(self.active_processes.keys()):
-                        p = self.active_processes[b_id]
-                        try: os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                        except: pass
+                    if self.master_fd:
+                        os.write(self.master_fd, b'\x03')
                     self.blocks = []
-                    self.active_processes = {}
                     await self.broadcast({"type": "reorder", "blocks": self.blocks})
 
                 elif msg_type == "import_blocks":
@@ -272,61 +271,78 @@ class Server:
                 await writer.wait_closed()
             except: pass
 
-    async def run_process(self, block, shell_exe):
-        block_id = block["id"]
-        cmd = block["content"]
-        cwd = block["cwd"]
-
-        block["status"] = "running"
-        await self.broadcast({"type": "update_block", "block": block})
-
+    async def start_master_shell(self):
         m, s = pty.openpty()
-        try:
-            p = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=s,
-                stderr=s,
-                stdin=s,
-                executable=shell_exe,
-                cwd=cwd,
-                preexec_fn=os.setsid
-            )
-            self.active_processes[block_id] = p
-            os.close(s)
+        self.master_fd = m
+        self.master_process = await asyncio.create_subprocess_exec(
+            DEFAULT_SHELL,
+            stdin=s,
+            stdout=s,
+            stderr=s,
+            preexec_fn=os.setsid,
+            env=os.environ.copy()
+        )
+        os.close(s)
+        init_cmds = "stty -echo && export PS1='' PROMPT_COMMAND='' && clear\necho GS_INIT_DONE\n"
+        os.write(self.master_fd, init_cmds.encode())
+        asyncio.create_task(self.read_master_output())
+        asyncio.create_task(self.process_queue())
 
-            loop = asyncio.get_event_loop()
-            while p.returncode is None:
-                try:
-                    data = await loop.run_in_executor(None, os.read, m, 4096)
-                    if data:
-                        decoded_data = data.decode(errors="replace")
-                        block["output"] += decoded_data
-                        await self.broadcast({"type": "output", "block_id": block_id, "data": decoded_data})
-                    else:
-                        break
-                except OSError:
-                    break
+    async def read_master_output(self):
+        loop = asyncio.get_event_loop()
+        while self.master_process.returncode is None:
+            try:
+                data = await loop.run_in_executor(None, os.read, self.master_fd, 4096)
+                if not data: break
+                decoded = data.decode(errors="replace")
+                if "GS_INIT_DONE" in decoded:
+                    self.init_done.set()
+                if self.current_block:
+                    await self.handle_master_output(decoded)
+            except OSError: break
+        logging.info("Master shell terminated")
 
-            exit_code = await p.wait()
-            block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
-            await self.broadcast({"type": "update_block", "block": block})
-        except Exception as e:
-            err_msg = f"\nError: {e}"
-            block["output"] += err_msg
-            block["status"] = "error"
-            await self.broadcast({"type": "output", "block_id": block_id, "data": err_msg})
-            await self.broadcast({"type": "update_block", "block": block})
-        finally:
-            try: os.close(m)
-            except: pass
-            if block_id in self.active_processes:
-                del self.active_processes[block_id]
+    async def process_queue(self):
+        await self.init_done.wait()
+        while True:
+            block = await self.command_queue.get()
+            try:
+                self.current_block = block
+                self.current_sentinel = f"GS_DONE_{uuid.uuid4()}"
+                block["status"] = "running"
+                block["output"] = ""
+                await self.broadcast({"type": "update_block", "block": block})
+                full_cmd = f"cd {block['cwd']} 2>/dev/null; {block['content']}\necho {self.current_sentinel} $?\npwd\n"
+                os.write(self.master_fd, full_cmd.encode())
+                self.done_event = asyncio.Event()
+                await self.done_event.wait()
+            except Exception as e:
+                logging.error(f"Error in process_queue: {e}")
+            finally:
+                self.current_block = None
+                self.command_queue.task_done()
+
+    async def handle_master_output(self, data):
+        self.current_block["output"] += data
+        pattern = rf'{self.current_sentinel}\s+(\d+)\s*\r?\n(.*?)\r?\n'
+        match = re.search(pattern, self.current_block["output"], re.DOTALL)
+        if match:
+            exit_code, cwd = int(match.group(1)), match.group(2).strip()
+            idx = match.start()
+            self.current_block["output"] = self.current_block["output"][:idx]
+            self.current_block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
+            self.current_block["cwd"] = cwd
+            await self.broadcast({"type": "update_block", "block": self.current_block})
+            self.done_event.set()
+        else:
+            await self.broadcast({"type": "output", "block_id": self.current_block["id"], "data": data})
 
     async def start(self):
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
-
+        await self.start_master_shell()
         server = await asyncio.start_unix_server(self.handle_client, self.socket_path, limit=10 * 1024 * 1024)
+        logging.info(f"Server started on {self.socket_path}")
         print(f"Server started on {self.socket_path}")
         print(f"Using shell: {DEFAULT_SHELL}")
 
