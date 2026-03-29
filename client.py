@@ -10,12 +10,14 @@ from typing import List, Dict
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
+from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work, on, events, message
 
 from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE
+from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider
 
 # Setup client logging
 logging.basicConfig(
@@ -309,7 +311,19 @@ class ClientApp(App):
         self.workflows = load_workflows()
         self.yank_buffer = None
         self.count_str = ""
-        self.available_commands = ["export", "import", "exit", "save_wf", "help", "clear"]
+        self.available_commands = [
+            {"name": "export", "params": "[file]", "desc": "Export notebook to Markdown"},
+            {"name": "import", "params": "[file]", "desc": "Import notebook from Markdown"},
+            {"name": "exit", "params": "", "desc": "Exit Gemmi-Shell"},
+            {"name": "save_wf", "params": "", "desc": "Save current input as Workflow"},
+            {"name": "help", "params": "", "desc": "Show help message"},
+            {"name": "clear", "params": "", "desc": "Clear all blocks and shell state"},
+        ]
+        self.providers = {
+            "BASH": BashAutocompleteProvider(),
+            "CMD": CmdAutocompleteProvider(self.available_commands),
+            "NOTE": MarkdownAutocompleteProvider()
+        }
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="filter_bar", classes="hidden"):
@@ -594,15 +608,6 @@ class ClientApp(App):
         if self.input_mode == "BASH":
             content = text.strip()
             self.history.add(content)
-            if content.startswith("cd "):
-                try:
-                    target = content[3:].strip() or "~"
-                    os.chdir(os.path.expanduser(target))
-                    container = self.query_one("#command_history")
-                    await container.mount(Label(f"[dim]➜ {os.getcwd()}[/]"))
-                    self.enter_normal_mode(); return
-                except Exception as e:
-                    self.notify(f"CD Error: {e}", severity="error"); return
             await self.send_message({"type": "submit", "mode": "CMD", "content": content, "cwd": os.getcwd()})
         elif self.input_mode == "NOTE":
             await self.send_message({"type": "submit", "mode": "NOTE", "content": text.strip(), "cwd": os.getcwd()})
@@ -684,48 +689,51 @@ class ClientApp(App):
 
     def update_palette(self, val: str):
         p = self.query_one("#palette"); p.clear_options()
-        if not val.strip() and not val.endswith(" "): p.remove_class("visible"); return
-        if self.input_mode == "CMD":
-            for c in self.available_commands:
-                if fuzzy_match(val, c): p.add_option(f"[bold cyan]CMD:[/] {c}")
-        elif self.input_mode == "BASH":
-            token = self._get_current_token(val); last = token.strip("\"'")
-            d_p, f_q = os.path.dirname(last), os.path.basename(last)
-            try:
-                ex_d = os.path.expanduser(d_p) if d_p else "."
-                if os.path.isdir(ex_d):
-                    for f in os.listdir(ex_d):
-                        if fuzzy_match(f_q, f):
-                            full = os.path.join(d_p, f) if d_p else f
-                            p.add_option(f"[green]Path:[/] {full}{'/' if os.path.isdir(os.path.join(ex_d, f)) else ''}")
-            except: pass
-            for h in self.history.get_matches(val): p.add_option(f"[yellow]Hist:[/] {h}")
-            for wf in self.workflows:
-                if fuzzy_match(val, wf['name']) or fuzzy_match(val, wf['cmd']): p.add_option(f"[cyan]WF:[/] {wf['name']} ([dim]{wf['cmd'][:20]}...[/])")
+        provider = self.providers.get(self.input_mode)
+        if not provider:
+            p.remove_class("visible"); return
+
+        context = {
+            "history": self.history.cache,
+            "workflows": self.workflows,
+            "cwd": os.getcwd()
+        }
+        suggestions = provider.get_suggestions(val, context)
+
+        type_colors = {"path": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252"}
+
+        for s in suggestions:
+            color = type_colors.get(s['type'], "white")
+            p.add_option(Option(f"[{color}]{s['type'].upper()}:[/] {s['display']} [dim]{s['description']}[/]", id=s['value']))
+
         if p.option_count > 0: p.add_class("visible")
         else: p.remove_class("visible")
 
     def sync_input(self):
         p = self.query_one("#palette")
         if p.highlighted is None: return
-        label = str(p.get_option_at_index(p.highlighted).prompt)
+        opt = p.get_option_at_index(p.highlighted)
+        val = opt.id
         inp = self.query_one("#main_input"); self._suppress_search = True
-        if "[bold cyan]CMD:[/] " in label: inp.text = label.split("] ")[1]
-        elif "[green]Path:[/]" in label:
-            path = label.split("] ")[1]
-            if " " in path: path = f'"{path}"'
-            token = self._get_current_token(inp.text)
-            inp.text = inp.text[:inp.text.rfind(token)] + path if token else inp.text + path
+
+        if self.input_mode == "BASH":
+            token = self.providers["BASH"]._get_current_token(inp.text)
+            if token:
+                idx = inp.text.rfind(token)
+                inp.text = inp.text[:idx] + val
+            else:
+                inp.text += val
         else:
-            cmd = label.split("] ", 1)[1]
-            if "[cyan]WF:[/]" in label:
-                name = label.split("] ")[1].split(" (")[0]
-                cmd = next((wf['cmd'] for wf in self.workflows if wf['name'] == name), cmd)
-            inp.text = cmd
+            inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
 
     @on(OptionList.OptionSelected, "#palette")
-    def opt_sel(self, event): self.sync_input(); self.query_one("#palette").remove_class("visible"); self.query_one("#main_input").focus()
+    def opt_sel(self, event):
+        self.sync_input()
+        self.query_one("#palette").remove_class("visible")
+        self.query_one("#main_input").focus()
+        if self.input_mode == "BASH":
+            self.update_palette(self.query_one("#main_input").text)
 
     def on_key(self, event: events.Key):
         if event.key == "escape": self.enter_normal_mode(); return

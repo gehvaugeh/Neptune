@@ -180,14 +180,23 @@ NoteBlock {
 /* Autocomplete Palette */
 #palette {
     display: none;
-    max-height: 10;
+    max-height: 12;
     background: $bg-block;
     border-bottom: solid $border;
     color: $text-main;
+    scrollbar-gutter: stable;
 }
 
 #palette.visible {
     display: block;
+}
+
+#palette > .option-list--option {
+    padding: 0 1;
+}
+
+#palette > .option-list--option.-highlighted {
+    background: $purple-dim;
 }
 
 /* Modals */
