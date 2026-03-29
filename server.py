@@ -10,7 +10,7 @@ import shutil
 import logging
 import termios
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 # Setup logging
 logging.basicConfig(
@@ -282,7 +282,9 @@ class Server:
         if self.master_proc and self.master_proc.returncode is None:
             return
 
+        logging.info("Starting master shell session...")
         if hasattr(self, 'reader_task') and not self.reader_task.done():
+            logging.debug("Cancelling previous reader task")
             self.reader_task.cancel()
 
         m, s = pty.openpty()
@@ -294,14 +296,14 @@ class Server:
             logging.error(f"Failed to set TTY attributes: {e}")
 
         self.master_fd = m
-        # Set PS1 and PROMPT_COMMAND to empty to suppress prompts as much as possible
         env = dict(os.environ)
         env["PS1"] = ""
         env["PROMPT_COMMAND"] = ""
-        env["TERM"] = "xterm-256color"
+        env["TERM"] = "dumb"
 
+        # Use --noediting to disable readline which can cause issues with echo and escape codes
         self.master_proc = await asyncio.create_subprocess_exec(
-            DEFAULT_SHELL,
+            DEFAULT_SHELL, "--noediting", "--norc", "--noprofile",
             stdin=s,
             stdout=s,
             stderr=s,
@@ -311,7 +313,7 @@ class Server:
         os.close(s)
         logging.info(f"Master shell started (PID: {self.master_proc.pid})")
 
-        # Disable echo to avoid double output and simplify parsing
+        # Disable echo explicitly
         os.write(self.master_fd, b"stty -echo\n")
 
         self.reader_task = asyncio.create_task(self.master_shell_reader())
@@ -331,6 +333,7 @@ class Server:
                         break
 
                     decoded_data = data.decode(errors="replace")
+                    logging.debug(f"PTY READ: {decoded_data!r}")
                     buffer += decoded_data
 
                     # Capture current context to handle possible transitions
@@ -341,16 +344,22 @@ class Server:
                         block = self.get_block(active_block_id)
                         if block:
                             while True:
-                                pattern = rf'{active_sentinel}_(-?\d+)_([^\n\r]+)__'
+                                # Look for sentinel
+                                pattern = rf'{re.escape(active_sentinel)}_(-?\d+)_([^\r\n]*)__'
                                 match = re.search(pattern, buffer)
                                 if match:
+                                    logging.debug(f"Sentinel matched: {match.group(0)}")
                                     before_sentinel = buffer[:match.start()]
+
+                                    # Clean up trailing newlines/prompts before sentinel
+                                    # often the shell outputs a newline before the next command
                                     if before_sentinel:
                                         block["output"] += before_sentinel
                                         await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
 
                                     exit_code = int(match.group(1))
                                     new_cwd = match.group(2).strip()
+                                    logging.info(f"Command finished. Exit: {exit_code}, CWD: {new_cwd}")
 
                                     block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
                                     block["cwd"] = new_cwd
@@ -360,22 +369,30 @@ class Server:
 
                                     buffer = buffer[match.end():]
                                     self.current_command_finished.set()
+                                    break # Command finished, wait for next one
                                 else:
-                                    # Partial sentinel detection
-                                    split_idx = buffer.find(active_sentinel)
-                                    if split_idx == -1:
-                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
-                                        block["output"] += buffer
-                                        buffer = ""
-                                    elif split_idx > 0:
-                                        to_send = buffer[:split_idx]
-                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                    # Handle output before sentinel
+                                    # To avoid sending a partial sentinel, we find the first char of the sentinel
+                                    s_idx = buffer.find(active_sentinel[0])
+                                    if s_idx == -1:
+                                        # No start of sentinel, safe to send all
+                                        if buffer:
+                                            block["output"] += buffer
+                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
+                                            buffer = ""
+                                        break
+                                    elif s_idx > 0:
+                                        # Send everything before the potential sentinel
+                                        to_send = buffer[:s_idx]
                                         block["output"] += to_send
-                                        buffer = buffer[split_idx:]
+                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                        buffer = buffer[s_idx:]
+
+                                    # If buffer starts with sentinel but no match yet, it's partial. Wait.
                                     break
                     else:
                         if buffer:
-                            logging.debug(f"Unrouted shell output: {buffer!r}")
+                            # logging.debug(f"Unrouted shell output: {buffer!r}")
                             buffer = ""
                 except OSError:
                     logging.info("Master shell PTY error/closed")
@@ -393,17 +410,23 @@ class Server:
 
                 # Ensure master shell and reader are alive
                 if not self.master_proc or self.master_proc.returncode is not None or self.reader_task.done():
+                    logging.info("Restarting master shell before command...")
                     await self.start_master_shell()
+                    # Small delay to let shell initialize
+                    await asyncio.sleep(0.5)
 
                 self.current_block_id = block["id"]
-                self.current_sentinel = f"__GEMMI_END_{str(uuid.uuid4())[:8]}"
+                self.current_sentinel = f"__GEMMI_END_{os.urandom(4).hex()}"
                 self.current_command_finished.clear()
 
                 block["status"] = "running"
                 await self.broadcast({"type": "update_block", "block": block})
 
-                cmd = block["content"]
-                full_cmd = f"{cmd}\necho {self.current_sentinel}_$?_$(pwd)__\n"
+                cmd = block["content"].strip()
+                sentinel = self.current_sentinel
+                # Robust command wrapper that handles comments and multi-line
+                full_cmd = f"{{ \n{cmd}\n }} ; __R=$? ; __D=$(pwd) ; printf '\\n%s_%%s_%%s__\\n' \"{sentinel}\" \"$__R\" \"$__D\"\n"
+                logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
 
                 try:
                     os.write(self.master_fd, full_cmd.encode())
