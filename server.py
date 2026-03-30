@@ -253,6 +253,16 @@ class Server:
                         winsize = struct.pack("HHHH", rows, cols, 0, 0)
                         fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
 
+                elif msg_type == "terminal_set_echo":
+                    enabled = msg.get("enabled", False)
+                    if self.master_fd:
+                        attr = termios.tcgetattr(self.master_fd)
+                        if enabled:
+                            attr[3] |= termios.ECHO
+                        else:
+                            attr[3] &= ~termios.ECHO
+                        termios.tcsetattr(self.master_fd, termios.TCSANOW, attr)
+
                 elif msg_type == "clear_session":
                     if self.master_fd:
                         os.write(self.master_fd, b'\x03')
@@ -289,13 +299,16 @@ class Server:
     async def start_master_shell(self):
         m, s = pty.openpty()
         self.master_fd = m
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
         self.master_process = await asyncio.create_subprocess_exec(
             DEFAULT_SHELL,
             stdin=s,
             stdout=s,
             stderr=s,
             preexec_fn=os.setsid,
-            env=os.environ.copy()
+            env=env
         )
         os.close(s)
         init_cmds = "stty -echo && export PS1='' PROMPT_COMMAND='' && clear\necho GS_INIT_DONE\n"

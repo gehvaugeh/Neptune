@@ -240,8 +240,25 @@ class CommandBlock(BaseBlock):
 
         # If we are in CONTROL mode, use the terminal screen rendering
         if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
-            screen_text = "\n".join(line.rstrip() for line in self.terminal_screen.display)
-            self.query_one("#output").update(Text(screen_text))
+            rich_text = Text()
+            for y in range(self.terminal_screen.lines):
+                line = self.terminal_screen.buffer[y]
+                for x in range(self.terminal_screen.columns):
+                    char = line[x]
+                    # Map pyte colors to Rich
+                    fg = char.fg if char.fg != "default" else None
+                    bg = char.bg if char.bg != "default" else None
+                    style = ""
+                    if fg:
+                        style += fg if not fg.isdigit() else f"color({fg})"
+                    if bg:
+                        style += (" on " if style else "on ") + (bg if not bg.isdigit() else f"color({bg})")
+                    if char.bold: style += " bold"
+                    if char.italics: style += " italic"
+                    if char.underscore: style += " underline"
+                    rich_text.append(char.data, style=style)
+                rich_text.append("\n")
+            self.query_one("#output").update(rich_text)
         else:
             # For regular command blocks, use the scrolling ANSI output
             self.query_one("#output").update(Text.from_ansi(self.full_output))
@@ -545,6 +562,9 @@ class ClientApp(App):
         self.enter_normal_mode()
 
     def enter_normal_mode(self):
+        if self.input_mode == "CONTROL":
+            # Disable echo when leaving interactive mode
+            asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": False}))
         self.input_mode = "NORMAL"
         self.count_str = ""
         self.update_mode_label()
@@ -627,6 +647,8 @@ class ClientApp(App):
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
         block.focus()
+        # Enable echo for interactive mode
+        asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": True}))
         # Request terminal resize to match block width
         try:
             # Approximate size based on widget size
