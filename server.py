@@ -9,6 +9,9 @@ import argparse
 import shutil
 import logging
 import re
+import fcntl
+import termios
+import struct
 from typing import Dict, List, Any
 
 # Setup logging
@@ -238,6 +241,28 @@ class Server:
                         block["output"] = ""
                         await self.command_queue.put(block)
 
+                elif msg_type == "terminal_input":
+                    data = msg.get("data")
+                    if self.master_fd and data:
+                        os.write(self.master_fd, data.encode())
+
+                elif msg_type == "terminal_resize":
+                    rows = msg.get("rows", 24)
+                    cols = msg.get("cols", 80)
+                    if self.master_fd:
+                        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+                        fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
+
+                elif msg_type == "terminal_set_echo":
+                    enabled = msg.get("enabled", False)
+                    if self.master_fd:
+                        attr = termios.tcgetattr(self.master_fd)
+                        if enabled:
+                            attr[3] |= termios.ECHO
+                        else:
+                            attr[3] &= ~termios.ECHO
+                        termios.tcsetattr(self.master_fd, termios.TCSANOW, attr)
+
                 elif msg_type == "clear_session":
                     if self.master_fd:
                         os.write(self.master_fd, b'\x03')
@@ -274,13 +299,16 @@ class Server:
     async def start_master_shell(self):
         m, s = pty.openpty()
         self.master_fd = m
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
         self.master_process = await asyncio.create_subprocess_exec(
             DEFAULT_SHELL,
             stdin=s,
             stdout=s,
             stderr=s,
             preexec_fn=os.setsid,
-            env=os.environ.copy()
+            env=env
         )
         os.close(s)
         init_cmds = "stty -echo && export PS1='' PROMPT_COMMAND='' && clear\necho GS_INIT_DONE\n"
@@ -323,19 +351,26 @@ class Server:
                 self.command_queue.task_done()
 
     async def handle_master_output(self, data):
+        if not self.current_block:
+            return
+
         self.current_block["output"] += data
-        pattern = rf'{self.current_sentinel}\s+(\d+)\s*\r?\n(.*?)\r?\n'
-        match = re.search(pattern, self.current_block["output"], re.DOTALL)
-        if match:
-            exit_code, cwd = int(match.group(1)), match.group(2).strip()
-            idx = match.start()
-            self.current_block["output"] = self.current_block["output"][:idx]
-            self.current_block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
-            self.current_block["cwd"] = cwd
-            await self.broadcast({"type": "update_block", "block": self.current_block})
-            self.done_event.set()
-        else:
-            await self.broadcast({"type": "output", "block_id": self.current_block["id"], "data": data})
+
+        # Check if the sentinel is present in the output
+        if self.current_sentinel and self.current_sentinel in self.current_block["output"]:
+            pattern = rf'{self.current_sentinel}\s+(\d+)\s*\r?\n(.*?)\r?\n'
+            match = re.search(pattern, self.current_block["output"], re.DOTALL)
+            if match:
+                exit_code, cwd = int(match.group(1)), match.group(2).strip()
+                idx = match.start()
+                self.current_block["output"] = self.current_block["output"][:idx]
+                self.current_block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
+                self.current_block["cwd"] = cwd
+                await self.broadcast({"type": "update_block", "block": self.current_block})
+                self.done_event.set()
+                return
+
+        await self.broadcast({"type": "output", "block_id": self.current_block["id"], "data": data})
 
     async def start(self):
         if os.path.exists(self.socket_path):
