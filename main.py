@@ -5,9 +5,20 @@ import signal
 import argparse
 
 def main():
-    parser = argparse.ArgumentParser(description="Gemmi-Shell Multi-User Launcher")
+    header = r"""
+    _   __            __
+   / | / /__  ____   / /_ __  __ ____   ___
+  /  |/ // _ \/ __ \ / __// / / // __ \ / _ \
+ / /|  //  __/ /_/ // /_ / /_/ // / / //  __/
+/_/ |_/ \___/ .___/ \__/ \__,_//_/ /_/ \___/
+            /_/
+    """
+    parser = argparse.ArgumentParser(
+        description=header + "\nNeptune Multi-User Launcher",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("mode", choices=["server", "client", "all"], help="Mode to start: server, client, or all")
-    parser.add_argument("-s", "--socket", default="/tmp/gemmi_shell.sock", help="Path to the Unix Domain Socket")
+    parser.add_argument("-s", "--socket", default="/tmp/neptune.sock", help="Path to the Unix Domain Socket")
 
     # We use parse_known_args to allow passing mode and socket, and then handle the rest
     args, unknown = parser.parse_known_args()
