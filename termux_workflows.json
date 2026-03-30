@@ -6,5 +6,13 @@
     {
         "name": "initialize git repo",
         "cmd": "git init"
+    },
+    {
+        "name": "git commit",
+        "cmd": "git commit -m \"<message>\""
+    },
+    {
+        "name": "find file",
+        "cmd": "find <path> -name \"<filename>\""
     }
 ]

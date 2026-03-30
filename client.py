@@ -103,6 +103,39 @@ class BlockEditor(TextArea):
             while node and not hasattr(node, "toggle_edit"):
                 node = node.parent
             if node: asyncio.create_task(node.toggle_edit(save=True))
+        elif event.key == "alt+right":
+            event.stop()
+            event.prevent_default()
+            self.hop_parameter(direction="next")
+        elif event.key == "alt+left":
+            event.stop()
+            event.prevent_default()
+            self.hop_parameter(direction="prev")
+
+    def hop_parameter(self, direction="next"):
+        text = self.text
+        cursor_idx = self.document.get_index_from_location(self.cursor_location)
+        pattern = re.compile(r"<[^>]+>")
+        matches = list(pattern.finditer(text))
+        if not matches: return
+
+        target = None
+        if direction == "next":
+            for m in matches:
+                if m.start() > cursor_idx:
+                    target = m; break
+            if not target: target = matches[0]
+        else:
+            for m in reversed(matches):
+                if m.start() < cursor_idx:
+                    target = m; break
+            if not target: target = matches[-1]
+
+        if target:
+            start_loc = self.document.get_location_from_index(target.start())
+            end_loc = self.document.get_location_from_index(target.end())
+            self.selection = (start_loc, end_loc)
+            self.cursor_location = start_loc
 
 class BaseBlock(Static):
     can_focus = True
@@ -207,6 +240,43 @@ class NotebookInput(TextArea):
             event.stop()
             event.prevent_default()
             self.app.enter_normal_mode()
+        elif event.key == "alt+right":
+            event.stop()
+            event.prevent_default()
+            self.hop_parameter(direction="next")
+        elif event.key == "alt+left":
+            event.stop()
+            event.prevent_default()
+            self.hop_parameter(direction="prev")
+        elif event.key == "ctrl+m": # Enter on some terminals
+            event.stop()
+            event.prevent_default()
+            asyncio.create_task(self.app.action_submit())
+
+    def hop_parameter(self, direction="next"):
+        text = self.text
+        cursor_idx = self.document.get_index_from_location(self.cursor_location)
+        pattern = re.compile(r"<[^>]+>")
+        matches = list(pattern.finditer(text))
+        if not matches: return
+
+        target = None
+        if direction == "next":
+            for m in matches:
+                if m.start() > cursor_idx:
+                    target = m; break
+            if not target: target = matches[0]
+        else:
+            for m in reversed(matches):
+                if m.start() < cursor_idx:
+                    target = m; break
+            if not target: target = matches[-1]
+
+        if target:
+            start_loc = self.document.get_location_from_index(target.start())
+            end_loc = self.document.get_location_from_index(target.end())
+            self.selection = (start_loc, end_loc)
+            self.cursor_location = start_loc
 
 class CommandBlock(BaseBlock):
     def __init__(self, block_id, command, cwd, app_ref, is_editing=False, editing_content=None, cursor_pos=None, **kwargs):
