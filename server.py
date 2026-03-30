@@ -354,8 +354,15 @@ class Server:
                     os.remove(self.socket_path)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Gemmi-Shell Server")
-    parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
+    parser = argparse.ArgumentParser(
+        description="Gemmi-Shell Collaborative Shell Server - Host and manage shell sessions.",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "-s", "--socket",
+        default=DEFAULT_SOCKET_PATH,
+        help=f"Path to the Unix Domain Socket (default: {DEFAULT_SOCKET_PATH})"
+    )
     args = parser.parse_args()
 
     server = Server(socket_path=args.socket)
