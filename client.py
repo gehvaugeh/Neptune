@@ -214,7 +214,7 @@ class CommandBlock(BaseBlock):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
-        self.terminal_screen = pyte.Screen(80, 24)
+        self.terminal_screen = pyte.HistoryScreen(80, 24, history=1000)
         self.stream = pyte.Stream(self.terminal_screen)
 
     def compose(self) -> ComposeResult:
@@ -237,36 +237,66 @@ class CommandBlock(BaseBlock):
             self.full_output = self.full_output[-1_000_000:]
 
         self.stream.feed(text)
+        self.render_terminal()
 
-        # If we are in CONTROL mode, use the terminal screen rendering
-        if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
-            rich_text = Text()
-            for y in range(self.terminal_screen.lines):
-                line = self.terminal_screen.buffer[y]
-                for x in range(self.terminal_screen.columns):
-                    char = line[x]
-                    # Map pyte colors to Rich
-                    fg = char.fg if char.fg != "default" else None
-                    bg = char.bg if char.bg != "default" else None
+    def render_terminal(self):
+        # We always use the pyte screen for rendering to ensure consistent VT100 support
+        rich_text = Text()
 
-                    # Fix bright colors for Rich
-                    if fg and fg.startswith("bright"): fg = fg.replace("bright", "light_")
-                    if bg and bg.startswith("bright"): bg = bg.replace("bright", "light_")
-
-                    style = ""
-                    if fg:
-                        style += fg if not fg.isdigit() else f"color({fg})"
-                    if bg:
-                        style += (" on " if style else "on ") + (bg if not bg.isdigit() else f"color({bg})")
-                    if char.bold: style += " bold"
-                    if char.italics: style += " italic"
-                    if char.underscore: style += " underline"
-                    rich_text.append(char.data, style=style)
+        def append_line(line):
+            if not line:
                 rich_text.append("\n")
-            self.query_one("#output").update(rich_text)
-        else:
-            # For regular command blocks, use the scrolling ANSI output
-            self.query_one("#output").update(Text.from_ansi(self.full_output))
+                return
+
+            current_style = self._get_rich_style(line[0])
+            current_text = ""
+            for char in line:
+                style = self._get_rich_style(char)
+                if style == current_style:
+                    current_text += char.data
+                else:
+                    rich_text.append(current_text, style=current_style)
+                    current_style = style
+                    current_text = char.data
+            rich_text.append(current_text, style=current_style)
+            rich_text.append("\n")
+
+        if self.app_ref.input_mode != "CONTROL":
+            for line in self.terminal_screen.history.top:
+                append_line(line)
+            for line in self.terminal_screen.history.bottom:
+                append_line(line)
+
+        # Compact rendering for non-interactive blocks
+        end_y = self.terminal_screen.lines
+        if self.app_ref.input_mode != "CONTROL":
+            # Find the last non-empty line
+            for y in range(self.terminal_screen.lines - 1, -1, -1):
+                if any(c.data != ' ' for c in self.terminal_screen.buffer[y]):
+                    end_y = y + 1
+                    break
+            else: end_y = 1 # Keep at least one line
+
+        for y in range(end_y):
+            line = [self.terminal_screen.buffer[y][x] for x in range(self.terminal_screen.columns)]
+            append_line(line)
+
+        self.query_one("#output").update(rich_text)
+
+    def _get_rich_style(self, char):
+        fg = char.fg if char.fg != "default" else None
+        bg = char.bg if char.bg != "default" else None
+
+        if fg and fg.startswith("bright"): fg = fg.replace("bright", "bright_")
+        if bg and bg.startswith("bright"): bg = bg.replace("bright", "bright_")
+
+        style = ""
+        if fg: style += fg if not fg.isdigit() else f"color({fg})"
+        if bg: style += (" on " if style else "on ") + (bg if not bg.isdigit() else f"color({bg})")
+        if char.bold: style += " bold"
+        if char.italics: style += " italic"
+        if char.underscore: style += " underline"
+        return style
 
     def update_status(self, status):
         info = self.query_one("#info")
@@ -510,8 +540,9 @@ class ClientApp(App):
                 if isinstance(block, CommandBlock):
                     block.cwd = data["cwd"]
                     block.update_status(data["status"])
-                    block.full_output = data.get("output", "")
-                    block.query_one("#output").update(Text.from_ansi(block.full_output))
+                    block.full_output = ""
+                    block.terminal_screen.reset()
+                    block.append_output(data.get("output", ""))
                 if not block.is_editing:
                    if isinstance(block, NoteBlock):
                        block.query_one("#md_render").update(block.content)
@@ -549,7 +580,7 @@ class ClientApp(App):
         if data["type"] == "NOTE": new_block = NoteBlock(b_id, data["content"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
         else:
             new_block = CommandBlock(b_id, data["content"], data["cwd"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
-            new_block.full_output = data["output"]
+            new_block.append_output(data["output"])
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
         await container.mount(new_block)
@@ -578,6 +609,9 @@ class ClientApp(App):
         inp = self.query_one("#main_input")
         inp.text = ""
         inp.disabled = True
+        # For non-interactive commands, trigger re-render to only show occupied space?
+        for b in self.blocks.values():
+             if isinstance(b, CommandBlock): b.render_terminal()
         try:
             self.screen.focus()
         except: pass
@@ -856,6 +890,7 @@ class ClientApp(App):
                 "enter": "\r",
                 "backspace": "\x7f",
                 "tab": "\t",
+                "escape": "\x1b",
                 "up": "\x1b[A",
                 "down": "\x1b[B",
                 "right": "\x1b[C",
@@ -876,8 +911,10 @@ class ClientApp(App):
                 data = event.key
             elif event.key.startswith("ctrl+"):
                 char = event.key.split("+")[1]
-                if len(char) == 1:
+                if len(char) == 1 and 'a' <= char.lower() <= 'z':
                     data = chr(ord(char.lower()) - ord('a') + 1)
+                elif char == '[': # Ctrl+[ is common for Escape
+                    data = "\x1b"
 
             if data:
                 asyncio.create_task(self.send_message({"type": "terminal_input", "data": data}))
