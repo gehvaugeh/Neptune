@@ -248,6 +248,11 @@ class CommandBlock(BaseBlock):
                     # Map pyte colors to Rich
                     fg = char.fg if char.fg != "default" else None
                     bg = char.bg if char.bg != "default" else None
+
+                    # Fix bright colors for Rich
+                    if fg and fg.startswith("bright"): fg = fg.replace("bright", "light_")
+                    if bg and bg.startswith("bright"): bg = bg.replace("bright", "light_")
+
                     style = ""
                     if fg:
                         style += fg if not fg.isdigit() else f"color({fg})"
@@ -652,8 +657,9 @@ class ClientApp(App):
         # Request terminal resize to match block width
         try:
             # Approximate size based on widget size
-            cols = block.size.width - 4 # minus padding/border
-            rows = 24 # Default rows
+            cols = max(40, block.size.width - 4)
+            rows = 24
+            block.terminal_screen.resize(rows, cols)
             asyncio.create_task(self.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
         except: pass
 
