@@ -237,9 +237,11 @@ class CommandBlock(BaseBlock):
             self.full_output = self.full_output[-1_000_000:]
 
         self.stream.feed(text)
-        self.render_terminal()
+        if self.is_mounted:
+            self.render_terminal()
 
     def render_terminal(self):
+        if not self.is_mounted: return
         # We always use the pyte screen for rendering to ensure consistent VT100 support
         rich_text = Text()
 
@@ -299,6 +301,7 @@ class CommandBlock(BaseBlock):
         return style
 
     def update_status(self, status):
+        if not self.is_mounted: return
         info = self.query_one("#info")
         if status == "running":
             info.update("[yellow]Running...[/]")
@@ -580,13 +583,12 @@ class ClientApp(App):
         if data["type"] == "NOTE": new_block = NoteBlock(b_id, data["content"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
         else:
             new_block = CommandBlock(b_id, data["content"], data["cwd"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
-            new_block.append_output(data["output"])
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
         await container.mount(new_block)
         if data["type"] == "CMD":
+            new_block.append_output(data["output"])
             new_block.update_status(data["status"])
-            if data["output"]: new_block.query_one("#output").update(Text.from_ansi(data["output"]))
         if data["locked_by"]:
                 user_info = self.users.get(data["locked_by"], {})
                 new_block.update_lock(data["locked_by"], user_info.get("color", "white"))
