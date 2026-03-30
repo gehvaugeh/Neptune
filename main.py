@@ -6,24 +6,41 @@ import argparse
 
 def main():
     header = r"""
-    _   __            __
-   / | / /__  ____   / /_ __  __ ____   ___
-  /  |/ // _ \/ __ \ / __// / / // __ \ / _ \
- / /|  //  __/ /_/ // /_ / /_/ // / / //  __/
-/_/ |_/ \___/ .___/ \__/ \__,_//_/ /_/ \___/
-            /_/
+    [1;34m        . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
+    [1;34m      . . . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
+    [1;34m    . . . . .[1;36m       ___           ___           ___[1;34m . . . . . . .[0m
+    [1;34m    . . . .[1;36m       /__/\         /  /\         /  /\[1;34m  . . . . . .[0m
+    [1;34m    . . .[1;36m        \  \:\       /  /:/_       /  /::\[1;34m  . . . . . .[0m
+    [1;34m    . . .[1;36m         \  \:\     /  /:/ /\     /  /:/\:\[1;34m . . . . . .[0m
+    [1;34m    . .[1;36m       ____  \  \:\   /  /:/ /:/_   /  /:/~/:/[1;34m . . . . . . .[0m
+    [1;34m    . .[1;36m      /__/\  \__\:\ /__/:/ /:/ /\ /__/:/ /:/[1;34m . . . . . . . .[0m
+    [1;34m    . .[1;36m      \  \:\ /  /:/ \  \:\/:/ /:/ \  \:\/:/[1;34m . . . . . . . . .[0m
+    [1;34m    . .[1;36m       \  \:\  /:/   \  \::/ /:/   \  \::/[1;34m . . . . . . . . . .[0m
+    [1;34m    . .[1;36m        \  \:\/:/     \  \:\/:/     \  \:\[1;34m . . . . . . . . . . .[0m
+    [1;34m    . . .[1;36m        \  \::/       \  \::/       \  \:\[1;34m . . . . . . . . . .[0m
+    [1;34m    . . . .[1;36m       \__\/         \__\/         \__\/[1;34m . . . . . . . . .[0m
+    [1;34m      . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
+    [1;34m        . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
     """
     parser = argparse.ArgumentParser(
         description=header + "\nNeptune Multi-User Launcher",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("mode", choices=["server", "client", "all"], help="Mode to start: server, client, or all")
+    parser.add_argument("mode", choices=["server", "client", "all"], nargs="?", help="Mode to start: server, client, or all")
     parser.add_argument("-s", "--socket", default="/tmp/neptune.sock", help="Path to the Unix Domain Socket")
+
+    # If no arguments are provided, print help and exit
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
 
     # We use parse_known_args to allow passing mode and socket, and then handle the rest
     args, unknown = parser.parse_known_args()
 
     mode = args.mode
+    if not mode:
+        parser.print_help()
+        sys.exit(0)
     socket_path = args.socket
 
     if mode == "server":
