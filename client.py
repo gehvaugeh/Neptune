@@ -274,7 +274,8 @@ class CommandBlock(BaseBlock):
         if self.app_ref.input_mode != "CONTROL":
             # Find the last non-empty line
             for y in range(self.terminal_screen.lines - 1, -1, -1):
-                if any(c.data != ' ' for c in self.terminal_screen.buffer[y]):
+                line = self.terminal_screen.buffer[y]
+                if any(line[x].data != ' ' for x in range(self.terminal_screen.columns)):
                     end_y = y + 1
                     break
             else: end_y = 1 # Keep at least one line
@@ -740,7 +741,7 @@ class ClientApp(App):
             elif isinstance(block, CommandBlock):
                 md_output.append(f"```bash\n{block.content}\n```\n")
                 if block.full_output.strip():
-                    clean = re.sub(r'\x1B[@-_][0-?]*[ -/]*[@-~]', '', block.full_output)
+                    clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.full_output)
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))

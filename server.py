@@ -361,7 +361,10 @@ class Server:
             pattern = rf'{self.current_sentinel}\s+(\d+)\s*\r?\n(.*?)\r?\n'
             match = re.search(pattern, self.current_block["output"], re.DOTALL)
             if match:
-                exit_code, cwd = int(match.group(1)), match.group(2).strip()
+                exit_code = int(match.group(1))
+                cwd_raw = match.group(2).strip()
+                # Strip ANSI escape sequences from CWD
+                cwd = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', cwd_raw).strip()
                 idx = match.start()
                 self.current_block["output"] = self.current_block["output"][:idx]
                 self.current_block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
