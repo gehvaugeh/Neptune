@@ -353,28 +353,10 @@ class Server:
                 if os.path.exists(self.socket_path):
                     os.remove(self.socket_path)
 
+from branding import setup_parser
+
 if __name__ == "__main__":
-    header = r"""
-    [1;34m        . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
-    [1;34m      . . . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
-    [1;34m    . . . . .[1;36m       ___           ___           ___[1;34m . . . . . . .[0m
-    [1;34m    . . . .[1;36m       /__/\         /  /\         /  /\[1;34m  . . . . . .[0m
-    [1;34m    . . .[1;36m        \  \:\       /  /:/_       /  /::\[1;34m  . . . . . .[0m
-    [1;34m    . . .[1;36m         \  \:\     /  /:/ /\     /  /:/\:\[1;34m . . . . . .[0m
-    [1;34m    . .[1;36m       ____  \  \:\   /  /:/ /:/_   /  /:/~/:/[1;34m . . . . . . .[0m
-    [1;34m    . .[1;36m      /__/\  \__\:\ /__/:/ /:/ /\ /__/:/ /:/[1;34m . . . . . . . .[0m
-    [1;34m    . .[1;36m      \  \:\ /  /:/ \  \:\/:/ /:/ \  \:\/:/[1;34m . . . . . . . . .[0m
-    [1;34m    . .[1;36m       \  \:\  /:/   \  \::/ /:/   \  \::/[1;34m . . . . . . . . . .[0m
-    [1;34m    . .[1;36m        \  \:\/:/     \  \:\/:/     \  \:\[1;34m . . . . . . . . . . .[0m
-    [1;34m    . . .[1;36m        \  \::/       \  \::/       \  \:\[1;34m . . . . . . . . . .[0m
-    [1;34m    . . . .[1;36m       \__\/         \__\/         \__\/[1;34m . . . . . . . . .[0m
-    [1;34m      . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
-    [1;34m        . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
-    """
-    parser = argparse.ArgumentParser(
-        description=header + "\nNeptune Server",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = setup_parser("Neptune Server")
     parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
     args = parser.parse_args()
 

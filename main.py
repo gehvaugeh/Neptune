@@ -2,37 +2,14 @@ import sys
 import os
 import subprocess
 import signal
-import argparse
+from branding import setup_parser, check_args
 
 def main():
-    header = r"""
-    [1;34m        . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
-    [1;34m      . . . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
-    [1;34m    . . . . .[1;36m       ___           ___           ___[1;34m . . . . . . .[0m
-    [1;34m    . . . .[1;36m       /__/\         /  /\         /  /\[1;34m  . . . . . .[0m
-    [1;34m    . . .[1;36m        \  \:\       /  /:/_       /  /::\[1;34m  . . . . . .[0m
-    [1;34m    . . .[1;36m         \  \:\     /  /:/ /\     /  /:/\:\[1;34m . . . . . .[0m
-    [1;34m    . .[1;36m       ____  \  \:\   /  /:/ /:/_   /  /:/~/:/[1;34m . . . . . . .[0m
-    [1;34m    . .[1;36m      /__/\  \__\:\ /__/:/ /:/ /\ /__/:/ /:/[1;34m . . . . . . . .[0m
-    [1;34m    . .[1;36m      \  \:\ /  /:/ \  \:\/:/ /:/ \  \:\/:/[1;34m . . . . . . . . .[0m
-    [1;34m    . .[1;36m       \  \:\  /:/   \  \::/ /:/   \  \::/[1;34m . . . . . . . . . .[0m
-    [1;34m    . .[1;36m        \  \:\/:/     \  \:\/:/     \  \:\[1;34m . . . . . . . . . . .[0m
-    [1;34m    . . .[1;36m        \  \::/       \  \::/       \  \:\[1;34m . . . . . . . . . .[0m
-    [1;34m    . . . .[1;36m       \__\/         \__\/         \__\/[1;34m . . . . . . . . .[0m
-    [1;34m      . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
-    [1;34m        . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .[0m
-    """
-    parser = argparse.ArgumentParser(
-        description=header + "\nNeptune Multi-User Launcher",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = setup_parser("Neptune Multi-User Launcher")
     parser.add_argument("mode", choices=["server", "client", "all"], nargs="?", help="Mode to start: server, client, or all")
     parser.add_argument("-s", "--socket", default="/tmp/neptune.sock", help="Path to the Unix Domain Socket")
 
-    # If no arguments are provided, print help and exit
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
+    check_args(parser)
 
     # We use parse_known_args to allow passing mode and socket, and then handle the rest
     args, unknown = parser.parse_known_args()
