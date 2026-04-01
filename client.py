@@ -250,7 +250,10 @@ class CommandBlock(BaseBlock):
                 rich_text.append("\n")
                 return
 
-            # Use current_style from first character, with safety for empty Char objects
+            # Ensure line is a list of characters (History lines are lists, Buffer lines are dicts)
+            if not isinstance(line, list):
+                line = [line[x] for x in range(self.terminal_screen.columns)]
+
             current_style = self._get_rich_style(line[0])
             current_text = ""
             for char in line:
@@ -266,7 +269,6 @@ class CommandBlock(BaseBlock):
 
         if self.app_ref.input_mode != "CONTROL":
             for line_obj in self.terminal_screen.history.top:
-                # history items are lists of chars
                 append_line(line_obj)
             for line_obj in self.terminal_screen.history.bottom:
                 append_line(line_obj)
@@ -276,7 +278,6 @@ class CommandBlock(BaseBlock):
         if self.app_ref.input_mode != "CONTROL":
             # Find the last non-empty line
             for y in range(self.terminal_screen.lines - 1, -1, -1):
-                # buffer lines are dicts
                 row = self.terminal_screen.buffer[y]
                 if any(row[x].data != ' ' for x in range(self.terminal_screen.columns)):
                     end_y = y + 1
@@ -284,9 +285,7 @@ class CommandBlock(BaseBlock):
             else: end_y = 1 # Keep at least one line
 
         for y in range(end_y):
-            # buffer items are dicts
-            line = [self.terminal_screen.buffer[y][x] for x in range(self.terminal_screen.columns)]
-            append_line(line)
+            append_line(self.terminal_screen.buffer[y])
 
         self.query_one("#output").update(rich_text)
 
