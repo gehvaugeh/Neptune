@@ -250,6 +250,7 @@ class CommandBlock(BaseBlock):
                 rich_text.append("\n")
                 return
 
+            # Use current_style from first character, with safety for empty Char objects
             current_style = self._get_rich_style(line[0])
             current_text = ""
             for char in line:
@@ -264,23 +265,26 @@ class CommandBlock(BaseBlock):
             rich_text.append("\n")
 
         if self.app_ref.input_mode != "CONTROL":
-            for line in self.terminal_screen.history.top:
-                append_line(line)
-            for line in self.terminal_screen.history.bottom:
-                append_line(line)
+            for line_obj in self.terminal_screen.history.top:
+                # history items are lists of chars
+                append_line(line_obj)
+            for line_obj in self.terminal_screen.history.bottom:
+                append_line(line_obj)
 
         # Compact rendering for non-interactive blocks
         end_y = self.terminal_screen.lines
         if self.app_ref.input_mode != "CONTROL":
             # Find the last non-empty line
             for y in range(self.terminal_screen.lines - 1, -1, -1):
-                line = self.terminal_screen.buffer[y]
-                if any(line[x].data != ' ' for x in range(self.terminal_screen.columns)):
+                # buffer lines are dicts
+                row = self.terminal_screen.buffer[y]
+                if any(row[x].data != ' ' for x in range(self.terminal_screen.columns)):
                     end_y = y + 1
                     break
             else: end_y = 1 # Keep at least one line
 
         for y in range(end_y):
+            # buffer items are dicts
             line = [self.terminal_screen.buffer[y][x] for x in range(self.terminal_screen.columns)]
             append_line(line)
 
@@ -307,12 +311,18 @@ class CommandBlock(BaseBlock):
         if status == "running":
             info.update("[yellow]Running...[/]")
             self.add_class("running")
+        elif "queued" in status:
+            num = status.split("(")[1].split(")")[0]
+            info.update(f"[blue]⏳ In Queue (#{num})[/]")
+            self.remove_class("running")
         elif status == "ok":
             info.update("[green]✅ OK[/]")
             self.remove_class("running")
         elif "error" in status:
             info.update(f"[red]❌ {status.upper()}[/]")
             self.remove_class("running")
+        else:
+            info.update(f"[grey44]{status.capitalize()}[/]")
 
     async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
@@ -542,8 +552,15 @@ class ClientApp(App):
                 block = self.blocks[b_id]
                 block.content = data["content"]
                 if isinstance(block, CommandBlock):
+                    old_status = getattr(block, "_last_status", None)
+                    block._last_status = data["status"]
                     block.cwd = data["cwd"]
                     block.update_status(data["status"])
+
+                    # Auto-exit CONTROL mode if block finishes
+                    if self.input_mode == "CONTROL" and self.focused == block:
+                        if old_status == "running" and data["status"] != "running":
+                            self.enter_normal_mode()
                     block.full_output = ""
                     block.terminal_screen.reset()
                     block.append_output(data.get("output", ""))

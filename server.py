@@ -42,7 +42,8 @@ class Server:
         self.active_processes = {} # legacy
         self.master_fd = None
         self.master_process = None
-        self.command_queue = asyncio.Queue()
+        self.command_queue = [] # Changed to list for easier manipulation
+        self.queue_condition = asyncio.Condition()
         self.current_block = None
         self.current_sentinel = None
         self.done_event = None
@@ -148,7 +149,10 @@ class Server:
                     await self.broadcast({"type": "new_block", "block": block})
 
                     if mode == "CMD":
-                        await self.command_queue.put(block)
+                        async with self.queue_condition:
+                            self.command_queue.append(block)
+                            self.queue_condition.notify_all()
+                        await self.broadcast_queue_status()
 
                 elif msg_type == "edit_start":
                     block_id = msg.get("block_id")
@@ -176,7 +180,11 @@ class Server:
 
                         if block["type"] == "CMD":
                             block["output"] = ""
-                            await self.command_queue.put(block)
+                            async with self.queue_condition:
+                                if block not in self.command_queue:
+                                    self.command_queue.append(block)
+                                    self.queue_condition.notify_all()
+                            await self.broadcast_queue_status()
 
                 elif msg_type == "edit_cancel":
                     block_id = msg.get("block_id")
@@ -199,10 +207,13 @@ class Server:
                 elif msg_type == "delete_block":
                     block_id = msg.get("block_id")
                     self.blocks = [b for b in self.blocks if b["id"] != block_id]
+                    async with self.queue_condition:
+                        self.command_queue = [b for b in self.command_queue if b["id"] != block_id]
                     if self.current_block and self.current_block["id"] == block_id:
                         if self.master_fd:
                             os.write(self.master_fd, b'\x03')
                     await self.broadcast({"type": "remove_block", "block_id": block_id})
+                    await self.broadcast_queue_status()
 
                 elif msg_type == "stop_process":
                     if self.master_fd:
@@ -239,7 +250,11 @@ class Server:
                     block = self.get_block(block_id)
                     if block and block["type"] == "CMD":
                         block["output"] = ""
-                        await self.command_queue.put(block)
+                        async with self.queue_condition:
+                            if block not in self.command_queue:
+                                self.command_queue.append(block)
+                                self.queue_condition.notify_all()
+                        await self.broadcast_queue_status()
 
                 elif msg_type == "terminal_input":
                     data = msg.get("data")
@@ -330,10 +345,21 @@ class Server:
             except OSError: break
         logging.info("Master shell terminated")
 
+    async def broadcast_queue_status(self):
+        for i, block in enumerate(self.command_queue):
+            block["status"] = f"queued({i+1})"
+            await self.broadcast({"type": "update_block", "block": block})
+
     async def process_queue(self):
         await self.init_done.wait()
         while True:
-            block = await self.command_queue.get()
+            async with self.queue_condition:
+                while not self.command_queue:
+                    await self.queue_condition.wait()
+                block = self.command_queue.pop(0)
+
+            await self.broadcast_queue_status()
+
             try:
                 self.current_block = block
                 self.current_sentinel = f"GS_DONE_{uuid.uuid4()}"
@@ -348,7 +374,6 @@ class Server:
                 logging.error(f"Error in process_queue: {e}")
             finally:
                 self.current_block = None
-                self.command_queue.task_done()
 
     async def handle_master_output(self, data):
         if not self.current_block:
