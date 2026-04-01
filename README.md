@@ -1,6 +1,6 @@
-# Gemmi-Shell: Collaborative Notebook Shell
+# Neptune: Collaborative Notebook Shell
 
-Gemmi-Shell is a notebook-style terminal and collaborative editor designed for Termux and local development. It features a client-server architecture, allowing multiple users to work in the same shell session.
+Neptune is a notebook-style terminal and collaborative editor designed for Termux and local development. It features a client-server architecture, allowing multiple users to work in the same shell session.
 
 ## Features
 

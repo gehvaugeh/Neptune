@@ -31,7 +31,7 @@ class ServerMessage(message.Message):
         self.data = data
         super().__init__()
 
-DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
+DEFAULT_SOCKET_PATH = "/tmp/neptune.sock"
 
 # --- MODALE DIALOGE ---
 
@@ -332,7 +332,7 @@ class ClientApp(App):
             f_inp.tooltip = "Enter text to filter blocks by command or output content."
             yield f_inp
         with ScrollableContainer(id="command_history"):
-            yield Static("[bold magenta]Gemmi-Shell Multi-User | Collaborative Notebook[/]")
+            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]")
         with Vertical(id="bottom_dock"):
             yield OptionList(id="palette")
             self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
@@ -567,8 +567,8 @@ class ClientApp(App):
         self.update_mode_label()
         pref_label = self.query_one("#mode_prefix")
         pref_label.update(prefix)
-        colors = {"BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252"}
-        pref_label.styles.color = colors.get(self.input_mode, "#7c4dff")
+        colors = {"BASH": "#00e676", "CMD": "#2196f3", "NOTE": "#00b0ff"}
+        pref_label.styles.color = colors.get(self.input_mode, "#2196f3")
         inp = self.query_one("#main_input")
         inp.disabled = False
         inp.language = "bash" if prefix in ("!", ":") else "markdown"
@@ -597,8 +597,8 @@ class ClientApp(App):
 
     def update_mode_label(self):
         if not hasattr(self, "mode_label"): return
-        colors = {"NORMAL": "#757575", "BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252", "SELECTION": "#00b0ff", "BLOCKEDIT": "#ffab40"}
-        c = colors.get(self.input_mode, "#7c4dff")
+        colors = {"NORMAL": "#4fc3f7", "BASH": "#00e676", "CMD": "#2196f3", "NOTE": "#00b0ff", "SELECTION": "#81d4fa", "BLOCKEDIT": "#ffab40"}
+        c = colors.get(self.input_mode, "#2196f3")
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
 
     async def action_submit(self):
@@ -808,15 +808,10 @@ class ClientApp(App):
         if self.writer: self.writer.close()
         self.history.save()
 
+from branding import setup_parser
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Gemmi-Shell Collaborative TUI Client - Connect to a shell session.",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument(
-        "-s", "--socket",
-        default=DEFAULT_SOCKET_PATH,
-        help=f"Path to the Unix Domain Socket (default: {DEFAULT_SOCKET_PATH})"
-    )
+    parser = setup_parser("Neptune Client")
+    parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
     args = parser.parse_args()
     ClientApp(socket_path=args.socket).run()
