@@ -2,17 +2,22 @@ import sys
 import os
 import subprocess
 import signal
-import argparse
+from branding import setup_parser, check_args
 
 def main():
-    parser = argparse.ArgumentParser(description="Gemmi-Shell Multi-User Launcher")
-    parser.add_argument("mode", choices=["server", "client", "all"], help="Mode to start: server, client, or all")
-    parser.add_argument("-s", "--socket", default="/tmp/gemmi_shell.sock", help="Path to the Unix Domain Socket")
+    parser = setup_parser("Neptune Multi-User Launcher")
+    parser.add_argument("mode", choices=["server", "client", "all"], nargs="?", help="Mode to start: server, client, or all")
+    parser.add_argument("-s", "--socket", default="/tmp/neptune.sock", help="Path to the Unix Domain Socket")
+
+    check_args(parser)
 
     # We use parse_known_args to allow passing mode and socket, and then handle the rest
     args, unknown = parser.parse_known_args()
 
     mode = args.mode
+    if not mode:
+        parser.print_help()
+        sys.exit(0)
     socket_path = args.socket
 
     if mode == "server":

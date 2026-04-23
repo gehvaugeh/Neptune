@@ -1,16 +1,17 @@
-/* Unified Ultra Dark Theme - Gemmi-Shell Collaborative */
+/* Unified Ultra Dark Theme - Neptune Collaborative */
 
-$bg-dark: #050505;
-$bg-input: #0a0a0a;
-$bg-block: #080808;
-$bg-focus: #0c0c0c;
-$purple-primary: #7c4dff;
-$purple-dim: #311b92;
-$text-main: #eeeeee;
-$text-dim: #757575;
+$bg-dark: #02040a;
+$bg-input: #050a15;
+$bg-block: #030712;
+$bg-focus: #081225;
+$neptune-primary: #2196f3;
+$neptune-dim: #0d47a1;
+$neptune-bright: #81d4fa;
+$text-main: #e1f5fe;
+$text-dim: #4fc3f7;
 $success: #00e676;
 $error: #ff5252;
-$border: #1a1a1a;
+$border: #0d47a1;
 
 Screen {
     background: $bg-dark;
@@ -42,7 +43,7 @@ Screen {
 #mode_prefix {
     width: auto;
     padding: 0 1;
-    color: $purple-primary;
+    color: $neptune-primary;
     text-style: bold;
 }
 
@@ -70,7 +71,7 @@ Screen {
     padding: 0 1;
     height: 1;
     text-style: bold;
-    color: $purple-primary;
+    color: $neptune-primary;
 }
 
 /* Block-Struktur für Notebook-Feeling */
@@ -80,7 +81,7 @@ CommandBlock, NoteBlock {
     height: auto;
     min-height: 1;
     width: 100%;
-    border-left: solid $purple-dim;
+    border-left: solid $neptune-dim;
     border-right: none;
     background: $bg-block;
 }
@@ -88,11 +89,11 @@ CommandBlock, NoteBlock {
 /* Visueller Fokus beim Editieren oder Auswählen */
 CommandBlock:focus, NoteBlock:focus {
     background: $bg-focus;
-    border-left: solid $purple-primary;
+    border-left: solid $neptune-primary;
 }
 
 NoteBlock {
-    border-left: solid $purple-dim;
+    border-left: solid $neptune-dim;
 }
 
 .block-header {
@@ -180,14 +181,23 @@ NoteBlock {
 /* Autocomplete Palette */
 #palette {
     display: none;
-    max-height: 10;
+    max-height: 12;
     background: $bg-block;
     border-bottom: solid $border;
     color: $text-main;
+    scrollbar-gutter: stable;
 }
 
 #palette.visible {
     display: block;
+}
+
+#palette > .option-list--option {
+    padding: 0 1;
+}
+
+#palette > .option-list--option.-highlighted {
+    background: $neptune-dim;
 }
 
 /* Modals */

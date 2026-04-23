@@ -5,17 +5,20 @@ import re
 import time
 import argparse
 import logging
+import pyte
 from typing import List, Dict
 
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
+from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work, on, events, message
 
 from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE
+from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider
 
 # Setup client logging
 logging.basicConfig(
@@ -29,7 +32,7 @@ class ServerMessage(message.Message):
         self.data = data
         super().__init__()
 
-DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
+DEFAULT_SOCKET_PATH = "/tmp/neptune.sock"
 
 # --- MODALE DIALOGE ---
 
@@ -211,6 +214,8 @@ class CommandBlock(BaseBlock):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
+        self.terminal_screen = pyte.HistoryScreen(80, 24, history=1000)
+        self.stream = pyte.Stream(self.terminal_screen)
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -224,20 +229,99 @@ class CommandBlock(BaseBlock):
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
     def append_output(self, text: str):
+        if not isinstance(text, str):
+            text = text.decode(errors="replace")
+
         self.full_output += text
-        self.query_one("#output").update(Text.from_ansi(self.full_output))
+        if len(self.full_output) > 1_000_000:
+            self.full_output = self.full_output[-1_000_000:]
+
+        self.stream.feed(text)
+        if self.is_mounted:
+            self.render_terminal()
+
+    def render_terminal(self):
+        if not self.is_mounted: return
+        # We always use the pyte screen for rendering to ensure consistent VT100 support
+        rich_text = Text()
+
+        def append_line(line):
+            if not line:
+                rich_text.append("\n")
+                return
+
+            # Ensure line is a list of characters (History lines are lists, Buffer lines are dicts)
+            if not isinstance(line, list):
+                line = [line[x] for x in range(self.terminal_screen.columns)]
+
+            current_style = self._get_rich_style(line[0])
+            current_text = ""
+            for char in line:
+                style = self._get_rich_style(char)
+                if style == current_style:
+                    current_text += char.data
+                else:
+                    rich_text.append(current_text, style=current_style)
+                    current_style = style
+                    current_text = char.data
+            rich_text.append(current_text, style=current_style)
+            rich_text.append("\n")
+
+        if self.app_ref.input_mode != "CONTROL":
+            for line_obj in self.terminal_screen.history.top:
+                append_line(line_obj)
+            for line_obj in self.terminal_screen.history.bottom:
+                append_line(line_obj)
+
+        # Compact rendering for non-interactive blocks
+        end_y = self.terminal_screen.lines
+        if self.app_ref.input_mode != "CONTROL":
+            # Find the last non-empty line
+            for y in range(self.terminal_screen.lines - 1, -1, -1):
+                row = self.terminal_screen.buffer[y]
+                if any(row[x].data != ' ' for x in range(self.terminal_screen.columns)):
+                    end_y = y + 1
+                    break
+            else: end_y = 1 # Keep at least one line
+
+        for y in range(end_y):
+            append_line(self.terminal_screen.buffer[y])
+
+        self.query_one("#output").update(rich_text)
+
+    def _get_rich_style(self, char):
+        fg = char.fg if char.fg != "default" else None
+        bg = char.bg if char.bg != "default" else None
+
+        if fg and fg.startswith("bright"): fg = fg.replace("bright", "bright_")
+        if bg and bg.startswith("bright"): bg = bg.replace("bright", "bright_")
+
+        style = ""
+        if fg: style += fg if not fg.isdigit() else f"color({fg})"
+        if bg: style += (" on " if style else "on ") + (bg if not bg.isdigit() else f"color({bg})")
+        if char.bold: style += " bold"
+        if char.italics: style += " italic"
+        if char.underscore: style += " underline"
+        return style
 
     def update_status(self, status):
+        if not self.is_mounted: return
         info = self.query_one("#info")
         if status == "running":
             info.update("[yellow]Running...[/]")
             self.add_class("running")
+        elif "queued" in status:
+            num = status.split("(")[1].split(")")[0]
+            info.update(f"[blue]⏳ In Queue (#{num})[/]")
+            self.remove_class("running")
         elif status == "ok":
             info.update("[green]✅ OK[/]")
             self.remove_class("running")
         elif "error" in status:
             info.update(f"[red]❌ {status.upper()}[/]")
             self.remove_class("running")
+        else:
+            info.update(f"[grey44]{status.capitalize()}[/]")
 
     async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
@@ -309,23 +393,41 @@ class ClientApp(App):
         self.workflows = load_workflows()
         self.yank_buffer = None
         self.count_str = ""
-        self.available_commands = ["export", "import", "exit", "save_wf", "help", "clear"]
+        self.available_commands = [
+            {"name": "export", "params": "[file]", "desc": "Save current session as a Markdown file"},
+            {"name": "import", "params": "[file]", "desc": "Load blocks from an external Markdown file"},
+            {"name": "exit", "params": "", "desc": "Close the client and return to terminal"},
+            {"name": "save_wf", "params": "", "desc": "Save the command in main input as a Workflow"},
+            {"name": "help", "params": "", "desc": "Show list of available internal commands"},
+            {"name": "clear", "params": "", "desc": "Remove all blocks and reset server shell state"},
+        ]
+        self.providers = {
+            "BASH": BashAutocompleteProvider(),
+            "CMD": CmdAutocompleteProvider(self.available_commands),
+            "NOTE": MarkdownAutocompleteProvider()
+        }
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="filter_bar", classes="hidden"):
             yield Label(" 🔍 Filter: ", id="filter_label")
-            yield Input(placeholder="Search blocks...", id="filter_input")
+            f_inp = Input(placeholder="Search blocks...", id="filter_input")
+            f_inp.tooltip = "Enter text to filter blocks by command or output content."
+            yield f_inp
         with ScrollableContainer(id="command_history"):
-            yield Static("[bold magenta]Gemmi-Shell Multi-User | Collaborative Notebook[/]")
+            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]")
         with Vertical(id="bottom_dock"):
             yield OptionList(id="palette")
             self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
+            self.mode_label.tooltip = "Current interaction mode (NORMAL, BASH, CMD, NOTE, SELECTION, BLOCKEDIT)"
             yield self.mode_label
             with Horizontal(id="input_container"):
                 yield Label("", id="mode_prefix")
                 self.user_label = Label(f"User: [bold {self.user_color}]Me[/]", id="user_indicator")
+                self.user_label.tooltip = "Your current username and unique color identifier."
                 yield self.user_label
-                yield NotebookInput(language="bash", id="main_input")
+                m_inp = NotebookInput(language="bash", id="main_input")
+                m_inp.tooltip = "Main command input. Use !, :, or ; in NORMAL mode to change input types."
+                yield m_inp
 
     def on_mount(self):
         self.run_worker(self.connect_to_server())
@@ -455,10 +557,18 @@ class ClientApp(App):
                 block = self.blocks[b_id]
                 block.content = data["content"]
                 if isinstance(block, CommandBlock):
+                    old_status = getattr(block, "_last_status", None)
+                    block._last_status = data["status"]
                     block.cwd = data["cwd"]
                     block.update_status(data["status"])
-                    block.full_output = data.get("output", "")
-                    block.query_one("#output").update(Text.from_ansi(block.full_output))
+
+                    # Auto-exit CONTROL mode if block finishes
+                    if self.input_mode == "CONTROL" and self.focused == block:
+                        if old_status == "running" and data["status"] != "running":
+                            self.enter_normal_mode()
+                    block.full_output = ""
+                    block.terminal_screen.reset()
+                    block.append_output(data.get("output", ""))
                 if not block.is_editing:
                    if isinstance(block, NoteBlock):
                        block.query_one("#md_render").update(block.content)
@@ -496,13 +606,12 @@ class ClientApp(App):
         if data["type"] == "NOTE": new_block = NoteBlock(b_id, data["content"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
         else:
             new_block = CommandBlock(b_id, data["content"], data["cwd"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
-            new_block.full_output = data["output"]
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
         await container.mount(new_block)
         if data["type"] == "CMD":
+            new_block.append_output(data["output"])
             new_block.update_status(data["status"])
-            if data["output"]: new_block.query_one("#output").update(Text.from_ansi(data["output"]))
         if data["locked_by"]:
                 user_info = self.users.get(data["locked_by"], {})
                 new_block.update_lock(data["locked_by"], user_info.get("color", "white"))
@@ -514,6 +623,9 @@ class ClientApp(App):
         self.enter_normal_mode()
 
     def enter_normal_mode(self):
+        if self.input_mode == "CONTROL":
+            # Disable echo when leaving interactive mode
+            asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": False}))
         self.input_mode = "NORMAL"
         self.count_str = ""
         self.update_mode_label()
@@ -522,6 +634,9 @@ class ClientApp(App):
         inp = self.query_one("#main_input")
         inp.text = ""
         inp.disabled = True
+        # For non-interactive commands, trigger re-render to only show occupied space?
+        for b in self.blocks.values():
+             if isinstance(b, CommandBlock): b.render_terminal()
         try:
             self.screen.focus()
         except: pass
@@ -547,8 +662,8 @@ class ClientApp(App):
         self.update_mode_label()
         pref_label = self.query_one("#mode_prefix")
         pref_label.update(prefix)
-        colors = {"BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252"}
-        pref_label.styles.color = colors.get(self.input_mode, "#7c4dff")
+        colors = {"BASH": "#00e676", "CMD": "#2196f3", "NOTE": "#00b0ff"}
+        pref_label.styles.color = colors.get(self.input_mode, "#2196f3")
         inp = self.query_one("#main_input")
         inp.disabled = False
         inp.language = "bash" if prefix in ("!", ":") else "markdown"
@@ -577,9 +692,35 @@ class ClientApp(App):
 
     def update_mode_label(self):
         if not hasattr(self, "mode_label"): return
-        colors = {"NORMAL": "#757575", "BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252", "SELECTION": "#00b0ff", "BLOCKEDIT": "#ffab40"}
+        colors = {
+            "NORMAL": "#757575",
+            "BASH": "#00e676",
+            "CMD": "#7c4dff",
+            "NOTE": "#ff5252",
+            "SELECTION": "#00b0ff",
+            "BLOCKEDIT": "#ffab40",
+            "CONTROL": "#f44336"
+        }
         c = colors.get(self.input_mode, "#7c4dff")
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
+
+    def enter_control_mode(self, block):
+        if not isinstance(block, CommandBlock):
+            return
+        self.input_mode = "CONTROL"
+        self.update_mode_label()
+        self.query_one("#main_input").disabled = True
+        block.focus()
+        # Enable echo for interactive mode
+        asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": True}))
+        # Request terminal resize to match block width
+        try:
+            # Approximate size based on widget size
+            cols = max(40, block.size.width - 4)
+            rows = 24
+            block.terminal_screen.resize(rows, cols)
+            asyncio.create_task(self.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
+        except: pass
 
     async def action_submit(self):
         ta = self.query_one("#main_input"); text = ta.text
@@ -623,7 +764,7 @@ class ClientApp(App):
             elif isinstance(block, CommandBlock):
                 md_output.append(f"```bash\n{block.content}\n```\n")
                 if block.full_output.strip():
-                    clean = re.sub(r'\x1B[@-_][0-?]*[ -/]*[@-~]', '', block.full_output)
+                    clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.full_output)
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
@@ -676,48 +817,51 @@ class ClientApp(App):
 
     def update_palette(self, val: str):
         p = self.query_one("#palette"); p.clear_options()
-        if not val.strip() and not val.endswith(" "): p.remove_class("visible"); return
-        if self.input_mode == "CMD":
-            for c in self.available_commands:
-                if fuzzy_match(val, c): p.add_option(f"[bold cyan]CMD:[/] {c}")
-        elif self.input_mode == "BASH":
-            token = self._get_current_token(val); last = token.strip("\"'")
-            d_p, f_q = os.path.dirname(last), os.path.basename(last)
-            try:
-                ex_d = os.path.expanduser(d_p) if d_p else "."
-                if os.path.isdir(ex_d):
-                    for f in os.listdir(ex_d):
-                        if fuzzy_match(f_q, f):
-                            full = os.path.join(d_p, f) if d_p else f
-                            p.add_option(f"[green]Path:[/] {full}{'/' if os.path.isdir(os.path.join(ex_d, f)) else ''}")
-            except: pass
-            for h in self.history.get_matches(val): p.add_option(f"[yellow]Hist:[/] {h}")
-            for wf in self.workflows:
-                if fuzzy_match(val, wf['name']) or fuzzy_match(val, wf['cmd']): p.add_option(f"[cyan]WF:[/] {wf['name']} ([dim]{wf['cmd'][:20]}...[/])")
+        provider = self.providers.get(self.input_mode)
+        if not provider:
+            p.remove_class("visible"); return
+
+        context = {
+            "history": self.history.cache,
+            "workflows": self.workflows,
+            "cwd": os.getcwd()
+        }
+        suggestions = provider.get_suggestions(val, context)
+
+        type_colors = {"path": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252"}
+
+        for s in suggestions:
+            color = type_colors.get(s['type'], "white")
+            p.add_option(Option(f"[{color}]{s['type'].upper()}:[/] {s['display']} [dim]{s['description']}[/]", id=s['value']))
+
         if p.option_count > 0: p.add_class("visible")
         else: p.remove_class("visible")
 
     def sync_input(self):
         p = self.query_one("#palette")
         if p.highlighted is None: return
-        label = str(p.get_option_at_index(p.highlighted).prompt)
+        opt = p.get_option_at_index(p.highlighted)
+        val = opt.id
         inp = self.query_one("#main_input"); self._suppress_search = True
-        if "[bold cyan]CMD:[/] " in label: inp.text = label.split("] ")[1]
-        elif "[green]Path:[/]" in label:
-            path = label.split("] ")[1]
-            if " " in path: path = f'"{path}"'
-            token = self._get_current_token(inp.text)
-            inp.text = inp.text[:inp.text.rfind(token)] + path if token else inp.text + path
+
+        if self.input_mode == "BASH":
+            token = self.providers["BASH"]._get_current_token(inp.text)
+            if token:
+                idx = inp.text.rfind(token)
+                inp.text = inp.text[:idx] + val
+            else:
+                inp.text += val
         else:
-            cmd = label.split("] ", 1)[1]
-            if "[cyan]WF:[/]" in label:
-                name = label.split("] ")[1].split(" (")[0]
-                cmd = next((wf['cmd'] for wf in self.workflows if wf['name'] == name), cmd)
-            inp.text = cmd
+            inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
 
     @on(OptionList.OptionSelected, "#palette")
-    def opt_sel(self, event): self.sync_input(); self.query_one("#palette").remove_class("visible"); self.query_one("#main_input").focus()
+    def opt_sel(self, event):
+        self.sync_input()
+        self.query_one("#palette").remove_class("visible")
+        self.query_one("#main_input").focus()
+        if self.input_mode == "BASH":
+            self.update_palette(self.query_one("#main_input").text)
 
     def on_key(self, event: events.Key):
         if event.key == "escape": self.enter_normal_mode(); return
@@ -758,9 +902,50 @@ class ClientApp(App):
             elif event.key == "P":
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "before", "yank_data": self.yank_buffer}))
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
+            elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
             elif event.key == "j" and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
             elif event.key == "ctrl+up": asyncio.create_task(self.action_move_up())
             elif event.key == "ctrl+down": asyncio.create_task(self.action_move_down())
+        elif self.input_mode == "CONTROL":
+            if event.key == "ctrl+escape":
+                self.enter_normal_mode()
+                return
+
+            # Map common keys to ANSI sequences
+            key_map = {
+                "enter": "\r",
+                "backspace": "\x7f",
+                "tab": "\t",
+                "escape": "\x1b",
+                "up": "\x1b[A",
+                "down": "\x1b[B",
+                "right": "\x1b[C",
+                "left": "\x1b[D",
+                "home": "\x1b[H",
+                "end": "\x1b[F",
+                "pageup": "\x1b[5~",
+                "pagedown": "\x1b[6~",
+                "delete": "\x1b[3~",
+            }
+
+            data = None
+            if event.key in key_map:
+                data = key_map[event.key]
+            elif event.character:
+                data = event.character
+            elif len(event.key) == 1:
+                data = event.key
+            elif event.key.startswith("ctrl+"):
+                char = event.key.split("+")[1]
+                if len(char) == 1 and 'a' <= char.lower() <= 'z':
+                    data = chr(ord(char.lower()) - ord('a') + 1)
+                elif char == '[': # Ctrl+[ is common for Escape
+                    data = "\x1b"
+
+            if data:
+                asyncio.create_task(self.send_message({"type": "terminal_input", "data": data}))
+                event.stop()
+                event.prevent_default()
 
     @on(TextArea.Changed, "#main_input")
     def in_ch(self, event):
@@ -786,8 +971,10 @@ class ClientApp(App):
         if self.writer: self.writer.close()
         self.history.save()
 
+from branding import setup_parser
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Gemmi-Shell Client")
+    parser = setup_parser("Neptune Client")
     parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
     args = parser.parse_args()
     ClientApp(socket_path=args.socket).run()

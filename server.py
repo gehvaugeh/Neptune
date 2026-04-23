@@ -14,12 +14,12 @@ from typing import Dict, List, Any, Optional, Tuple
 
 # Setup logging
 logging.basicConfig(
-    filename='gemmi_server.log',
+    filename='neptune_server.log',
     level=logging.DEBUG,
     format='%(asctime)s %(levelname)s: %(message)s'
 )
 
-DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
+DEFAULT_SOCKET_PATH = "/tmp/neptune.sock"
 
 def get_shell():
     env_shell = os.environ.get("SHELL")
@@ -199,12 +199,13 @@ class Server:
                 elif msg_type == "delete_block":
                     block_id = msg.get("block_id")
                     self.blocks = [b for b in self.blocks if b["id"] != block_id]
-                    if block_id in self.active_processes:
-                        p = self.active_processes[block_id]
-                        try: os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                        except: pass
-                        del self.active_processes[block_id]
+                    async with self.queue_condition:
+                        self.command_queue = [b for b in self.command_queue if b["id"] != block_id]
+                    if self.current_block and self.current_block["id"] == block_id:
+                        if self.master_fd:
+                            os.write(self.master_fd, b'\x03')
                     await self.broadcast({"type": "remove_block", "block_id": block_id})
+                    await self.broadcast_queue_status()
 
                 elif msg_type == "stop_process":
                     block_id = msg.get("block_id")
@@ -452,8 +453,9 @@ class Server:
         await self.start_master_shell()
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
-
+        await self.start_master_shell()
         server = await asyncio.start_unix_server(self.handle_client, self.socket_path, limit=10 * 1024 * 1024)
+        logging.info(f"Server started on {self.socket_path}")
         print(f"Server started on {self.socket_path}")
         print(f"Using shell: {DEFAULT_SHELL}")
 
@@ -464,8 +466,10 @@ class Server:
                 if os.path.exists(self.socket_path):
                     os.remove(self.socket_path)
 
+from branding import setup_parser
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Gemmi-Shell Server")
+    parser = setup_parser("Neptune Server")
     parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
     args = parser.parse_args()
 
