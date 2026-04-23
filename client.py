@@ -735,6 +735,7 @@ class ClientApp(App):
         if self.input_mode == "BASH":
             content = text.strip()
             self.history.add(content)
+            # No longer intercepting 'cd' here; it will be handled by the server's master shell.
             await self.send_message({"type": "submit", "mode": "CMD", "content": content, "cwd": os.getcwd()})
         elif self.input_mode == "NOTE":
             await self.send_message({"type": "submit", "mode": "NOTE", "content": text.strip(), "cwd": os.getcwd()})

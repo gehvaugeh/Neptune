@@ -8,11 +8,9 @@ import signal
 import argparse
 import shutil
 import logging
-import re
-import fcntl
 import termios
-import struct
-from typing import Dict, List, Any
+import re
+from typing import Dict, List, Any, Optional, Tuple
 
 # Setup logging
 logging.basicConfig(
@@ -39,15 +37,15 @@ class Server:
         self.socket_path = socket_path
         self.blocks = []  # List of dicts: {id, type, content, cwd, output, status, locked_by}
         self.clients = {} # writer: {id, color, name}
-        self.active_processes = {} # legacy
+        self.active_processes = {} # block_id: process (maintained for compatibility/tracking)
+
         self.master_fd = None
-        self.master_process = None
-        self.command_queue = [] # Changed to list for easier manipulation
-        self.queue_condition = asyncio.Condition()
-        self.current_block = None
+        self.master_proc = None
+        self.command_queue = asyncio.Queue()
+        self.current_block_id = None
         self.current_sentinel = None
-        self.done_event = None
-        self.init_done = asyncio.Event()
+        self.current_command_finished = asyncio.Event()
+        self.shell_cwd = os.getcwd()
 
     def add_block(self, block_type, content, cwd=None):
         block = {
@@ -146,13 +144,11 @@ class Server:
                     logging.info(f"Received submit from {user_id}: {mode} - {content[:50]}")
 
                     block = self.add_block(mode, content, cwd)
+                    block["cwd"] = self.shell_cwd
                     await self.broadcast({"type": "new_block", "block": block})
 
                     if mode == "CMD":
-                        async with self.queue_condition:
-                            self.command_queue.append(block)
-                            self.queue_condition.notify_all()
-                        await self.broadcast_queue_status()
+                        await self.command_queue.put(block)
 
                 elif msg_type == "edit_start":
                     block_id = msg.get("block_id")
@@ -180,11 +176,7 @@ class Server:
 
                         if block["type"] == "CMD":
                             block["output"] = ""
-                            async with self.queue_condition:
-                                if block not in self.command_queue:
-                                    self.command_queue.append(block)
-                                    self.queue_condition.notify_all()
-                            await self.broadcast_queue_status()
+                            await self.command_queue.put(block)
 
                 elif msg_type == "edit_cancel":
                     block_id = msg.get("block_id")
@@ -216,8 +208,12 @@ class Server:
                     await self.broadcast_queue_status()
 
                 elif msg_type == "stop_process":
-                    if self.master_fd:
-                        os.write(self.master_fd, b'\x03')
+                    block_id = msg.get("block_id")
+                    if self.current_block_id == block_id and self.master_proc:
+                        try:
+                            os.killpg(os.getpgid(self.master_proc.pid), signal.SIGINT)
+                        except Exception as e:
+                            logging.error(f"Error stopping process: {e}")
 
                 elif msg_type == "paste_block":
                     target_id = msg.get("target_id")
@@ -250,37 +246,9 @@ class Server:
                     block = self.get_block(block_id)
                     if block and block["type"] == "CMD":
                         block["output"] = ""
-                        async with self.queue_condition:
-                            if block not in self.command_queue:
-                                self.command_queue.append(block)
-                                self.queue_condition.notify_all()
-                        await self.broadcast_queue_status()
-
-                elif msg_type == "terminal_input":
-                    data = msg.get("data")
-                    if self.master_fd and data:
-                        os.write(self.master_fd, data.encode())
-
-                elif msg_type == "terminal_resize":
-                    rows = msg.get("rows", 24)
-                    cols = msg.get("cols", 80)
-                    if self.master_fd:
-                        winsize = struct.pack("HHHH", rows, cols, 0, 0)
-                        fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
-
-                elif msg_type == "terminal_set_echo":
-                    enabled = msg.get("enabled", False)
-                    if self.master_fd:
-                        attr = termios.tcgetattr(self.master_fd)
-                        if enabled:
-                            attr[3] |= termios.ECHO
-                        else:
-                            attr[3] &= ~termios.ECHO
-                        termios.tcsetattr(self.master_fd, termios.TCSANOW, attr)
+                        await self.command_queue.put(block)
 
                 elif msg_type == "clear_session":
-                    if self.master_fd:
-                        os.write(self.master_fd, b'\x03')
                     self.blocks = []
                     await self.broadcast({"type": "reorder", "blocks": self.blocks})
 
@@ -312,13 +280,33 @@ class Server:
             except: pass
 
     async def start_master_shell(self):
+        if self.master_proc and self.master_proc.returncode is None:
+            return
+
+        logging.info("Starting master shell session...")
+        if hasattr(self, 'reader_task') and not self.reader_task.done():
+            logging.debug("Cancelling previous reader task")
+            self.reader_task.cancel()
+
         m, s = pty.openpty()
+        try:
+            attr = termios.tcgetattr(s)
+            attr[3] &= ~termios.ECHO
+            termios.tcsetattr(s, termios.TCSANOW, attr)
+        except Exception as e:
+            logging.error(f"Failed to set TTY attributes: {e}")
+
         self.master_fd = m
-        env = os.environ.copy()
+        env = dict(os.environ)
+        env["PS1"] = ""
+        env["PS2"] = ""
+        env["PROMPT_COMMAND"] = ""
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
-        self.master_process = await asyncio.create_subprocess_exec(
-            DEFAULT_SHELL,
+
+        # Use --noediting to disable readline which can cause issues with echo and escape codes
+        self.master_proc = await asyncio.create_subprocess_exec(
+            DEFAULT_SHELL, "--noediting", "--norc", "--noprofile",
             stdin=s,
             stdout=s,
             stderr=s,
@@ -326,81 +314,145 @@ class Server:
             env=env
         )
         os.close(s)
-        init_cmds = "stty -echo && export PS1='' PROMPT_COMMAND='' && clear\necho GS_INIT_DONE\n"
-        os.write(self.master_fd, init_cmds.encode())
-        asyncio.create_task(self.read_master_output())
-        asyncio.create_task(self.process_queue())
+        logging.info(f"Master shell started (PID: {self.master_proc.pid})")
 
-    async def read_master_output(self):
+        # Disable echo explicitly
+        os.write(self.master_fd, b"stty -echo\n")
+
+        self.reader_task = asyncio.create_task(self.master_shell_reader())
+        if not hasattr(self, 'executor_task') or self.executor_task.done():
+            self.executor_task = asyncio.create_task(self.master_shell_executor())
+
+    async def master_shell_reader(self):
         loop = asyncio.get_event_loop()
-        while self.master_process.returncode is None:
-            try:
-                data = await loop.run_in_executor(None, os.read, self.master_fd, 4096)
-                if not data: break
-                decoded = data.decode(errors="replace")
-                if "GS_INIT_DONE" in decoded:
-                    self.init_done.set()
-                if self.current_block:
-                    await self.handle_master_output(decoded)
-            except OSError: break
-        logging.info("Master shell terminated")
+        buffer = ""
 
-    async def broadcast_queue_status(self):
-        for i, block in enumerate(self.command_queue):
-            block["status"] = f"queued({i+1})"
-            await self.broadcast({"type": "update_block", "block": block})
+        try:
+            while True:
+                try:
+                    data = await loop.run_in_executor(None, os.read, self.master_fd, 4096)
+                    if not data:
+                        logging.info("Master shell PTY closed")
+                        break
 
-    async def process_queue(self):
-        await self.init_done.wait()
+                    decoded_data = data.decode(errors="replace")
+                    logging.debug(f"PTY READ: {decoded_data!r}")
+                    buffer += decoded_data
+
+                    # Capture current context to handle possible transitions
+                    active_block_id = self.current_block_id
+                    active_sentinel = self.current_sentinel
+
+                    if active_block_id and active_sentinel:
+                        block = self.get_block(active_block_id)
+                        if block:
+                            while True:
+                                # Look for sentinel
+                                pattern = rf'{re.escape(active_sentinel)}_(-?\d+)_([^\r\n]*)__'
+                                match = re.search(pattern, buffer)
+                                if match:
+                                    logging.debug(f"Sentinel matched: {match.group(0)}")
+                                    before_sentinel = buffer[:match.start()]
+
+                                    # Clean up trailing newlines/prompts before sentinel
+                                    # often the shell outputs a newline before the next command
+                                    if before_sentinel:
+                                        block["output"] += before_sentinel
+                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
+
+                                    exit_code = int(match.group(1))
+                                    new_cwd = match.group(2).strip()
+                                    logging.info(f"Command finished. Exit: {exit_code}, CWD: {new_cwd}")
+
+                                    block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
+                                    block["cwd"] = new_cwd
+                                    self.shell_cwd = new_cwd
+
+                                    await self.broadcast({"type": "update_block", "block": block})
+
+                                    buffer = buffer[match.end():]
+                                    self.current_command_finished.set()
+                                    break # Command finished, wait for next one
+                                else:
+                                    # Handle output before sentinel
+                                    # To avoid sending a partial sentinel, we find the first char of the sentinel
+                                    s_idx = buffer.find(active_sentinel[0])
+                                    if s_idx == -1:
+                                        # No start of sentinel, safe to send all
+                                        if buffer:
+                                            block["output"] += buffer
+                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
+                                            buffer = ""
+                                        break
+                                    elif s_idx > 0:
+                                        # Send everything before the potential sentinel
+                                        to_send = buffer[:s_idx]
+                                        block["output"] += to_send
+                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                        buffer = buffer[s_idx:]
+
+                                    # If buffer starts with sentinel but no match yet, it's partial. Wait.
+                                    break
+                    else:
+                        if buffer:
+                            # logging.debug(f"Unrouted shell output: {buffer!r}")
+                            buffer = ""
+                except OSError:
+                    logging.info("Master shell PTY error/closed")
+                    break
+                except Exception as e:
+                    logging.error(f"Error in master_shell_reader: {e}")
+                    break
+        finally:
+            self.current_command_finished.set() # Wake up any waiting executor
+
+    async def master_shell_executor(self):
         while True:
-            async with self.queue_condition:
-                while not self.command_queue:
-                    await self.queue_condition.wait()
-                block = self.command_queue.pop(0)
-
-            await self.broadcast_queue_status()
-
             try:
-                self.current_block = block
-                self.current_sentinel = f"GS_DONE_{uuid.uuid4()}"
+                block = await self.command_queue.get()
+
+                # Ensure master shell and reader are alive
+                if not self.master_proc or self.master_proc.returncode is not None or self.reader_task.done():
+                    logging.info("Restarting master shell before command...")
+                    await self.start_master_shell()
+                    # Small delay to let shell initialize
+                    await asyncio.sleep(0.5)
+
+                self.current_block_id = block["id"]
+                self.current_sentinel = f"__GEMMI_END_{os.urandom(4).hex()}"
+                self.current_command_finished.clear()
+
                 block["status"] = "running"
-                block["output"] = ""
                 await self.broadcast({"type": "update_block", "block": block})
-                full_cmd = f"cd {block['cwd']} 2>/dev/null; {block['content']}\necho {self.current_sentinel} $?\npwd\n"
-                os.write(self.master_fd, full_cmd.encode())
-                self.done_event = asyncio.Event()
-                await self.done_event.wait()
+
+                cmd = block["content"].strip()
+                sentinel = self.current_sentinel
+                # Robust command wrapper that handles comments and multi-line
+                full_cmd = f"{{ \n{cmd}\n }} ; __R=$? ; __D=$(pwd) ; printf '\\n%s_%s_%s__\\n' \"{sentinel}\" \"$__R\" \"$__D\"\n"
+                logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
+
+                try:
+                    os.write(self.master_fd, full_cmd.encode())
+                    # Wait for sentinel, but check if process dies
+                    while not self.current_command_finished.is_set():
+                        if self.master_proc.returncode is not None or self.reader_task.done():
+                            block["status"] = "error (shell died)"
+                            await self.broadcast({"type": "update_block", "block": block})
+                            break
+                        await asyncio.sleep(0.1)
+                except Exception as e:
+                    logging.error(f"Error executing command: {e}")
+                    block["status"] = "error"
+                    await self.broadcast({"type": "update_block", "block": block})
+                finally:
+                    self.current_block_id = None
+                    self.command_queue.task_done()
             except Exception as e:
-                logging.error(f"Error in process_queue: {e}")
-            finally:
-                self.current_block = None
-
-    async def handle_master_output(self, data):
-        if not self.current_block:
-            return
-
-        self.current_block["output"] += data
-
-        # Check if the sentinel is present in the output
-        if self.current_sentinel and self.current_sentinel in self.current_block["output"]:
-            pattern = rf'{self.current_sentinel}\s+(\d+)\s*\r?\n(.*?)\r?\n'
-            match = re.search(pattern, self.current_block["output"], re.DOTALL)
-            if match:
-                exit_code = int(match.group(1))
-                cwd_raw = match.group(2).strip()
-                # Strip ANSI escape sequences from CWD
-                cwd = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', cwd_raw).strip()
-                idx = match.start()
-                self.current_block["output"] = self.current_block["output"][:idx]
-                self.current_block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
-                self.current_block["cwd"] = cwd
-                await self.broadcast({"type": "update_block", "block": self.current_block})
-                self.done_event.set()
-                return
-
-        await self.broadcast({"type": "output", "block_id": self.current_block["id"], "data": data})
+                logging.error(f"Error in executor loop: {e}")
+                await asyncio.sleep(1)
 
     async def start(self):
+        await self.start_master_shell()
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
         await self.start_master_shell()
