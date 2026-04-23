@@ -5,6 +5,7 @@ import re
 import time
 import argparse
 import logging
+import pyte
 from typing import List, Dict
 
 from rich.text import Text
@@ -213,6 +214,8 @@ class CommandBlock(BaseBlock):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
+        self.terminal_screen = pyte.HistoryScreen(80, 24, history=1000)
+        self.stream = pyte.Stream(self.terminal_screen)
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -226,20 +229,99 @@ class CommandBlock(BaseBlock):
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
     def append_output(self, text: str):
+        if not isinstance(text, str):
+            text = text.decode(errors="replace")
+
         self.full_output += text
-        self.query_one("#output").update(Text.from_ansi(self.full_output))
+        if len(self.full_output) > 1_000_000:
+            self.full_output = self.full_output[-1_000_000:]
+
+        self.stream.feed(text)
+        if self.is_mounted:
+            self.render_terminal()
+
+    def render_terminal(self):
+        if not self.is_mounted: return
+        # We always use the pyte screen for rendering to ensure consistent VT100 support
+        rich_text = Text()
+
+        def append_line(line):
+            if not line:
+                rich_text.append("\n")
+                return
+
+            # Ensure line is a list of characters (History lines are lists, Buffer lines are dicts)
+            if not isinstance(line, list):
+                line = [line[x] for x in range(self.terminal_screen.columns)]
+
+            current_style = self._get_rich_style(line[0])
+            current_text = ""
+            for char in line:
+                style = self._get_rich_style(char)
+                if style == current_style:
+                    current_text += char.data
+                else:
+                    rich_text.append(current_text, style=current_style)
+                    current_style = style
+                    current_text = char.data
+            rich_text.append(current_text, style=current_style)
+            rich_text.append("\n")
+
+        if self.app_ref.input_mode != "CONTROL":
+            for line_obj in self.terminal_screen.history.top:
+                append_line(line_obj)
+            for line_obj in self.terminal_screen.history.bottom:
+                append_line(line_obj)
+
+        # Compact rendering for non-interactive blocks
+        end_y = self.terminal_screen.lines
+        if self.app_ref.input_mode != "CONTROL":
+            # Find the last non-empty line
+            for y in range(self.terminal_screen.lines - 1, -1, -1):
+                row = self.terminal_screen.buffer[y]
+                if any(row[x].data != ' ' for x in range(self.terminal_screen.columns)):
+                    end_y = y + 1
+                    break
+            else: end_y = 1 # Keep at least one line
+
+        for y in range(end_y):
+            append_line(self.terminal_screen.buffer[y])
+
+        self.query_one("#output").update(rich_text)
+
+    def _get_rich_style(self, char):
+        fg = char.fg if char.fg != "default" else None
+        bg = char.bg if char.bg != "default" else None
+
+        if fg and fg.startswith("bright"): fg = fg.replace("bright", "bright_")
+        if bg and bg.startswith("bright"): bg = bg.replace("bright", "bright_")
+
+        style = ""
+        if fg: style += fg if not fg.isdigit() else f"color({fg})"
+        if bg: style += (" on " if style else "on ") + (bg if not bg.isdigit() else f"color({bg})")
+        if char.bold: style += " bold"
+        if char.italics: style += " italic"
+        if char.underscore: style += " underline"
+        return style
 
     def update_status(self, status):
+        if not self.is_mounted: return
         info = self.query_one("#info")
         if status == "running":
             info.update("[yellow]Running...[/]")
             self.add_class("running")
+        elif "queued" in status:
+            num = status.split("(")[1].split(")")[0]
+            info.update(f"[blue]⏳ In Queue (#{num})[/]")
+            self.remove_class("running")
         elif status == "ok":
             info.update("[green]✅ OK[/]")
             self.remove_class("running")
         elif "error" in status:
             info.update(f"[red]❌ {status.upper()}[/]")
             self.remove_class("running")
+        else:
+            info.update(f"[grey44]{status.capitalize()}[/]")
 
     async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
@@ -475,10 +557,18 @@ class ClientApp(App):
                 block = self.blocks[b_id]
                 block.content = data["content"]
                 if isinstance(block, CommandBlock):
+                    old_status = getattr(block, "_last_status", None)
+                    block._last_status = data["status"]
                     block.cwd = data["cwd"]
                     block.update_status(data["status"])
-                    block.full_output = data.get("output", "")
-                    block.query_one("#output").update(Text.from_ansi(block.full_output))
+
+                    # Auto-exit CONTROL mode if block finishes
+                    if self.input_mode == "CONTROL" and self.focused == block:
+                        if old_status == "running" and data["status"] != "running":
+                            self.enter_normal_mode()
+                    block.full_output = ""
+                    block.terminal_screen.reset()
+                    block.append_output(data.get("output", ""))
                 if not block.is_editing:
                    if isinstance(block, NoteBlock):
                        block.query_one("#md_render").update(block.content)
@@ -516,13 +606,12 @@ class ClientApp(App):
         if data["type"] == "NOTE": new_block = NoteBlock(b_id, data["content"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
         else:
             new_block = CommandBlock(b_id, data["content"], data["cwd"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
-            new_block.full_output = data["output"]
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
         await container.mount(new_block)
         if data["type"] == "CMD":
+            new_block.append_output(data["output"])
             new_block.update_status(data["status"])
-            if data["output"]: new_block.query_one("#output").update(Text.from_ansi(data["output"]))
         if data["locked_by"]:
                 user_info = self.users.get(data["locked_by"], {})
                 new_block.update_lock(data["locked_by"], user_info.get("color", "white"))
@@ -534,6 +623,9 @@ class ClientApp(App):
         self.enter_normal_mode()
 
     def enter_normal_mode(self):
+        if self.input_mode == "CONTROL":
+            # Disable echo when leaving interactive mode
+            asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": False}))
         self.input_mode = "NORMAL"
         self.count_str = ""
         self.update_mode_label()
@@ -542,6 +634,9 @@ class ClientApp(App):
         inp = self.query_one("#main_input")
         inp.text = ""
         inp.disabled = True
+        # For non-interactive commands, trigger re-render to only show occupied space?
+        for b in self.blocks.values():
+             if isinstance(b, CommandBlock): b.render_terminal()
         try:
             self.screen.focus()
         except: pass
@@ -597,9 +692,35 @@ class ClientApp(App):
 
     def update_mode_label(self):
         if not hasattr(self, "mode_label"): return
-        colors = {"NORMAL": "#4fc3f7", "BASH": "#00e676", "CMD": "#2196f3", "NOTE": "#00b0ff", "SELECTION": "#81d4fa", "BLOCKEDIT": "#ffab40"}
-        c = colors.get(self.input_mode, "#2196f3")
+        colors = {
+            "NORMAL": "#757575",
+            "BASH": "#00e676",
+            "CMD": "#7c4dff",
+            "NOTE": "#ff5252",
+            "SELECTION": "#00b0ff",
+            "BLOCKEDIT": "#ffab40",
+            "CONTROL": "#f44336"
+        }
+        c = colors.get(self.input_mode, "#7c4dff")
         self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
+
+    def enter_control_mode(self, block):
+        if not isinstance(block, CommandBlock):
+            return
+        self.input_mode = "CONTROL"
+        self.update_mode_label()
+        self.query_one("#main_input").disabled = True
+        block.focus()
+        # Enable echo for interactive mode
+        asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": True}))
+        # Request terminal resize to match block width
+        try:
+            # Approximate size based on widget size
+            cols = max(40, block.size.width - 4)
+            rows = 24
+            block.terminal_screen.resize(rows, cols)
+            asyncio.create_task(self.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
+        except: pass
 
     async def action_submit(self):
         ta = self.query_one("#main_input"); text = ta.text
@@ -642,7 +763,7 @@ class ClientApp(App):
             elif isinstance(block, CommandBlock):
                 md_output.append(f"```bash\n{block.content}\n```\n")
                 if block.full_output.strip():
-                    clean = re.sub(r'\x1B[@-_][0-?]*[ -/]*[@-~]', '', block.full_output)
+                    clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.full_output)
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
@@ -780,9 +901,50 @@ class ClientApp(App):
             elif event.key == "P":
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "before", "yank_data": self.yank_buffer}))
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
+            elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
             elif event.key == "j" and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
             elif event.key == "ctrl+up": asyncio.create_task(self.action_move_up())
             elif event.key == "ctrl+down": asyncio.create_task(self.action_move_down())
+        elif self.input_mode == "CONTROL":
+            if event.key == "ctrl+escape":
+                self.enter_normal_mode()
+                return
+
+            # Map common keys to ANSI sequences
+            key_map = {
+                "enter": "\r",
+                "backspace": "\x7f",
+                "tab": "\t",
+                "escape": "\x1b",
+                "up": "\x1b[A",
+                "down": "\x1b[B",
+                "right": "\x1b[C",
+                "left": "\x1b[D",
+                "home": "\x1b[H",
+                "end": "\x1b[F",
+                "pageup": "\x1b[5~",
+                "pagedown": "\x1b[6~",
+                "delete": "\x1b[3~",
+            }
+
+            data = None
+            if event.key in key_map:
+                data = key_map[event.key]
+            elif event.character:
+                data = event.character
+            elif len(event.key) == 1:
+                data = event.key
+            elif event.key.startswith("ctrl+"):
+                char = event.key.split("+")[1]
+                if len(char) == 1 and 'a' <= char.lower() <= 'z':
+                    data = chr(ord(char.lower()) - ord('a') + 1)
+                elif char == '[': # Ctrl+[ is common for Escape
+                    data = "\x1b"
+
+            if data:
+                asyncio.create_task(self.send_message({"type": "terminal_input", "data": data}))
+                event.stop()
+                event.prevent_default()
 
     @on(TextArea.Changed, "#main_input")
     def in_ch(self, event):
