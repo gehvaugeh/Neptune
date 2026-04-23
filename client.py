@@ -228,6 +228,13 @@ class CommandBlock(BaseBlock):
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
+    def on_resize(self, event: events.Resize) -> None:
+        if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
+            cols = max(40, event.size.width - 4)
+            rows = max(10, event.size.height)
+            self.terminal_screen.resize(rows, cols)
+            asyncio.create_task(self.app_ref.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
+
     def append_output(self, text: str):
         if not isinstance(text, str):
             text = text.decode(errors="replace")
@@ -302,6 +309,7 @@ class CommandBlock(BaseBlock):
         if char.bold: style += " bold"
         if char.italics: style += " italic"
         if char.underscore: style += " underline"
+        if char.reverse: style += " reverse"
         return style
 
     def update_status(self, status):
@@ -717,7 +725,7 @@ class ClientApp(App):
         try:
             # Approximate size based on widget size
             cols = max(40, block.size.width - 4)
-            rows = 24
+            rows = max(10, block.size.height)
             block.terminal_screen.resize(rows, cols)
             asyncio.create_task(self.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
         except: pass
@@ -904,9 +912,9 @@ class ClientApp(App):
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "before", "yank_data": self.yank_buffer}))
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
             elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
-            elif event.key in ("j", "enter") and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
-            elif event.key == "ctrl+up": asyncio.create_task(self.action_move_up())
-            elif event.key == "ctrl+down": asyncio.create_task(self.action_move_down())
+            elif event.key in ("j", "enter", "ctrl+j") and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
+            elif event.key in ("ctrl+up", "alt+up"): asyncio.create_task(self.action_move_up())
+            elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
             if event.key == "ctrl+escape":
                 self.enter_normal_mode()

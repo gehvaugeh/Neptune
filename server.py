@@ -287,6 +287,14 @@ class Server:
                 elif msg_type == "terminal_input":
                     data = msg.get("data")
                     if self.master_fd and data:
+                        # For Ctrl+C, we send it to the process group to ensure it reaches
+                        # children even if they are in a different foreground group
+                        if data == "\x03" and self.master_proc:
+                            try:
+                                os.killpg(os.getpgid(self.master_proc.pid), signal.SIGINT)
+                            except Exception as e:
+                                logging.error(f"Error sending SIGINT: {e}")
+
                         os.write(self.master_fd, data.encode())
 
                 elif msg_type == "terminal_resize":
@@ -395,7 +403,8 @@ class Server:
                         if block:
                             while True:
                                 # Look for sentinel
-                                pattern = rf'{re.escape(active_sentinel)}_(-?\d+)_([^\r\n]*)__'
+                                # We allow optional carriage returns and strip them later
+                                pattern = rf'{re.escape(active_sentinel)}_(-?\d+)_([^\r\n]*?)__'
                                 match = re.search(pattern, buffer)
                                 if match:
                                     logging.debug(f"Sentinel matched: {match.group(0)}")
@@ -481,8 +490,15 @@ class Server:
 
                 cmd = block["content"].strip()
                 sentinel = self.current_sentinel
-                # Robust command wrapper that handles comments and multi-line
-                full_cmd = f"{{ \n{cmd}\n }} ; __R=$? ; __D=$(pwd) ; printf '\\n%s_%s_%s__\\n' \"{sentinel}\" \"$__R\" \"$__D\"\n"
+                # Robust command wrapper that handles comments, multi-line, and signals
+                # We use a subshell and trap to ensure the sentinel is always printed
+                # even if the inner command is interrupted.
+                # Use a unique exit command to force sentinel output on SIGINT
+                full_cmd = (
+                    f"{{ trap 'printf \"\\n{sentinel}_130_$(pwd)__\\n\"; exit 130' SIGINT; "
+                    f"{cmd} ; __R=$? ; __D=$(pwd) ; "
+                    f"printf \"\\n{sentinel}_$__R_$__D__\\n\" ; }}\n"
+                )
                 logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
 
                 try:
