@@ -299,8 +299,10 @@ class Server:
         self.master_fd = m
         env = dict(os.environ)
         env["PS1"] = ""
+        env["PS2"] = ""
         env["PROMPT_COMMAND"] = ""
-        env["TERM"] = "dumb"
+        env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
 
         # Use --noediting to disable readline which can cause issues with echo and escape codes
         self.master_proc = await asyncio.create_subprocess_exec(
@@ -426,7 +428,7 @@ class Server:
                 cmd = block["content"].strip()
                 sentinel = self.current_sentinel
                 # Robust command wrapper that handles comments and multi-line
-                full_cmd = f"{{ \n{cmd}\n }} ; __R=$? ; __D=$(pwd) ; printf '\\n%s_%%s_%%s__\\n' \"{sentinel}\" \"$__R\" \"$__D\"\n"
+                full_cmd = f"{{ \n{cmd}\n }} ; __R=$? ; __D=$(pwd) ; printf '\\n%s_%s_%s__\\n' \"{sentinel}\" \"$__R\" \"$__D\"\n"
                 logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
 
                 try:
