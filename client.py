@@ -32,7 +32,7 @@ class ServerMessage(message.Message):
         self.data = data
         super().__init__()
 
-DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
+DEFAULT_SOCKET_PATH = "/tmp/neptune.sock"
 
 # --- MODALE DIALOGE ---
 
@@ -394,12 +394,12 @@ class ClientApp(App):
         self.yank_buffer = None
         self.count_str = ""
         self.available_commands = [
-            {"name": "export", "params": "[file]", "desc": "Export notebook to Markdown"},
-            {"name": "import", "params": "[file]", "desc": "Import notebook from Markdown"},
-            {"name": "exit", "params": "", "desc": "Exit Gemmi-Shell"},
-            {"name": "save_wf", "params": "", "desc": "Save current input as Workflow"},
-            {"name": "help", "params": "", "desc": "Show help message"},
-            {"name": "clear", "params": "", "desc": "Clear all blocks and shell state"},
+            {"name": "export", "params": "[file]", "desc": "Save current session as a Markdown file"},
+            {"name": "import", "params": "[file]", "desc": "Load blocks from an external Markdown file"},
+            {"name": "exit", "params": "", "desc": "Close the client and return to terminal"},
+            {"name": "save_wf", "params": "", "desc": "Save the command in main input as a Workflow"},
+            {"name": "help", "params": "", "desc": "Show list of available internal commands"},
+            {"name": "clear", "params": "", "desc": "Remove all blocks and reset server shell state"},
         ]
         self.providers = {
             "BASH": BashAutocompleteProvider(),
@@ -410,18 +410,24 @@ class ClientApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="filter_bar", classes="hidden"):
             yield Label(" 🔍 Filter: ", id="filter_label")
-            yield Input(placeholder="Search blocks...", id="filter_input")
+            f_inp = Input(placeholder="Search blocks...", id="filter_input")
+            f_inp.tooltip = "Enter text to filter blocks by command or output content."
+            yield f_inp
         with ScrollableContainer(id="command_history"):
-            yield Static("[bold magenta]Gemmi-Shell Multi-User | Collaborative Notebook[/]")
+            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]")
         with Vertical(id="bottom_dock"):
             yield OptionList(id="palette")
             self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
+            self.mode_label.tooltip = "Current interaction mode (NORMAL, BASH, CMD, NOTE, SELECTION, BLOCKEDIT)"
             yield self.mode_label
             with Horizontal(id="input_container"):
                 yield Label("", id="mode_prefix")
                 self.user_label = Label(f"User: [bold {self.user_color}]Me[/]", id="user_indicator")
+                self.user_label.tooltip = "Your current username and unique color identifier."
                 yield self.user_label
-                yield NotebookInput(language="bash", id="main_input")
+                m_inp = NotebookInput(language="bash", id="main_input")
+                m_inp.tooltip = "Main command input. Use !, :, or ; in NORMAL mode to change input types."
+                yield m_inp
 
     def on_mount(self):
         self.run_worker(self.connect_to_server())
@@ -656,8 +662,8 @@ class ClientApp(App):
         self.update_mode_label()
         pref_label = self.query_one("#mode_prefix")
         pref_label.update(prefix)
-        colors = {"BASH": "#00e676", "CMD": "#7c4dff", "NOTE": "#ff5252"}
-        pref_label.styles.color = colors.get(self.input_mode, "#7c4dff")
+        colors = {"BASH": "#00e676", "CMD": "#2196f3", "NOTE": "#00b0ff"}
+        pref_label.styles.color = colors.get(self.input_mode, "#2196f3")
         inp = self.query_one("#main_input")
         inp.disabled = False
         inp.language = "bash" if prefix in ("!", ":") else "markdown"
@@ -964,8 +970,10 @@ class ClientApp(App):
         if self.writer: self.writer.close()
         self.history.save()
 
+from branding import setup_parser
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Gemmi-Shell Client")
+    parser = setup_parser("Neptune Client")
     parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
     args = parser.parse_args()
     ClientApp(socket_path=args.socket).run()

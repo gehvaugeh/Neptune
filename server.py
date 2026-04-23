@@ -16,12 +16,12 @@ from typing import Dict, List, Any
 
 # Setup logging
 logging.basicConfig(
-    filename='gemmi_server.log',
+    filename='neptune_server.log',
     level=logging.DEBUG,
     format='%(asctime)s %(levelname)s: %(message)s'
 )
 
-DEFAULT_SOCKET_PATH = "/tmp/gemmi_shell.sock"
+DEFAULT_SOCKET_PATH = "/tmp/neptune.sock"
 
 def get_shell():
     env_shell = os.environ.get("SHELL")
@@ -416,8 +416,10 @@ class Server:
                 if os.path.exists(self.socket_path):
                     os.remove(self.socket_path)
 
+from branding import setup_parser
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Gemmi-Shell Server")
+    parser = setup_parser("Neptune Server")
     parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
     args = parser.parse_args()
 
