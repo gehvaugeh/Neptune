@@ -214,6 +214,7 @@ class CommandBlock(BaseBlock):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
+        # Initialize with a default size, will be resized on mount or interaction
         self.terminal_screen = pyte.HistoryScreen(80, 24, history=1000)
         self.stream = pyte.Stream(self.terminal_screen)
 
