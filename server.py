@@ -10,6 +10,8 @@ import shutil
 import logging
 import termios
 import re
+import fcntl
+import struct
 from typing import Dict, List, Any, Optional, Tuple
 
 # Setup logging
@@ -261,6 +263,31 @@ class Server:
                         block["status"] = b_data.get("status", "ready")
 
                     await self.broadcast({"type": "reorder", "blocks": self.blocks})
+
+                elif msg_type == "terminal_input":
+                    data = msg.get("data")
+                    if self.master_fd and data:
+                        os.write(self.master_fd, data.encode())
+
+                elif msg_type == "terminal_resize":
+                    rows = msg.get("rows")
+                    cols = msg.get("cols")
+                    if self.master_fd and rows and cols:
+                        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+                        fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
+
+                elif msg_type == "terminal_set_echo":
+                    enabled = msg.get("enabled", False)
+                    if self.master_fd:
+                        try:
+                            attr = termios.tcgetattr(self.master_fd)
+                            if enabled:
+                                attr[3] |= termios.ECHO
+                            else:
+                                attr[3] &= ~termios.ECHO
+                            termios.tcsetattr(self.master_fd, termios.TCSANOW, attr)
+                        except Exception as e:
+                            logging.error(f"Error setting terminal echo: {e}")
 
         except Exception as e:
             logging.error(f"Error handling client {user_id}: {e}")
