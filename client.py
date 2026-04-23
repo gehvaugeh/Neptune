@@ -894,6 +894,7 @@ class ClientApp(App):
                  new_idx = max(0, min(len(blocks)-1, idx + (count if event.key in ("down", "j") else -count)))
                  blocks[new_idx].focus(); blocks[new_idx].scroll_visible()
             elif event.key == "x": asyncio.create_task(self.action_delete_block())
+            elif event.key == "r": asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
             elif event.key == "y":
                  if isinstance(focused, NoteBlock): self.yank_buffer = ("NOTE", focused.content); self.notify("Note yanked")
                  elif isinstance(focused, CommandBlock): self.yank_buffer = ("CMD", focused.content, focused.cwd); self.notify("Command yanked")
@@ -903,7 +904,7 @@ class ClientApp(App):
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "before", "yank_data": self.yank_buffer}))
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
             elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
-            elif event.key == "j" and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
+            elif event.key in ("j", "enter") and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
             elif event.key == "ctrl+up": asyncio.create_task(self.action_move_up())
             elif event.key == "ctrl+down": asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":

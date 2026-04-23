@@ -43,7 +43,8 @@ class Server:
 
         self.master_fd = None
         self.master_proc = None
-        self.command_queue = asyncio.Queue()
+        self.command_queue = []
+        self.queue_condition = asyncio.Condition()
         self.current_block_id = None
         self.current_sentinel = None
         self.current_command_finished = asyncio.Event()
@@ -67,6 +68,14 @@ class Server:
             if b["id"] == block_id:
                 return b
         return None
+
+    async def broadcast_queue_status(self):
+        async with self.queue_condition:
+            for i, block in enumerate(self.command_queue):
+                status = f"queued({i+1})"
+                if block["status"] != status:
+                    block["status"] = status
+                    await self.broadcast({"type": "update_block", "block": block})
 
     async def broadcast(self, message):
         data = json.dumps(message).encode() + b"\n"
@@ -150,7 +159,10 @@ class Server:
                     await self.broadcast({"type": "new_block", "block": block})
 
                     if mode == "CMD":
-                        await self.command_queue.put(block)
+                        async with self.queue_condition:
+                            self.command_queue.append(block)
+                            self.queue_condition.notify_all()
+                        await self.broadcast_queue_status()
 
                 elif msg_type == "edit_start":
                     block_id = msg.get("block_id")
@@ -178,7 +190,11 @@ class Server:
 
                         if block["type"] == "CMD":
                             block["output"] = ""
-                            await self.command_queue.put(block)
+                            async with self.queue_condition:
+                                if block not in self.command_queue:
+                                    self.command_queue.append(block)
+                                    self.queue_condition.notify_all()
+                            await self.broadcast_queue_status()
 
                 elif msg_type == "edit_cancel":
                     block_id = msg.get("block_id")
@@ -203,7 +219,7 @@ class Server:
                     self.blocks = [b for b in self.blocks if b["id"] != block_id]
                     async with self.queue_condition:
                         self.command_queue = [b for b in self.command_queue if b["id"] != block_id]
-                    if self.current_block and self.current_block["id"] == block_id:
+                    if self.current_block_id == block_id:
                         if self.master_fd:
                             os.write(self.master_fd, b'\x03')
                     await self.broadcast({"type": "remove_block", "block_id": block_id})
@@ -248,7 +264,11 @@ class Server:
                     block = self.get_block(block_id)
                     if block and block["type"] == "CMD":
                         block["output"] = ""
-                        await self.command_queue.put(block)
+                        async with self.queue_condition:
+                            if block not in self.command_queue:
+                                self.command_queue.append(block)
+                                self.queue_condition.notify_all()
+                        await self.broadcast_queue_status()
 
                 elif msg_type == "clear_session":
                     self.blocks = []
@@ -436,7 +456,14 @@ class Server:
     async def master_shell_executor(self):
         while True:
             try:
-                block = await self.command_queue.get()
+                async with self.queue_condition:
+                    while not self.command_queue:
+                        await self.queue_condition.wait()
+                    block = self.command_queue.pop(0)
+
+                block["status"] = "running"
+                await self.broadcast({"type": "update_block", "block": block})
+                await self.broadcast_queue_status()
 
                 # Ensure master shell and reader are alive
                 if not self.master_proc or self.master_proc.returncode is not None or self.reader_task.done():
@@ -473,7 +500,6 @@ class Server:
                     await self.broadcast({"type": "update_block", "block": block})
                 finally:
                     self.current_block_id = None
-                    self.command_queue.task_done()
             except Exception as e:
                 logging.error(f"Error in executor loop: {e}")
                 await asyncio.sleep(1)
