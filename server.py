@@ -406,57 +406,59 @@ class Server:
 
                     if active_block_id:
                         block = self.get_block(active_block_id)
-                        if block:
-                            if active_sentinel:
-                                while True:
-                                    # Look for status sentinel
-                                    pattern = rf'{re.escape(active_sentinel)}_(-?\d+)_([^\r\n]*?)__'
-                                    match = re.search(pattern, buffer)
-                                    if match:
-                                        logging.debug(f"Status sentinel matched: {match.group(0)}")
+                        if active_sentinel:
+                            while True:
+                                # Look for status sentinel
+                                pattern = rf'{re.escape(active_sentinel)}_(-?\d+)_([^\r\n]*?)__'
+                                match = re.search(pattern, buffer)
+                                if match:
+                                    logging.debug(f"Status sentinel matched: {match.group(0)}")
 
-                                        # Any output before the status sentinel is technically also part of the command's stream
-                                        before_sentinel = buffer[:match.start()]
-                                        if before_sentinel:
-                                            block["output"] += before_sentinel
-                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
+                                    # Any output before the status sentinel is part of the command's stream
+                                    before_sentinel = buffer[:match.start()]
+                                    if block and before_sentinel:
+                                        block["output"] += before_sentinel
+                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
 
-                                        exit_code = int(match.group(1))
-                                        new_cwd = match.group(2).strip()
-                                        logging.info(f"Status sentinel matched. Exit: {exit_code}, CWD: {new_cwd}")
+                                    exit_code = int(match.group(1))
+                                    new_cwd = match.group(2).strip()
+                                    logging.info(f"Status sentinel matched. Exit: {exit_code}, CWD: {new_cwd}")
 
+                                    if block:
                                         block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
                                         block["cwd"] = new_cwd
-                                        self.shell_cwd = new_cwd
-
                                         await self.broadcast({"type": "update_block", "block": block})
 
-                                        buffer = buffer[match.end():]
-                                        self.current_command_finished.set()
-                                        break
-                                    else:
-                                        # Protect against partial sentinel
-                                        s_idx = buffer.find(active_sentinel[0])
-                                        if s_idx == -1:
-                                            if buffer:
+                                    self.shell_cwd = new_cwd
+                                    buffer = buffer[match.end():]
+                                    self.current_command_finished.set()
+                                    break
+                                else:
+                                    # Protect against partial sentinel
+                                    s_idx = buffer.find(active_sentinel[0])
+                                    if s_idx == -1:
+                                        if buffer:
+                                            if block:
                                                 block["output"] += buffer
                                                 await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
-                                                buffer = ""
-                                            break
-                                        elif s_idx > 0:
-                                            to_send = buffer[:s_idx]
+                                            buffer = ""
+                                        break
+                                    elif s_idx > 0:
+                                        to_send = buffer[:s_idx]
+                                        if block:
                                             block["output"] += to_send
                                             await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
-                                            buffer = buffer[s_idx:]
-                                        break
-                            else:
-                                # No sentinel yet, just stream output
-                                if buffer:
+                                        buffer = buffer[s_idx:]
+                                    break
+                        else:
+                            # No sentinel yet, just stream output
+                            if buffer:
+                                if block:
                                     block["output"] += buffer
                                     await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
-                                    buffer = ""
+                                buffer = ""
                     else:
-                        # No active block, discard or buffer? (Currently discard to avoid leak)
+                        # No active block, discard buffer to avoid leak
                         buffer = ""
                 except OSError:
                     logging.info("Master shell PTY error/closed")
@@ -494,8 +496,9 @@ class Server:
                 try:
                     # Escape command for eval
                     escaped_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-                    # Wrap command in a subshell using eval to prevent syntax errors from swallowing status command
-                    full_cmd = f"( eval \"{escaped_cmd}\" );\n"
+                    # Use eval to handle potential syntax errors without swallowing the subsequent status command.
+                    # We no longer use a subshell (parentheses) to ensure state (CWD, env) persists between blocks.
+                    full_cmd = f"eval \"{escaped_cmd}\";\n"
                     os.write(self.master_fd, full_cmd.encode())
 
                     # Wait for command to start (foreground PGID changes)

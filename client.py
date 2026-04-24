@@ -146,6 +146,18 @@ class BaseBlock(Static):
             edit = self.query_one("#block_text_edit")
             edit.cursor_location = self.cursor_pos
 
+        # Initial resize to ensure PTY matches UI
+        if isinstance(self, CommandBlock):
+            self.call_after_refresh(self._initial_resize)
+
+    def _initial_resize(self):
+        try:
+            cols = max(40, self.size.width - 4)
+            rows = max(10, self.size.height)
+            self.terminal_screen.resize(rows, cols)
+            asyncio.create_task(self.app_ref.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
+        except: pass
+
 class NoteBlock(BaseBlock):
     def compose(self) -> ComposeResult:
         render_classes = "markdown-content" + (" hidden" if self.is_editing else "")
@@ -281,16 +293,22 @@ class CommandBlock(BaseBlock):
             for line_obj in self.terminal_screen.history.bottom:
                 append_line(line_obj)
 
-        # Compact rendering for non-interactive blocks
+        # Find the last non-empty line (considering data and non-default background/formatting)
+        # We always do this compact rendering to avoid empty trailing space
         end_y = self.terminal_screen.lines
-        if self.app_ref.input_mode != "CONTROL":
-            # Find the last non-empty line
-            for y in range(self.terminal_screen.lines - 1, -1, -1):
-                row = self.terminal_screen.buffer[y]
-                if any(row[x].data != ' ' for x in range(self.terminal_screen.columns)):
-                    end_y = y + 1
+        for y in range(self.terminal_screen.lines - 1, -1, -1):
+            row = self.terminal_screen.buffer[y]
+            is_empty = True
+            for x in range(self.terminal_screen.columns):
+                char = row[x]
+                if char.data != ' ' or char.bg != 'default' or char.reverse:
+                    is_empty = False
                     break
-            else: end_y = 1 # Keep at least one line
+            if not is_empty:
+                end_y = y + 1
+                break
+        else:
+            end_y = 1 # Keep at least one line
 
         for y in range(end_y):
             append_line(self.terminal_screen.buffer[y])
@@ -618,6 +636,7 @@ class ClientApp(App):
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
         await container.mount(new_block)
+
         if data["type"] == "CMD":
             new_block.append_output(data["output"])
             new_block.update_status(data["status"])
