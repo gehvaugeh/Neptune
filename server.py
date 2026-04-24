@@ -492,7 +492,11 @@ class Server:
                 logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
 
                 try:
-                    os.write(self.master_fd, f"{cmd}\n".encode())
+                    # Escape command for eval
+                    escaped_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+                    # Wrap command in a subshell using eval to prevent syntax errors from swallowing status command
+                    full_cmd = f"( eval \"{escaped_cmd}\" );\n"
+                    os.write(self.master_fd, full_cmd.encode())
 
                     # Wait for command to start (foreground PGID changes)
                     start_time = asyncio.get_event_loop().time()
