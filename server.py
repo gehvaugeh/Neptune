@@ -490,12 +490,13 @@ class Server:
 
                 cmd = block["content"].strip()
                 sentinel = self.current_sentinel
-                # Robust command wrapper that handles comments, multi-line, and signals
-                # We use a subshell and trap to ensure the sentinel is always printed
-                # even if the inner command is interrupted.
+                # Escape command for eval
+                escaped_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+                # Robust command wrapper that handles comments, multi-line, signals, and syntax errors.
+                # We use 'eval' so that syntax errors in 'cmd' don't prevent the rest of the wrapper from running.
                 full_cmd = (
                     f"bash -c \"trap 'printf \\\"\\\\n{sentinel}_130_%s__\\\\n\\\" \\\"\\$(pwd)\\\"; exit 130' SIGINT; "
-                    f"{{ {cmd} ; }} ; __R=\\$? ; __D=\\$(pwd) ; "
+                    f"eval \\\"{escaped_cmd}\\\" ; __R=\\$? ; __D=\\$(pwd) ; "
                     f"printf \\\"\\\\n{sentinel}_%s_%s__\\\\n\\\" \\\"\\$__R\\\" \\\"\\$__D\\\"\"\n"
                 )
                 logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
