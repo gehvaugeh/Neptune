@@ -404,61 +404,60 @@ class Server:
                     active_block_id = self.current_block_id
                     active_sentinel = self.current_sentinel
 
-                    if active_block_id and active_sentinel:
+                    if active_block_id:
                         block = self.get_block(active_block_id)
                         if block:
-                            while True:
-                                # Look for sentinel
-                                # We allow optional carriage returns and strip them later
-                                pattern = rf'{re.escape(active_sentinel)}_(-?\d+)_([^\r\n]*?)__'
-                                match = re.search(pattern, buffer)
-                                if match:
-                                    logging.debug(f"Sentinel matched: {match.group(0)}")
-                                    before_sentinel = buffer[:match.start()]
+                            if active_sentinel:
+                                while True:
+                                    # Look for status sentinel
+                                    pattern = rf'{re.escape(active_sentinel)}_(-?\d+)_([^\r\n]*?)__'
+                                    match = re.search(pattern, buffer)
+                                    if match:
+                                        logging.debug(f"Status sentinel matched: {match.group(0)}")
 
-                                    # Clean up trailing newlines/prompts before sentinel
-                                    # often the shell outputs a newline before the next command
-                                    if before_sentinel:
-                                        block["output"] += before_sentinel
-                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
+                                        # Any output before the status sentinel is technically also part of the command's stream
+                                        before_sentinel = buffer[:match.start()]
+                                        if before_sentinel:
+                                            block["output"] += before_sentinel
+                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
 
-                                    exit_code = int(match.group(1))
-                                    new_cwd = match.group(2).strip()
-                                    logging.info(f"Status sentinel matched. Exit: {exit_code}, CWD: {new_cwd}")
+                                        exit_code = int(match.group(1))
+                                        new_cwd = match.group(2).strip()
+                                        logging.info(f"Status sentinel matched. Exit: {exit_code}, CWD: {new_cwd}")
 
-                                    block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
-                                    block["cwd"] = new_cwd
-                                    self.shell_cwd = new_cwd
+                                        block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
+                                        block["cwd"] = new_cwd
+                                        self.shell_cwd = new_cwd
 
-                                    await self.broadcast({"type": "update_block", "block": block})
+                                        await self.broadcast({"type": "update_block", "block": block})
 
-                                    buffer = buffer[match.end():]
-                                    self.current_command_finished.set()
-                                    break # Command finished, wait for next one
-                                else:
-                                    # Handle output before sentinel
-                                    # To avoid sending a partial sentinel, we find the first char of the sentinel
-                                    s_idx = buffer.find(active_sentinel[0])
-                                    if s_idx == -1:
-                                        # No start of sentinel, safe to send all
-                                        if buffer:
-                                            block["output"] += buffer
-                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
-                                            buffer = ""
+                                        buffer = buffer[match.end():]
+                                        self.current_command_finished.set()
                                         break
-                                    elif s_idx > 0:
-                                        # Send everything before the potential sentinel
-                                        to_send = buffer[:s_idx]
-                                        block["output"] += to_send
-                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
-                                        buffer = buffer[s_idx:]
-
-                                    # If buffer starts with sentinel but no match yet, it's partial. Wait.
-                                    break
+                                    else:
+                                        # Protect against partial sentinel
+                                        s_idx = buffer.find(active_sentinel[0])
+                                        if s_idx == -1:
+                                            if buffer:
+                                                block["output"] += buffer
+                                                await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
+                                                buffer = ""
+                                            break
+                                        elif s_idx > 0:
+                                            to_send = buffer[:s_idx]
+                                            block["output"] += to_send
+                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                            buffer = buffer[s_idx:]
+                                        break
+                            else:
+                                # No sentinel yet, just stream output
+                                if buffer:
+                                    block["output"] += buffer
+                                    await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
+                                    buffer = ""
                     else:
-                        if buffer:
-                            # logging.debug(f"Unrouted shell output: {buffer!r}")
-                            buffer = ""
+                        # No active block, discard or buffer? (Currently discard to avoid leak)
+                        buffer = ""
                 except OSError:
                     logging.info("Master shell PTY error/closed")
                     break
