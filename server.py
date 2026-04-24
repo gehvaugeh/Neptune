@@ -43,6 +43,7 @@ class Server:
 
         self.master_fd = None
         self.master_proc = None
+        self.master_pgid = None
         self.command_queue = []
         self.queue_condition = asyncio.Condition()
         self.current_block_id = None
@@ -371,8 +372,13 @@ class Server:
         os.close(s)
         logging.info(f"Master shell started (PID: {self.master_proc.pid})")
 
-        # Disable echo explicitly
-        os.write(self.master_fd, b"stty -echo\n")
+        # Disable echo and enable job control explicitly
+        os.write(self.master_fd, b"stty -echo\nset -m\n")
+        await asyncio.sleep(0.1)
+        try:
+            self.master_pgid = os.getpgid(self.master_proc.pid)
+        except Exception as e:
+            logging.error(f"Failed to get master shell PGID: {e}")
 
         self.reader_task = asyncio.create_task(self.master_shell_reader())
         if not hasattr(self, 'executor_task') or self.executor_task.done():
@@ -418,7 +424,7 @@ class Server:
 
                                     exit_code = int(match.group(1))
                                     new_cwd = match.group(2).strip()
-                                    logging.info(f"Command finished. Exit: {exit_code}, CWD: {new_cwd}")
+                                    logging.info(f"Status sentinel matched. Exit: {exit_code}, CWD: {new_cwd}")
 
                                     block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
                                     block["cwd"] = new_cwd
@@ -475,47 +481,58 @@ class Server:
                 await self.broadcast_queue_status()
 
                 # Ensure master shell and reader are alive
-                if not self.master_proc or self.master_proc.returncode is not None or self.reader_task.done():
+                if not self.master_proc or self.master_proc.returncode is not None or self.reader_task.done() or not self.master_pgid:
                     logging.info("Restarting master shell before command...")
                     await self.start_master_shell()
-                    # Small delay to let shell initialize
                     await asyncio.sleep(0.5)
 
                 self.current_block_id = block["id"]
-                self.current_sentinel = f"__GEMMI_END_{os.urandom(4).hex()}"
                 self.current_command_finished.clear()
 
-                block["status"] = "running"
-                await self.broadcast({"type": "update_block", "block": block})
-
                 cmd = block["content"].strip()
-                sentinel = self.current_sentinel
-                # Escape command for eval
-                escaped_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-                # Robust command wrapper that handles comments, multi-line, signals, and syntax errors.
-                # We use 'eval' so that syntax errors in 'cmd' don't prevent the rest of the wrapper from running.
-                full_cmd = (
-                    f"bash -c \"trap 'printf \\\"\\\\n{sentinel}_130_%s__\\\\n\\\" \\\"\\$(pwd)\\\"; exit 130' SIGINT; "
-                    f"eval \\\"{escaped_cmd}\\\" ; __R=\\$? ; __D=\\$(pwd) ; "
-                    f"printf \\\"\\\\n{sentinel}_%s_%s__\\\\n\\\" \\\"\\$__R\\\" \\\"\\$__D\\\"\"\n"
-                )
                 logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
 
                 try:
-                    os.write(self.master_fd, full_cmd.encode())
-                    # Wait for sentinel, but check if process dies
-                    while not self.current_command_finished.is_set():
+                    os.write(self.master_fd, f"{cmd}\n".encode())
+
+                    # Wait for command to start (foreground PGID changes)
+                    start_time = asyncio.get_event_loop().time()
+                    while asyncio.get_event_loop().time() - start_time < 0.5:
+                        try:
+                            if os.tcgetpgrp(self.master_fd) != self.master_pgid:
+                                break
+                        except: pass
+                        await asyncio.sleep(0.05)
+
+                    # Wait for command to finish (foreground PGID returns to shell)
+                    while True:
+                        try:
+                            if os.tcgetpgrp(self.master_fd) == self.master_pgid:
+                                break
+                        except: pass
+
                         if self.master_proc.returncode is not None or self.reader_task.done():
-                            block["status"] = "error (shell died)"
-                            await self.broadcast({"type": "update_block", "block": block})
-                            break
+                             break
                         await asyncio.sleep(0.1)
+
+                    # Retrieval of status and CWD
+                    status_sentinel = f"__STATUS_{os.urandom(4).hex()}__"
+                    self.current_sentinel = status_sentinel
+                    os.write(self.master_fd, f"printf '\\n{status_sentinel}_%s_%s__\\n' \"$?\" \"$(pwd)\"\n".encode())
+
+                    # Wait for status sentinel
+                    while not self.current_command_finished.is_set():
+                         if self.master_proc.returncode is not None or self.reader_task.done():
+                             break
+                         await asyncio.sleep(0.1)
+
                 except Exception as e:
                     logging.error(f"Error executing command: {e}")
                     block["status"] = "error"
                     await self.broadcast({"type": "update_block", "block": block})
                 finally:
                     self.current_block_id = None
+                    self.current_sentinel = None
             except Exception as e:
                 logging.error(f"Error in executor loop: {e}")
                 await asyncio.sleep(1)
