@@ -494,11 +494,20 @@ class Server:
                 logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
 
                 try:
+                    # Retrieval of status and CWD
+                    status_sentinel = f"__STATUS_{os.urandom(4).hex()}__"
+                    self.current_sentinel = status_sentinel
+
                     # Escape command for eval
                     escaped_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-                    # Use eval to handle potential syntax errors without swallowing the subsequent status command.
-                    # We no longer use a subshell (parentheses) to ensure state (CWD, env) persists between blocks.
-                    full_cmd = f"eval \"{escaped_cmd}\";\n"
+
+                    # Combine command and status retrieval into a single write operation.
+                    # This ensures the shell parses them together, preventing built-ins like 'read'
+                    # from consuming the status retrieval command as input.
+                    full_cmd = (
+                        f"eval \"{escaped_cmd}\"; "
+                        f"printf '\\n{status_sentinel}_%s_%s__\\n' \"$?\" \"$(pwd)\"\n"
+                    )
                     os.write(self.master_fd, full_cmd.encode())
 
                     # Wait for command to start (foreground PGID changes)
@@ -520,11 +529,6 @@ class Server:
                         if self.master_proc.returncode is not None or self.reader_task.done():
                              break
                         await asyncio.sleep(0.1)
-
-                    # Retrieval of status and CWD
-                    status_sentinel = f"__STATUS_{os.urandom(4).hex()}__"
-                    self.current_sentinel = status_sentinel
-                    os.write(self.master_fd, f"printf '\\n{status_sentinel}_%s_%s__\\n' \"$?\" \"$(pwd)\"\n".encode())
 
                     # Wait for status sentinel
                     while not self.current_command_finished.is_set():
