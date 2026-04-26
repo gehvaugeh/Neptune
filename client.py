@@ -304,11 +304,21 @@ class CommandBlock(BaseBlock):
         self.query_one("#output").update(rich_text)
 
     def _get_rich_style(self, char):
-        fg = char.fg if char.fg != "default" else None
-        bg = char.bg if char.bg != "default" else None
+        def map_color(c):
+            if not c or c == "default": return None
+            # Pyte color names to Rich-compatible names
+            mapping = {
+                "brown": "yellow",
+                "lightgray": "white",
+                "darkgray": "bright_black",
+            }
+            c = mapping.get(c, c)
+            if c.startswith("bright"):
+                c = c.replace("bright", "bright_")
+            return c
 
-        if fg and fg.startswith("bright"): fg = fg.replace("bright", "bright_")
-        if bg and bg.startswith("bright"): bg = bg.replace("bright", "bright_")
+        fg = map_color(char.fg)
+        bg = map_color(char.bg)
 
         style = ""
         if fg: style += fg if not fg.isdigit() else f"color({fg})"
