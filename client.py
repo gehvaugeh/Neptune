@@ -146,18 +146,6 @@ class BaseBlock(Static):
             edit = self.query_one("#block_text_edit")
             edit.cursor_location = self.cursor_pos
 
-        # Initial resize to ensure PTY matches UI
-        if isinstance(self, CommandBlock):
-            self.call_after_refresh(self._initial_resize)
-
-    def _initial_resize(self):
-        try:
-            cols = max(40, self.size.width - 4)
-            rows = max(10, self.size.height)
-            self.terminal_screen.resize(rows, cols)
-            asyncio.create_task(self.app_ref.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
-        except: pass
-
 class NoteBlock(BaseBlock):
     def compose(self) -> ComposeResult:
         render_classes = "markdown-content" + (" hidden" if self.is_editing else "")
@@ -226,8 +214,8 @@ class CommandBlock(BaseBlock):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
-        # Initialize with a default size, will be resized on mount or interaction
-        self.terminal_screen = pyte.HistoryScreen(80, 24, history=1000)
+        # Initialize with fixed TTY dimensions established by the app
+        self.terminal_screen = pyte.HistoryScreen(app_ref.preferred_cols, app_ref.preferred_rows, history=1000)
         self.stream = pyte.Stream(self.terminal_screen)
 
     def compose(self) -> ComposeResult:
@@ -242,11 +230,8 @@ class CommandBlock(BaseBlock):
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
     def on_resize(self, event: events.Resize) -> None:
-        if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
-            cols = max(40, event.size.width - 4)
-            rows = max(10, event.size.height)
-            self.terminal_screen.resize(rows, cols)
-            asyncio.create_task(self.app_ref.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
+        # Fixed size TTY, no automatic resizing to match widget size
+        pass
 
     def append_output(self, text: str):
         if not isinstance(text, str):
@@ -408,6 +393,8 @@ class ClientApp(App):
         super().__init__()
         self.socket_path = socket_path
         self.history = HistoryManager()
+        self.preferred_cols = 80
+        self.preferred_rows = 24
         self.input_mode = "NORMAL"
         self.user_color = get_random_bright_color()
         self.user_name = os.environ.get("USER", "User")
@@ -457,6 +444,11 @@ class ClientApp(App):
                 yield m_inp
 
     def on_mount(self):
+        # Establish fixed TTY dimensions based on initial screen size
+        # Margin for borders, padding, scrollbars and locking bars
+        self.preferred_cols = max(40, self.screen.size.width - 10)
+        self.preferred_rows = 24  # Standard fixed height for terminal blocks
+
         self.run_worker(self.connect_to_server())
         self.enter_normal_mode()
 
@@ -472,6 +464,12 @@ class ClientApp(App):
                 "type": "connect",
                 "color": self.user_color,
                 "user": self.user_name
+            })
+            # Set fixed TTY size on server
+            await self.send_message({
+                "type": "terminal_resize",
+                "rows": self.preferred_rows,
+                "cols": self.preferred_cols
             })
             await self.listen_to_server()
         except Exception as e:
@@ -741,14 +739,6 @@ class ClientApp(App):
         block.focus()
         # Enable echo for interactive mode
         asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": True}))
-        # Request terminal resize to match block width
-        try:
-            # Approximate size based on widget size
-            cols = max(40, block.size.width - 4)
-            rows = max(10, block.size.height)
-            block.terminal_screen.resize(rows, cols)
-            asyncio.create_task(self.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
-        except: pass
 
     async def action_submit(self):
         ta = self.query_one("#main_input"); text = ta.text

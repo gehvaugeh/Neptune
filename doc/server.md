@@ -26,7 +26,7 @@ To prevent edit conflicts, the server implements a simple locking mechanism:
 When a client enters `CONTROL` mode:
 - Raw keystrokes are forwarded to the master PTY via `terminal_input` messages.
 - PTY output is streamed back to all clients.
-- The server handles terminal resizing and toggles `ECHO` state on the TTY as requested by clients.
+- The server handles terminal resizing (typically set to a fixed size by the client upon connection) and toggles `ECHO` state on the TTY as requested by clients.
 
 ## Implementation Details
 - **PTY Handling:** Uses `pty.openpty()` and `asyncio.create_subprocess_exec`.
