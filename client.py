@@ -146,6 +146,9 @@ class BaseBlock(Static):
             edit = self.query_one("#block_text_edit")
             edit.cursor_location = self.cursor_pos
 
+        if isinstance(self, CommandBlock):
+            self.query_one("#output").styles.max_height = self.app_ref.preferred_rows
+
 class NoteBlock(BaseBlock):
     def compose(self) -> ComposeResult:
         render_classes = "markdown-content" + (" hidden" if self.is_editing else "")
@@ -906,7 +909,7 @@ class ClientApp(App):
             if event.character and event.character.isdigit() and (event.character != "0" or self.count_str): self.count_str += event.character; return
             count, self.count_str = int(self.count_str) if self.count_str else 1, ""
             if event.character in (":", "!", ";"): self.enter_input_mode(prefix=event.character); return
-            if event.key in ("up", "down", "k", "j") and not (event.key == "j" and isinstance(focused, CommandBlock) and not focused.is_editing):
+            if event.key in ("up", "down", "k", "j") and not (event.key in ("j", "enter") and isinstance(focused, CommandBlock) and not focused.is_editing):
                  if not blocks: return
                  idx = blocks.index(focused) if focused in blocks else 0
                  new_idx = max(0, min(len(blocks)-1, idx + (count if event.key in ("down", "j") else -count)))

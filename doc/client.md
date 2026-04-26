@@ -29,7 +29,7 @@ Neptune uses a modal system inspired by Vim to maximize productivity in a termin
 Neptune implements a custom terminal renderer for `CommandBlock`s:
 - **Pyte Integration:** Each command block has its own `pyte.HistoryScreen`. Output from the server is fed into this screen to handle ANSI escape codes, colors, and cursor movements.
 - **Rich Rendering:** The Pyte buffer is translated into `rich.text.Text` objects. This allows Neptune to display complex TUI applications like `top` or `vim` directly inside a notebook block.
-- **Fixed-Size Terminal:** To ensure stability for TUI applications, Neptune uses a fixed TTY size (e.g., 24 rows). This prevents layout shifts and rendering artifacts that can occur during dynamic resizing. The `.block-output` area in the UI is locked to this height.
+- **Fixed-Size Terminal & Adaptive Height:** To ensure stability for TUI applications, Neptune uses a fixed TTY size (e.g., 24 rows). This prevents layout shifts and rendering artifacts during dynamic resizing. The UI intelligently shrinks blocks with small output while capping larger outputs at the fixed TTY height with scrollable overflow.
 
 ## Collaborative Features
 - **Remote Cursors:** (Visualized as block locks) Shows who is editing which block.

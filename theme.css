@@ -113,10 +113,10 @@ NoteBlock {
 
 .block-output {
     color: $text-dim;
-    height: 24; /* Fixed height to match preferred_rows and prevent layout shifts */
+    max-height: 24; /* Cap height to match preferred_rows but allow shrinking */
     margin: 0 0 0 3;
     background: transparent;
-    overflow: hidden;
+    overflow: auto;
 }
 
 .block-info {
