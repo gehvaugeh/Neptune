@@ -221,9 +221,11 @@ class Server:
                     self.blocks = [b for b in self.blocks if b["id"] != block_id]
                     async with self.queue_condition:
                         self.command_queue = [b for b in self.command_queue if b["id"] != block_id]
-                    if self.current_block_id == block_id:
-                        if self.master_fd:
-                            os.write(self.master_fd, b'\x03')
+                    if (self.current_block_id == block_id or self.control_block_id == block_id) and self.master_proc:
+                        try:
+                            os.killpg(os.getpgid(self.master_proc.pid), signal.SIGINT)
+                        except Exception as e:
+                            logging.error(f"Error stopping process on delete: {e}")
                     await self.broadcast({"type": "remove_block", "block_id": block_id})
                     await self.broadcast_queue_status()
 
@@ -287,12 +289,29 @@ class Server:
                     await self.broadcast({"type": "reorder", "blocks": self.blocks})
 
                 elif msg_type == "control_start":
-                    self.control_block_id = msg.get("block_id")
+                    block_id = msg.get("block_id")
+                    self.control_block_id = block_id
                     logging.info(f"Interactive control started for block: {self.control_block_id}")
+                    block = self.get_block(block_id)
+                    if block and not block["locked_by"]:
+                        block["locked_by"] = user_id
+                        await self.broadcast({
+                            "type": "lock",
+                            "block_id": block_id,
+                            "user_id": user_id,
+                            "user_color": self.clients[writer]["color"],
+                            "user_name": self.clients[writer].get("name", user_id[:4])
+                        })
 
                 elif msg_type == "control_stop":
+                    block_id = self.control_block_id
                     self.control_block_id = None
                     logging.info("Interactive control stopped")
+                    if block_id:
+                        block = self.get_block(block_id)
+                        if block and block["locked_by"] == user_id:
+                            block["locked_by"] = None
+                            await self.broadcast({"type": "unlock", "block_id": block_id})
 
                 elif msg_type == "terminal_input":
                     data = msg.get("data")

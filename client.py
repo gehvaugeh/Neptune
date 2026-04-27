@@ -282,6 +282,9 @@ class CommandBlock(BaseBlock):
 
         def append_line(y, line):
             if not line:
+                if show_cursor and y == cursor_y:
+                    # Render cursor even on empty line
+                    rich_text.append(" ", style="reverse")
                 rich_text.append("\n")
                 return
 
@@ -492,7 +495,8 @@ class ClientApp(App):
             yield f_inp
         with ScrollableContainer(id="command_history"):
             yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]", id="notebook_header")
-        with Vertical(id="bottom_dock"):
+        with Vertical(id="bottom_dock") as dock:
+            dock.can_focus = True
             yield OptionList(id="palette")
             self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
             self.mode_label.tooltip = "Current interaction mode (NORMAL, BASH, CMD, NOTE, SELECTION, BLOCKEDIT)"
@@ -516,9 +520,9 @@ class ClientApp(App):
         self.enter_normal_mode()
 
     def on_ready(self):
-        # Focus screen to allow immediate use of prefix keys (! : ;)
+        # Focus screen or bottom dock to allow immediate use of prefix keys (! : ;)
         # We use call_after_refresh to ensure the layout is settled
-        self.call_after_refresh(self.screen.focus)
+        self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
 
     async def connect_to_server(self):
         try:
@@ -934,12 +938,25 @@ class ClientApp(App):
         if self.input_mode in ("BASH", "CMD"):
             provider = self.providers[self.input_mode]
             bash_prov = provider if self.input_mode == "BASH" else provider.bash_provider
+
+            # Check if selection is a path. Path completion uses token replacement.
+            # History, Workflow, and Cmd types use full replacement.
+            is_path = False
+            try:
+                # Retrieve the actual suggestion object to check its type
+                context = {"history": self.history.cache, "workflows": self.workflows, "cwd": os.getcwd()}
+                sugs = provider.get_suggestions(inp.text, context)
+                for s in sugs:
+                    if s["value"] == val and s["type"] == "path":
+                        is_path = True; break
+            except: pass
+
             token = bash_prov._get_current_token(inp.text)
-            if token:
+            if is_path and token:
                 idx = inp.text.rfind(token)
                 inp.text = inp.text[:idx] + val
             else:
-                inp.text = val # Full replacement for commands or if no token
+                inp.text = val # Full replacement for history/workflows
         else:
             inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))

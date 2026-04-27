@@ -178,18 +178,26 @@ NoteBlock {
     display: none;
 }
 
-/* Autocomplete Palette */
+/* Autocomplete Palette - Expanding Upwards */
 #palette {
     display: none;
     max-height: 12;
     background: $bg-block;
-    border-bottom: solid $border;
+    border-top: solid $border;
     color: $text-main;
     scrollbar-gutter: stable;
 }
 
 #palette.visible {
     display: block;
+}
+
+#bottom_dock {
+    layout: vertical;
+}
+
+#palette {
+    dock: top;
 }
 
 #palette > .option-list--option {
