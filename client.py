@@ -275,7 +275,9 @@ class CommandBlock(BaseBlock):
             rich_text.append(current_text, style=current_style)
             rich_text.append("\n")
 
-        if self.app_ref.input_mode != "CONTROL":
+        # Prepend history only if NOT running, to keep TUI layouts stable
+        is_running = getattr(self, "_last_status", "") == "running"
+        if self.app_ref.input_mode != "CONTROL" and not is_running:
             for line_obj in self.terminal_screen.history.top:
                 append_line(line_obj)
             for line_obj in self.terminal_screen.history.bottom:
@@ -301,7 +303,11 @@ class CommandBlock(BaseBlock):
         for y in range(end_y):
             append_line(self.terminal_screen.buffer[y])
 
-        self.query_one("#output").update(rich_text)
+        # Optimize: Only update if content changed
+        out_widget = self.query_one("#output")
+        if getattr(out_widget, "_last_render", None) != str(rich_text):
+            out_widget.update(rich_text)
+            out_widget._last_render = str(rich_text)
 
     def _get_rich_style(self, char):
         def map_color(c):
@@ -750,8 +756,8 @@ class ClientApp(App):
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
         block.focus()
-        # Enable echo for interactive mode
-        asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": True}))
+        # We no longer force echo here; PTY echo is managed by apps or initial stty.
+        # This prevents duplicate characters in nano/vim.
 
     async def action_submit(self):
         ta = self.query_one("#main_input"); text = ta.text

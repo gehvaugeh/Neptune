@@ -7,7 +7,7 @@ The server (`server.py`) is the backbone of the Neptune system. It manages the p
 ### 1. Master Shell Management
 The server maintains a persistent PTY-connected shell.
 - **PGID Tracking:** It uses `os.tcgetpgrp(master_fd)` to monitor the foreground process group. This allows the server to reliably detect when a command has finished, even if it was interrupted by Ctrl+C or failed with a syntax error.
-- **Silent Status Retrieval:** After a command finishes, the server automatically executes a hidden `printf` to capture the exit code (`$?`) and the updated current working directory (`pwd`).
+- **Silent Status Retrieval:** After a command finishes, the server automatically executes a hidden `printf` to capture the exit code (`$?`) and the updated current working directory (`pwd`). This uses non-printable separators (`\x1e` and `\x1f`) to ensure isolation from the user's terminal output.
 - **Signal Handling:** Signals like `SIGINT` (Ctrl+C) are delivered to the entire process group of the foreground task using `os.killpg`.
 
 ### 2. Sequential Command Execution

@@ -408,8 +408,8 @@ class Server:
                         block = self.get_block(active_block_id)
                         if active_sentinel:
                             while True:
-                                # Look for status sentinel
-                                pattern = rf'{re.escape(active_sentinel)}_(-?\d+)_([^\r\n]*?)__'
+                                # Look for status sentinel between \x1e and \x1f
+                                pattern = rf'\x1e{re.escape(active_sentinel)}_(-?\d+)_([^\x1f]*?)\x1f'
                                 match = re.search(pattern, buffer)
                                 if match:
                                     logging.debug(f"Status sentinel matched: {match.group(0)}")
@@ -434,8 +434,9 @@ class Server:
                                     self.current_command_finished.set()
                                     break
                                 else:
-                                    # Protect against partial sentinel
-                                    s_idx = buffer.find(active_sentinel[0])
+                                    # If \x1e is present, we buffer from there to see if it's the sentinel.
+                                    # Everything before \x1e is definitely output.
+                                    s_idx = buffer.find('\x1e')
                                     if s_idx == -1:
                                         if buffer:
                                             if block:
@@ -449,7 +450,19 @@ class Server:
                                             block["output"] += to_send
                                             await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
                                         buffer = buffer[s_idx:]
-                                    break
+                                        # Now buffer starts with \x1e, we wait for more data to match pattern
+                                        break
+                                    else:
+                                        # buffer starts with \x1e but pattern didn't match yet.
+                                        # We must wait for more data or check if it's a false positive.
+                                        # If buffer gets too long without a match, it might be output containing \x1e
+                                        if len(buffer) > 1024:
+                                             to_send = buffer[:1]
+                                             if block:
+                                                 block["output"] += to_send
+                                                 await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                             buffer = buffer[1:]
+                                        break
                         else:
                             # No sentinel yet, just stream output
                             if buffer:
@@ -495,18 +508,18 @@ class Server:
 
                 try:
                     # Retrieval of status and CWD
-                    status_sentinel = f"__STATUS_{os.urandom(4).hex()}__"
+                    # We use non-printable separators to avoid collision with terminal output
+                    status_sentinel = f"NEPTUNE_STATUS_{os.urandom(4).hex()}"
                     self.current_sentinel = status_sentinel
 
                     # Escape command for eval
                     escaped_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
 
                     # Combine command and status retrieval into a single write operation.
-                    # This ensures the shell parses them together, preventing built-ins like 'read'
-                    # from consuming the status retrieval command as input.
+                    # We use \x1e (Record Separator) and \x1f (Unit Separator)
                     full_cmd = (
                         f"eval \"{escaped_cmd}\"; "
-                        f"printf '\\n{status_sentinel}_%s_%s__\\n' \"$?\" \"$(pwd)\"\n"
+                        f"printf '\\x1e{status_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
                     )
                     os.write(self.master_fd, full_cmd.encode())
 
