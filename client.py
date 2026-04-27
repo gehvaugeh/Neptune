@@ -200,13 +200,29 @@ class NoteBlock(BaseBlock):
 class NotebookInput(TextArea):
     def on_key(self, event: events.Key) -> None:
         if event.key == "enter":
-            event.stop()
-            event.prevent_default()
-            asyncio.create_task(self.app.action_submit())
-        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m"):
-            event.stop()
-            event.prevent_default()
-            self.insert("\n")
+            # For BASH and NOTE modes, regular Enter submits.
+            # CMD mode always uses single line, so Enter always submits.
+            if self.app.input_mode == "CMD":
+                event.stop(); event.prevent_default()
+                asyncio.create_task(self.app.action_submit())
+            else:
+                # In BASH/NOTE, only submit if not using Ctrl/Shift/Alt modifiers
+                # However, Textual 'enter' key event usually doesn't include modifiers like ctrl+enter
+                # as separate flags in the key string itself, but we check the specific key name.
+                event.stop(); event.prevent_default()
+                asyncio.create_task(self.app.action_submit())
+        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m", "shift+enter"):
+            # Allow multiline for BASH and NOTE
+            if self.app.input_mode in ("BASH", "NOTE"):
+                event.stop(); event.prevent_default()
+                self.insert("\n")
+            else:
+                event.stop(); event.prevent_default()
+                asyncio.create_task(self.app.action_submit())
+        elif event.key == "ctrl+s":
+            if self.app.input_mode == "BASH":
+                event.stop(); event.prevent_default()
+                self.app.action_save_workflow(self.text)
         elif event.key == "escape":
             event.stop()
             event.prevent_default()
@@ -253,7 +269,11 @@ class CommandBlock(BaseBlock):
         # We always use the pyte screen for rendering to ensure consistent VT100 support
         rich_text = Text()
 
-        def append_line(line):
+        cursor_x, cursor_y = self.terminal_screen.cursor.x, self.terminal_screen.cursor.y
+        # Only show cursor if focused or in interactive mode
+        show_cursor = (self.app_ref.focused == self or self.app_ref.input_mode == "CONTROL") and not self.terminal_screen.cursor.hidden
+
+        def append_line(y, line):
             if not line:
                 rich_text.append("\n")
                 return
@@ -264,13 +284,25 @@ class CommandBlock(BaseBlock):
 
             current_style = self._get_rich_style(line[0])
             current_text = ""
-            for char in line:
-                style = self._get_rich_style(char)
-                if style == current_style:
+            for x, char in enumerate(line):
+                char_style = self._get_rich_style(char)
+
+                # Apply cursor style if needed
+                if show_cursor and y == cursor_y and x == cursor_x:
+                     # Flush current text
+                     rich_text.append(current_text, style=current_style)
+                     # Render cursor char (usually space or current char with reverse)
+                     rich_text.append(char.data or " ", style="reverse blink" if not char_style else f"{char_style} reverse blink")
+                     # Reset for next chars
+                     current_style = char_style
+                     current_text = ""
+                     continue
+
+                if char_style == current_style:
                     current_text += char.data
                 else:
                     rich_text.append(current_text, style=current_style)
-                    current_style = style
+                    current_style = char_style
                     current_text = char.data
             rich_text.append(current_text, style=current_style)
             rich_text.append("\n")
@@ -279,9 +311,9 @@ class CommandBlock(BaseBlock):
         is_running = getattr(self, "_last_status", "") == "running"
         if self.app_ref.input_mode != "CONTROL" and not is_running:
             for line_obj in self.terminal_screen.history.top:
-                append_line(line_obj)
+                append_line(-1, line_obj)
             for line_obj in self.terminal_screen.history.bottom:
-                append_line(line_obj)
+                append_line(-1, line_obj)
 
         # Find the last non-empty line (considering data and non-default background/formatting)
         # We always do this compact rendering to avoid empty trailing space
@@ -289,11 +321,14 @@ class CommandBlock(BaseBlock):
         for y in range(self.terminal_screen.lines - 1, -1, -1):
             row = self.terminal_screen.buffer[y]
             is_empty = True
-            for x in range(self.terminal_screen.columns):
-                char = row[x]
-                if char.data != ' ' or char.bg != 'default' or char.reverse:
-                    is_empty = False
-                    break
+            if y == cursor_y and show_cursor:
+                 is_empty = False
+            else:
+                for x in range(self.terminal_screen.columns):
+                    char = row[x]
+                    if char.data != ' ' or char.bg != 'default' or char.reverse:
+                        is_empty = False
+                        break
             if not is_empty:
                 end_y = y + 1
                 break
@@ -301,7 +336,7 @@ class CommandBlock(BaseBlock):
             end_y = 1 # Keep at least one line
 
         for y in range(end_y):
-            append_line(self.terminal_screen.buffer[y])
+            append_line(y, self.terminal_screen.buffer[y])
 
         # Optimize: Only update if content changed
         out_widget = self.query_one("#output")
@@ -447,7 +482,7 @@ class ClientApp(App):
             f_inp.tooltip = "Enter text to filter blocks by command or output content."
             yield f_inp
         with ScrollableContainer(id="command_history"):
-            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]")
+            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]", id="notebook_header")
         with Vertical(id="bottom_dock"):
             yield OptionList(id="palette")
             self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
@@ -472,7 +507,8 @@ class ClientApp(App):
         self.enter_normal_mode()
 
     def on_ready(self):
-        self.query_one("#main_input").focus()
+        # Focus screen to allow immediate use of prefix keys (! : ;)
+        self.screen.focus()
 
     async def connect_to_server(self):
         try:
@@ -583,15 +619,15 @@ class ClientApp(App):
                     self.blocks[b_id].remove()
                     del self.blocks[b_id]
 
-            for i, b_data in enumerate(new_blocks_data):
+            # Re-order logic while respecting the header
+            header = container.query_one("#notebook_header")
+            prev_widget = header
+            for b_data in new_blocks_data:
                 b_id = b_data["id"]
                 if b_id not in self.blocks: await self.create_block(b_data)
                 block = self.blocks[b_id]
-                if i == 0:
-                    if container.children and container.children[0] != block: container.move_child(block, before=container.children[0])
-                else:
-                    prev_id = new_blocks_data[i-1]["id"]
-                    if prev_id in self.blocks: container.move_child(block, after=self.blocks[prev_id])
+                container.move_child(block, after=prev_widget)
+                prev_widget = block
             self.refresh()
 
         elif msg_type == "update_block":
@@ -785,7 +821,7 @@ class ClientApp(App):
         if cmd == "export": self.export_notebook(args or f"session_{int(time.time())}.md")
         elif cmd == "import": await self.import_notebook(args)
         elif cmd == "exit": self.exit()
-        elif cmd == "save_wf": self.action_save_wf_dialog()
+        elif cmd == "save_wf": self.action_save_workflow(self.query_one("#main_input").text)
         elif cmd == "clear": await self.send_message({"type": "clear_session"})
         elif cmd == "help": self.notify("Commands: export [file], import [file], exit, save_wf, clear, help")
         else: self.notify(f"Unknown command: {cmd}", severity="error")
@@ -793,10 +829,17 @@ class ClientApp(App):
     def action_save_notebook_dialog(self): self.push_screen(SaveNotebookModal(), self.export_notebook)
     def action_import_notebook_dialog(self): self.push_screen(ImportNotebookModal(), lambda f: asyncio.create_task(self.import_notebook(f)))
 
+    def action_save_workflow(self, text: str):
+        if not text.strip(): return
+        self.push_screen(SaveWorkflowModal(text.strip()), lambda s: s and asyncio.create_task(self._save_wf(s)))
+
     def export_notebook(self, filename: str):
         if not filename: return
         md_output = [f"# Shell Notebook Export - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
-        for block in self.blocks.values():
+
+        # Iterate through visual children to respect current reordered state
+        container = self.query_one("#command_history")
+        for block in container.children:
             if isinstance(block, NoteBlock): md_output.append(f"{block.content}\n")
             elif isinstance(block, CommandBlock):
                 md_output.append(f"```bash\n{block.content}\n```\n")
@@ -840,8 +883,6 @@ class ClientApp(App):
             if focused.locked_by and focused.locked_by != self.user_id: self.notify(f"Locked by {self.focused.locked_by[:4]}", severity="warning"); return
             await self.send_message({"type": "delete_block", "block_id": focused.block_id})
 
-    def action_save_wf_dialog(self):
-        self.push_screen(SaveWorkflowModal(self.query_one("#main_input").text), lambda s: s and asyncio.create_task(self._save_wf(s)))
     async def _save_wf(self, data):
         n, c = data; wfs = load_workflows(); wfs.append({"name": n, "cmd": c})
         with open(os.path.join(os.path.dirname(__file__), "termux_workflows.json"), "w") as f: json.dump(wfs, f, indent=4)
@@ -940,6 +981,7 @@ class ClientApp(App):
             elif event.key == "P":
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "before", "yank_data": self.yank_buffer}))
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
+            elif event.key == "ctrl+s" and isinstance(focused, CommandBlock): self.action_save_workflow(focused.content)
             elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
             elif event.key in ("j", "enter", "ctrl+j") and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
             elif event.key in ("ctrl+up", "alt+up"): asyncio.create_task(self.action_move_up())
@@ -950,15 +992,18 @@ class ClientApp(App):
                 return
 
             # Map common keys to ANSI sequences
+            # Applications like 'less' often expect application mode sequences (ESC O A)
+            # if they enable DECCKM. We check the pyte screen's mode if possible,
+            # or just use Application Mode as it is generally well-supported.
             key_map = {
                 "enter": "\r",
                 "backspace": "\x7f",
                 "tab": "\t",
                 "escape": "\x1b",
-                "up": "\x1b[A",
-                "down": "\x1b[B",
-                "right": "\x1b[C",
-                "left": "\x1b[D",
+                "up": "\x1bOA",
+                "down": "\x1bOB",
+                "right": "\x1bOC",
+                "left": "\x1bOD",
                 "home": "\x1b[H",
                 "end": "\x1b[F",
                 "pageup": "\x1b[5~",
