@@ -70,6 +70,13 @@ class SaveWorkflowModal(ModalScreen):
     def __init__(self, text: str):
         super().__init__()
         self.text = text
+
+    def on_key(self, event: events.Key):
+        if event.key == "ctrl+s":
+            event.stop()
+            event.prevent_default()
+            self.save()
+
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
             yield Label("[bold magenta]Save as Workflow[/]")
@@ -270,8 +277,8 @@ class CommandBlock(BaseBlock):
         rich_text = Text()
 
         cursor_x, cursor_y = self.terminal_screen.cursor.x, self.terminal_screen.cursor.y
-        # Only show cursor if focused or in interactive mode
-        show_cursor = (self.app_ref.focused == self or self.app_ref.input_mode == "CONTROL") and not self.terminal_screen.cursor.hidden
+        # Only show cursor if in interactive mode, and respect cursor visibility mode from PTY
+        show_cursor = (self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self) and not self.terminal_screen.cursor.hidden
 
         def append_line(y, line):
             if not line:
@@ -292,7 +299,8 @@ class CommandBlock(BaseBlock):
                      # Flush current text
                      rich_text.append(current_text, style=current_style)
                      # Render cursor char (usually space or current char with reverse)
-                     rich_text.append(char.data or " ", style="reverse blink" if not char_style else f"{char_style} reverse blink")
+                     # No blink as requested, just steady reverse.
+                     rich_text.append(char.data or " ", style="reverse" if not char_style else f"{char_style} reverse")
                      # Reset for next chars
                      current_style = char_style
                      current_text = ""
@@ -338,11 +346,12 @@ class CommandBlock(BaseBlock):
         for y in range(end_y):
             append_line(y, self.terminal_screen.buffer[y])
 
-        # Optimize: Only update if content changed
+        # Optimize: Only update if content or cursor changed
         out_widget = self.query_one("#output")
-        if getattr(out_widget, "_last_render", None) != str(rich_text):
+        cache_key = (str(rich_text), cursor_x, cursor_y, show_cursor)
+        if getattr(out_widget, "_last_render_key", None) != cache_key:
             out_widget.update(rich_text)
-            out_widget._last_render = str(rich_text)
+            out_widget._last_render_key = cache_key
 
     def _get_rich_style(self, char):
         def map_color(c):
@@ -508,7 +517,8 @@ class ClientApp(App):
 
     def on_ready(self):
         # Focus screen to allow immediate use of prefix keys (! : ;)
-        self.screen.focus()
+        # We use call_after_refresh to ensure the layout is settled
+        self.call_after_refresh(self.screen.focus)
 
     async def connect_to_server(self):
         try:
@@ -705,8 +715,7 @@ class ClientApp(App):
 
     def enter_normal_mode(self):
         if self.input_mode == "CONTROL":
-            # Disable echo when leaving interactive mode
-            asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": False}))
+            asyncio.create_task(self.send_message({"type": "control_stop"}))
         self.input_mode = "NORMAL"
         self.count_str = ""
         self.update_mode_label()
@@ -792,8 +801,8 @@ class ClientApp(App):
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
         block.focus()
-        # We no longer force echo here; PTY echo is managed by apps or initial stty.
-        # This prevents duplicate characters in nano/vim.
+        # Signal server to start streaming PTY output to this block
+        asyncio.create_task(self.send_message({"type": "control_start", "block_id": block.block_id}))
 
     async def action_submit(self):
         ta = self.query_one("#main_input"); text = ta.text
@@ -922,13 +931,15 @@ class ClientApp(App):
         val = opt.id
         inp = self.query_one("#main_input"); self._suppress_search = True
 
-        if self.input_mode == "BASH":
-            token = self.providers["BASH"]._get_current_token(inp.text)
+        if self.input_mode in ("BASH", "CMD"):
+            provider = self.providers[self.input_mode]
+            bash_prov = provider if self.input_mode == "BASH" else provider.bash_provider
+            token = bash_prov._get_current_token(inp.text)
             if token:
                 idx = inp.text.rfind(token)
                 inp.text = inp.text[:idx] + val
             else:
-                inp.text += val
+                inp.text = val # Full replacement for commands or if no token
         else:
             inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
@@ -993,17 +1004,22 @@ class ClientApp(App):
 
             # Map common keys to ANSI sequences
             # Applications like 'less' often expect application mode sequences (ESC O A)
-            # if they enable DECCKM. We check the pyte screen's mode if possible,
-            # or just use Application Mode as it is generally well-supported.
+            # if they enable DECCKM. Standard mode is (ESC [ A).
+            # We use a helper to check if DECCKM is enabled via pyte's mode set.
+            # For now, we use ESC [ as it is more common, but let's try a hybrid or
+            # better yet, the sequence that fixes 'less' scrolling.
+            # The user said HJ KL works in less, but arrows don't.
+            # In many terminals, Application mode is the one that causes issues if not handled.
+            # Let's switch back to standard ESC [ and see if it helps.
             key_map = {
                 "enter": "\r",
                 "backspace": "\x7f",
                 "tab": "\t",
                 "escape": "\x1b",
-                "up": "\x1bOA",
-                "down": "\x1bOB",
-                "right": "\x1bOC",
-                "left": "\x1bOD",
+                "up": "\x1b[A",
+                "down": "\x1b[B",
+                "right": "\x1b[C",
+                "left": "\x1b[D",
                 "home": "\x1b[H",
                 "end": "\x1b[F",
                 "pageup": "\x1b[5~",
@@ -1049,6 +1065,12 @@ class ClientApp(App):
                     node.last_click_time = time.time(); return
                 node = node.parent
         except: pass
+
+    def on_paste(self, event: events.Paste) -> None:
+        if self.input_mode == "CONTROL" and event.text:
+            asyncio.create_task(self.send_message({"type": "terminal_input", "data": event.text}))
+            event.stop()
+            event.prevent_default()
 
     def on_unmount(self):
         if self.writer: self.writer.close()

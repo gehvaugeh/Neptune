@@ -88,7 +88,7 @@ CommandBlock, NoteBlock {
 
 /* Visueller Fokus beim Editieren oder Auswählen */
 CommandBlock:focus, NoteBlock:focus {
-    background: $bg-focus;
+    background: #112244; /* Brighter background for selection indicator */
     border-left: solid $neptune-primary;
 }
 

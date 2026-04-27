@@ -47,6 +47,7 @@ class Server:
         self.command_queue = []
         self.queue_condition = asyncio.Condition()
         self.current_block_id = None
+        self.control_block_id = None
         self.current_sentinel = None
         self.current_command_finished = asyncio.Event()
         self.shell_cwd = os.getcwd()
@@ -285,6 +286,14 @@ class Server:
 
                     await self.broadcast({"type": "reorder", "blocks": self.blocks})
 
+                elif msg_type == "control_start":
+                    self.control_block_id = msg.get("block_id")
+                    logging.info(f"Interactive control started for block: {self.control_block_id}")
+
+                elif msg_type == "control_stop":
+                    self.control_block_id = None
+                    logging.info("Interactive control stopped")
+
                 elif msg_type == "terminal_input":
                     data = msg.get("data")
                     if self.master_fd and data:
@@ -401,8 +410,9 @@ class Server:
                     buffer += decoded_data
 
                     # Capture current context to handle possible transitions
-                    active_block_id = self.current_block_id
-                    active_sentinel = self.current_sentinel
+                    # We prioritize the command executor, then the interactive control block
+                    active_block_id = self.current_block_id or self.control_block_id
+                    active_sentinel = self.current_sentinel if self.current_block_id else None
 
                     if active_block_id:
                         block = self.get_block(active_block_id)
