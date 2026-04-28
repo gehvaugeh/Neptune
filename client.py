@@ -694,6 +694,18 @@ class ClientApp(App):
                 self.blocks[b_id].remove()
                 del self.blocks[b_id]
 
+        elif msg_type == "lock_denied":
+            reason = msg.get("reason", "Block is locked")
+            self.notify(reason, severity="warning")
+            # If we were trying to enter edit mode, we should revert UI state
+            b_id = msg.get("block_id")
+            if b_id in self.blocks:
+                block = self.blocks[b_id]
+                if block.is_editing:
+                    await block.toggle_edit(remote=True, restore=True)
+            if self.input_mode == "CONTROL":
+                self.enter_normal_mode()
+
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data["id"]
         if b_id in self.blocks: return
