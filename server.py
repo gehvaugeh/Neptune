@@ -51,6 +51,7 @@ class Server:
         self.current_sentinel = None
         self.current_command_finished = asyncio.Event()
         self.shell_cwd = os.getcwd()
+        self.marked_for_deletion = set()
 
     def add_block(self, block_type, content, cwd=None):
         block = {
@@ -70,6 +71,44 @@ class Server:
             if b["id"] == block_id:
                 return b
         return None
+
+    async def terminate_foreground_process(self, timeout=2.0):
+        if not self.master_fd or not self.master_proc or not self.master_pgid:
+            return
+
+        try:
+            fg_pgid = os.tcgetpgrp(self.master_fd)
+            if fg_pgid <= 0 or fg_pgid == self.master_pgid:
+                logging.info("No foreground process to terminate (already at shell prompt or invalid PGID)")
+                return
+
+            logging.info(f"Terminating foreground process group {fg_pgid} with SIGTERM")
+            try:
+                os.killpg(fg_pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                logging.info(f"Process group {fg_pgid} already gone")
+                return
+
+            start_time = asyncio.get_event_loop().time()
+            while asyncio.get_event_loop().time() - start_time < timeout:
+                try:
+                    if os.tcgetpgrp(self.master_fd) == self.master_pgid:
+                        logging.info("Foreground process exited after SIGTERM")
+                        return
+                except:
+                    pass
+                await asyncio.sleep(0.1)
+
+            logging.warning(f"Foreground process {fg_pgid} did not exit after {timeout}s, sending SIGKILL")
+            try:
+                os.killpg(fg_pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+            # Wait a bit for SIGKILL to take effect
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            logging.error(f"Error in terminate_foreground_process: {e}")
 
     async def broadcast_queue_status(self):
         async with self.queue_condition:
@@ -170,15 +209,24 @@ class Server:
                     block_id = msg.get("block_id")
                     logging.info(f"Edit start from {user_id} on {block_id}")
                     block = self.get_block(block_id)
-                    if block and not block["locked_by"]:
-                        block["locked_by"] = user_id
-                        await self.broadcast({
-                            "type": "lock",
-                            "block_id": block_id,
-                            "user_id": user_id,
-                            "user_color": self.clients[writer]["color"],
-                            "user_name": self.clients[writer].get("name", user_id[:4])
-                        })
+                    if block:
+                        if not block["locked_by"] or block["locked_by"] == user_id:
+                            block["locked_by"] = user_id
+                            await self.broadcast({
+                                "type": "lock",
+                                "block_id": block_id,
+                                "user_id": user_id,
+                                "user_color": self.clients[writer]["color"],
+                                "user_name": self.clients[writer].get("name", user_id[:4])
+                            })
+                        else:
+                            locked_by = self.clients.get(next((w for w, c in self.clients.items() if c['id'] == block["locked_by"]), None), {})
+                            owner_name = locked_by.get("name", block["locked_by"][:4])
+                            await self.send_to_client(writer, json.dumps({
+                                "type": "lock_denied",
+                                "block_id": block_id,
+                                "reason": f"Block is locked by {owner_name}"
+                            }).encode() + b"\n", user_id)
 
                 elif msg_type == "edit_save":
                     block_id = msg.get("block_id")
@@ -218,24 +266,29 @@ class Server:
 
                 elif msg_type == "delete_block":
                     block_id = msg.get("block_id")
-                    self.blocks = [b for b in self.blocks if b["id"] != block_id]
-                    async with self.queue_condition:
-                        self.command_queue = [b for b in self.command_queue if b["id"] != block_id]
-                    if (self.current_block_id == block_id or self.control_block_id == block_id) and self.master_proc:
-                        try:
-                            os.killpg(os.getpgid(self.master_proc.pid), signal.SIGINT)
-                        except Exception as e:
-                            logging.error(f"Error stopping process on delete: {e}")
-                    await self.broadcast({"type": "remove_block", "block_id": block_id})
-                    await self.broadcast_queue_status()
+                    logging.info(f"Delete block request for {block_id}")
+
+                    if self.current_block_id == block_id:
+                        logging.info(f"Block {block_id} is executing, marking for deletion and terminating process")
+                        self.marked_for_deletion.add(block_id)
+                        await self.terminate_foreground_process()
+                    elif self.control_block_id == block_id:
+                        logging.info(f"Block {block_id} is controlled, terminating process and removing")
+                        await self.terminate_foreground_process()
+                        self.blocks = [b for b in self.blocks if b["id"] != block_id]
+                        self.control_block_id = None
+                        await self.broadcast({"type": "remove_block", "block_id": block_id})
+                    else:
+                        self.blocks = [b for b in self.blocks if b["id"] != block_id]
+                        async with self.queue_condition:
+                            self.command_queue = [b for b in self.command_queue if b["id"] != block_id]
+                        await self.broadcast({"type": "remove_block", "block_id": block_id})
+                        await self.broadcast_queue_status()
 
                 elif msg_type == "stop_process":
                     block_id = msg.get("block_id")
-                    if self.current_block_id == block_id and self.master_proc:
-                        try:
-                            os.killpg(os.getpgid(self.master_proc.pid), signal.SIGINT)
-                        except Exception as e:
-                            logging.error(f"Error stopping process: {e}")
+                    if (self.current_block_id == block_id or self.control_block_id == block_id) and self.master_proc:
+                        await self.terminate_foreground_process()
 
                 elif msg_type == "paste_block":
                     target_id = msg.get("target_id")
@@ -290,27 +343,36 @@ class Server:
 
                 elif msg_type == "control_start":
                     block_id = msg.get("block_id")
-                    self.control_block_id = block_id
-                    logging.info(f"Interactive control started for block: {self.control_block_id}")
+                    logging.info(f"Interactive control start request from {user_id} on {block_id}")
                     block = self.get_block(block_id)
-                    if block and not block["locked_by"]:
-                        block["locked_by"] = user_id
-                        await self.broadcast({
-                            "type": "lock",
-                            "block_id": block_id,
-                            "user_id": user_id,
-                            "user_color": self.clients[writer]["color"],
-                            "user_name": self.clients[writer].get("name", user_id[:4])
-                        })
+                    if block:
+                        if not block["locked_by"] or block["locked_by"] == user_id:
+                            block["locked_by"] = user_id
+                            self.control_block_id = block_id
+                            await self.broadcast({
+                                "type": "lock",
+                                "block_id": block_id,
+                                "user_id": user_id,
+                                "user_color": self.clients[writer]["color"],
+                                "user_name": self.clients[writer].get("name", user_id[:4])
+                            })
+                        else:
+                            locked_by = self.clients.get(next((w for w, c in self.clients.items() if c['id'] == block["locked_by"]), None), {})
+                            owner_name = locked_by.get("name", block["locked_by"][:4])
+                            await self.send_to_client(writer, json.dumps({
+                                "type": "lock_denied",
+                                "block_id": block_id,
+                                "reason": f"Block is locked by {owner_name}"
+                            }).encode() + b"\n", user_id)
 
                 elif msg_type == "control_stop":
                     block_id = self.control_block_id
-                    self.control_block_id = None
-                    logging.info("Interactive control stopped")
                     if block_id:
                         block = self.get_block(block_id)
                         if block and block["locked_by"] == user_id:
+                            self.control_block_id = None
                             block["locked_by"] = None
+                            logging.info(f"Interactive control stopped for block: {block_id}")
                             await self.broadcast({"type": "unlock", "block_id": block_id})
 
                 elif msg_type == "terminal_input":
@@ -319,8 +381,16 @@ class Server:
                         # For Ctrl+C, we send it to the process group to ensure it reaches
                         # children even if they are in a different foreground group
                         if data == "\x03" and self.master_proc:
+                            # We keep the SIGINT for Ctrl+C as it is the standard behavior
+                            # but we could use terminate_foreground_process if we wanted
+                            # to be more aggressive. For user Ctrl+C, usually SIGINT is enough.
                             try:
-                                os.killpg(os.getpgid(self.master_proc.pid), signal.SIGINT)
+                                fg_pgid = os.tcgetpgrp(self.master_fd)
+                                if fg_pgid > 0 and fg_pgid != self.master_pgid:
+                                    os.killpg(fg_pgid, signal.SIGINT)
+                                else:
+                                    # Fallback if we can't get foreground pgid correctly
+                                    os.killpg(os.getpgid(self.master_proc.pid), signal.SIGINT)
                             except Exception as e:
                                 logging.error(f"Error sending SIGINT: {e}")
 
@@ -357,6 +427,8 @@ class Server:
             for b in self.blocks:
                 if b["locked_by"] == user_id:
                     b["locked_by"] = None
+                    if self.control_block_id == b["id"]:
+                        self.control_block_id = None
                     await self.broadcast({"type": "unlock", "block_id": b["id"]})
             writer.close()
             try:
@@ -583,6 +655,12 @@ class Server:
                     block["status"] = "error"
                     await self.broadcast({"type": "update_block", "block": block})
                 finally:
+                    if self.current_block_id in self.marked_for_deletion:
+                        block_id = self.current_block_id
+                        self.blocks = [b for b in self.blocks if b["id"] != block_id]
+                        self.marked_for_deletion.remove(block_id)
+                        await self.broadcast({"type": "remove_block", "block_id": block_id})
+
                     self.current_block_id = None
                     self.current_sentinel = None
             except Exception as e:
