@@ -64,8 +64,17 @@ class BashAutocompleteProvider(AutocompleteProvider):
 class CmdAutocompleteProvider(AutocompleteProvider):
     def __init__(self, commands: List[Dict[str, str]]):
         self.commands = commands
+        self.bash_provider = BashAutocompleteProvider()
 
     def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
+        # If there's a space, we are in parameter territory
+        if " " in query:
+            parts = query.split(" ", 1)
+            cmd, param_query = parts[0], parts[1]
+            # Use bash provider for paths
+            # Note: We return raw paths; sync_input will handle token replacement
+            return self.bash_provider.get_suggestions(param_query, context)
+
         suggestions = []
         for cmd in self.commands:
             if fuzzy_match(query, cmd['name']):

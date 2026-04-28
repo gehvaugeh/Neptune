@@ -70,6 +70,13 @@ class SaveWorkflowModal(ModalScreen):
     def __init__(self, text: str):
         super().__init__()
         self.text = text
+
+    def on_key(self, event: events.Key):
+        if event.key == "ctrl+s":
+            event.stop()
+            event.prevent_default()
+            self.save()
+
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
             yield Label("[bold magenta]Save as Workflow[/]")
@@ -146,6 +153,9 @@ class BaseBlock(Static):
             edit = self.query_one("#block_text_edit")
             edit.cursor_location = self.cursor_pos
 
+        if isinstance(self, CommandBlock):
+            self.query_one("#output").styles.max_height = self.app_ref.preferred_rows
+
 class NoteBlock(BaseBlock):
     def compose(self) -> ComposeResult:
         render_classes = "markdown-content" + (" hidden" if self.is_editing else "")
@@ -197,13 +207,29 @@ class NoteBlock(BaseBlock):
 class NotebookInput(TextArea):
     def on_key(self, event: events.Key) -> None:
         if event.key == "enter":
-            event.stop()
-            event.prevent_default()
-            asyncio.create_task(self.app.action_submit())
-        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m"):
-            event.stop()
-            event.prevent_default()
-            self.insert("\n")
+            # For BASH and NOTE modes, regular Enter submits.
+            # CMD mode always uses single line, so Enter always submits.
+            if self.app.input_mode == "CMD":
+                event.stop(); event.prevent_default()
+                asyncio.create_task(self.app.action_submit())
+            else:
+                # In BASH/NOTE, only submit if not using Ctrl/Shift/Alt modifiers
+                # However, Textual 'enter' key event usually doesn't include modifiers like ctrl+enter
+                # as separate flags in the key string itself, but we check the specific key name.
+                event.stop(); event.prevent_default()
+                asyncio.create_task(self.app.action_submit())
+        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m", "shift+enter"):
+            # Allow multiline for BASH and NOTE
+            if self.app.input_mode in ("BASH", "NOTE"):
+                event.stop(); event.prevent_default()
+                self.insert("\n")
+            else:
+                event.stop(); event.prevent_default()
+                asyncio.create_task(self.app.action_submit())
+        elif event.key == "ctrl+s":
+            if self.app.input_mode == "BASH":
+                event.stop(); event.prevent_default()
+                self.app.action_save_workflow(self.text)
         elif event.key == "escape":
             event.stop()
             event.prevent_default()
@@ -214,7 +240,8 @@ class CommandBlock(BaseBlock):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.full_output = ""
-        self.terminal_screen = pyte.HistoryScreen(80, 24, history=1000)
+        # Initialize with fixed TTY dimensions established by the app
+        self.terminal_screen = pyte.HistoryScreen(app_ref.preferred_cols, app_ref.preferred_rows, history=1000)
         self.stream = pyte.Stream(self.terminal_screen)
 
     def compose(self) -> ComposeResult:
@@ -227,6 +254,10 @@ class CommandBlock(BaseBlock):
             yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
+
+    def on_resize(self, event: events.Resize) -> None:
+        # Fixed size TTY, no automatic resizing to match widget size
+        pass
 
     def append_output(self, text: str):
         if not isinstance(text, str):
@@ -245,8 +276,15 @@ class CommandBlock(BaseBlock):
         # We always use the pyte screen for rendering to ensure consistent VT100 support
         rich_text = Text()
 
-        def append_line(line):
+        cursor_x, cursor_y = self.terminal_screen.cursor.x, self.terminal_screen.cursor.y
+        # Only show cursor if in interactive mode, and respect cursor visibility mode from PTY
+        show_cursor = (self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self) and not self.terminal_screen.cursor.hidden
+
+        def append_line(y, line):
             if not line:
+                if show_cursor and y == cursor_y:
+                    # Render cursor even on empty line
+                    rich_text.append(" ", style="reverse")
                 rich_text.append("\n")
                 return
 
@@ -256,45 +294,84 @@ class CommandBlock(BaseBlock):
 
             current_style = self._get_rich_style(line[0])
             current_text = ""
-            for char in line:
-                style = self._get_rich_style(char)
-                if style == current_style:
+            for x, char in enumerate(line):
+                char_style = self._get_rich_style(char)
+
+                # Apply cursor style if needed
+                if show_cursor and y == cursor_y and x == cursor_x:
+                     # Flush current text
+                     rich_text.append(current_text, style=current_style)
+                     # Render cursor char (usually space or current char with reverse)
+                     # No blink as requested, just steady reverse.
+                     rich_text.append(char.data or " ", style="reverse" if not char_style else f"{char_style} reverse")
+                     # Reset for next chars
+                     current_style = char_style
+                     current_text = ""
+                     continue
+
+                if char_style == current_style:
                     current_text += char.data
                 else:
                     rich_text.append(current_text, style=current_style)
-                    current_style = style
+                    current_style = char_style
                     current_text = char.data
             rich_text.append(current_text, style=current_style)
             rich_text.append("\n")
 
-        if self.app_ref.input_mode != "CONTROL":
+        # Prepend history only if NOT running, to keep TUI layouts stable
+        is_running = getattr(self, "_last_status", "") == "running"
+        if self.app_ref.input_mode != "CONTROL" and not is_running:
             for line_obj in self.terminal_screen.history.top:
-                append_line(line_obj)
+                append_line(-1, line_obj)
             for line_obj in self.terminal_screen.history.bottom:
-                append_line(line_obj)
+                append_line(-1, line_obj)
 
-        # Compact rendering for non-interactive blocks
+        # Find the last non-empty line (considering data and non-default background/formatting)
+        # We always do this compact rendering to avoid empty trailing space
         end_y = self.terminal_screen.lines
-        if self.app_ref.input_mode != "CONTROL":
-            # Find the last non-empty line
-            for y in range(self.terminal_screen.lines - 1, -1, -1):
-                row = self.terminal_screen.buffer[y]
-                if any(row[x].data != ' ' for x in range(self.terminal_screen.columns)):
-                    end_y = y + 1
-                    break
-            else: end_y = 1 # Keep at least one line
+        for y in range(self.terminal_screen.lines - 1, -1, -1):
+            row = self.terminal_screen.buffer[y]
+            is_empty = True
+            if y == cursor_y and show_cursor:
+                 is_empty = False
+            else:
+                for x in range(self.terminal_screen.columns):
+                    char = row[x]
+                    if char.data != ' ' or char.bg != 'default' or char.reverse:
+                        is_empty = False
+                        break
+            if not is_empty:
+                end_y = y + 1
+                break
+        else:
+            end_y = 1 # Keep at least one line
 
         for y in range(end_y):
-            append_line(self.terminal_screen.buffer[y])
+            append_line(y, self.terminal_screen.buffer[y])
 
-        self.query_one("#output").update(rich_text)
+        # Optimize: Only update if content or cursor changed
+        out_widget = self.query_one("#output")
+        cache_key = (str(rich_text), cursor_x, cursor_y, show_cursor)
+        if getattr(out_widget, "_last_render_key", None) != cache_key:
+            out_widget.update(rich_text)
+            out_widget._last_render_key = cache_key
 
     def _get_rich_style(self, char):
-        fg = char.fg if char.fg != "default" else None
-        bg = char.bg if char.bg != "default" else None
+        def map_color(c):
+            if not c or c == "default": return None
+            # Pyte color names to Rich-compatible names
+            mapping = {
+                "brown": "yellow",
+                "lightgray": "white",
+                "darkgray": "bright_black",
+            }
+            c = mapping.get(c, c)
+            if c.startswith("bright"):
+                c = c.replace("bright", "bright_")
+            return c
 
-        if fg and fg.startswith("bright"): fg = fg.replace("bright", "bright_")
-        if bg and bg.startswith("bright"): bg = bg.replace("bright", "bright_")
+        fg = map_color(char.fg)
+        bg = map_color(char.bg)
 
         style = ""
         if fg: style += fg if not fg.isdigit() else f"color({fg})"
@@ -302,6 +379,7 @@ class CommandBlock(BaseBlock):
         if char.bold: style += " bold"
         if char.italics: style += " italic"
         if char.underscore: style += " underline"
+        if char.reverse: style += " reverse"
         return style
 
     def update_status(self, status):
@@ -381,6 +459,8 @@ class ClientApp(App):
         super().__init__()
         self.socket_path = socket_path
         self.history = HistoryManager()
+        self.preferred_cols = 80
+        self.preferred_rows = 24
         self.input_mode = "NORMAL"
         self.user_color = get_random_bright_color()
         self.user_name = os.environ.get("USER", "User")
@@ -414,8 +494,9 @@ class ClientApp(App):
             f_inp.tooltip = "Enter text to filter blocks by command or output content."
             yield f_inp
         with ScrollableContainer(id="command_history"):
-            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]")
-        with Vertical(id="bottom_dock"):
+            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]", id="notebook_header")
+        with Vertical(id="bottom_dock") as dock:
+            dock.can_focus = True
             yield OptionList(id="palette")
             self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
             self.mode_label.tooltip = "Current interaction mode (NORMAL, BASH, CMD, NOTE, SELECTION, BLOCKEDIT)"
@@ -430,11 +511,18 @@ class ClientApp(App):
                 yield m_inp
 
     def on_mount(self):
+        # Establish fixed TTY dimensions based on initial screen size
+        # Margin for borders, padding, scrollbars and locking bars
+        self.preferred_cols = max(40, self.screen.size.width - 10)
+        self.preferred_rows = 24  # Standard fixed height for terminal blocks
+
         self.run_worker(self.connect_to_server())
         self.enter_normal_mode()
 
     def on_ready(self):
-        self.query_one("#main_input").focus()
+        # Focus screen or bottom dock to allow immediate use of prefix keys (! : ;)
+        # We use call_after_refresh to ensure the layout is settled
+        self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
 
     async def connect_to_server(self):
         try:
@@ -445,6 +533,12 @@ class ClientApp(App):
                 "type": "connect",
                 "color": self.user_color,
                 "user": self.user_name
+            })
+            # Set fixed TTY size on server
+            await self.send_message({
+                "type": "terminal_resize",
+                "rows": self.preferred_rows,
+                "cols": self.preferred_cols
             })
             await self.listen_to_server()
         except Exception as e:
@@ -539,15 +633,15 @@ class ClientApp(App):
                     self.blocks[b_id].remove()
                     del self.blocks[b_id]
 
-            for i, b_data in enumerate(new_blocks_data):
+            # Re-order logic while respecting the header
+            header = container.query_one("#notebook_header")
+            prev_widget = header
+            for b_data in new_blocks_data:
                 b_id = b_data["id"]
                 if b_id not in self.blocks: await self.create_block(b_data)
                 block = self.blocks[b_id]
-                if i == 0:
-                    if container.children and container.children[0] != block: container.move_child(block, before=container.children[0])
-                else:
-                    prev_id = new_blocks_data[i-1]["id"]
-                    if prev_id in self.blocks: container.move_child(block, after=self.blocks[prev_id])
+                container.move_child(block, after=prev_widget)
+                prev_widget = block
             self.refresh()
 
         elif msg_type == "update_block":
@@ -600,6 +694,18 @@ class ClientApp(App):
                 self.blocks[b_id].remove()
                 del self.blocks[b_id]
 
+        elif msg_type == "lock_denied":
+            reason = msg.get("reason", "Block is locked")
+            self.notify(reason, severity="warning")
+            # If we were trying to enter edit mode, we should revert UI state
+            b_id = msg.get("block_id")
+            if b_id in self.blocks:
+                block = self.blocks[b_id]
+                if block.is_editing:
+                    await block.toggle_edit(remote=True, restore=True)
+            if self.input_mode == "CONTROL":
+                self.enter_normal_mode()
+
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data["id"]
         if b_id in self.blocks: return
@@ -609,6 +715,7 @@ class ClientApp(App):
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
         await container.mount(new_block)
+
         if data["type"] == "CMD":
             new_block.append_output(data["output"])
             new_block.update_status(data["status"])
@@ -624,8 +731,7 @@ class ClientApp(App):
 
     def enter_normal_mode(self):
         if self.input_mode == "CONTROL":
-            # Disable echo when leaving interactive mode
-            asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": False}))
+            asyncio.create_task(self.send_message({"type": "control_stop"}))
         self.input_mode = "NORMAL"
         self.count_str = ""
         self.update_mode_label()
@@ -711,16 +817,8 @@ class ClientApp(App):
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
         block.focus()
-        # Enable echo for interactive mode
-        asyncio.create_task(self.send_message({"type": "terminal_set_echo", "enabled": True}))
-        # Request terminal resize to match block width
-        try:
-            # Approximate size based on widget size
-            cols = max(40, block.size.width - 4)
-            rows = 24
-            block.terminal_screen.resize(rows, cols)
-            asyncio.create_task(self.send_message({"type": "terminal_resize", "rows": rows, "cols": cols}))
-        except: pass
+        # Signal server to start streaming PTY output to this block
+        asyncio.create_task(self.send_message({"type": "control_start", "block_id": block.block_id}))
 
     async def action_submit(self):
         ta = self.query_one("#main_input"); text = ta.text
@@ -735,6 +833,7 @@ class ClientApp(App):
         if self.input_mode == "BASH":
             content = text.strip()
             self.history.add(content)
+            # No longer intercepting 'cd' here; it will be handled by the server's master shell.
             await self.send_message({"type": "submit", "mode": "CMD", "content": content, "cwd": os.getcwd()})
         elif self.input_mode == "NOTE":
             await self.send_message({"type": "submit", "mode": "NOTE", "content": text.strip(), "cwd": os.getcwd()})
@@ -747,7 +846,7 @@ class ClientApp(App):
         if cmd == "export": self.export_notebook(args or f"session_{int(time.time())}.md")
         elif cmd == "import": await self.import_notebook(args)
         elif cmd == "exit": self.exit()
-        elif cmd == "save_wf": self.action_save_wf_dialog()
+        elif cmd == "save_wf": self.action_save_workflow(self.query_one("#main_input").text)
         elif cmd == "clear": await self.send_message({"type": "clear_session"})
         elif cmd == "help": self.notify("Commands: export [file], import [file], exit, save_wf, clear, help")
         else: self.notify(f"Unknown command: {cmd}", severity="error")
@@ -755,10 +854,17 @@ class ClientApp(App):
     def action_save_notebook_dialog(self): self.push_screen(SaveNotebookModal(), self.export_notebook)
     def action_import_notebook_dialog(self): self.push_screen(ImportNotebookModal(), lambda f: asyncio.create_task(self.import_notebook(f)))
 
+    def action_save_workflow(self, text: str):
+        if not text.strip(): return
+        self.push_screen(SaveWorkflowModal(text.strip()), lambda s: s and asyncio.create_task(self._save_wf(s)))
+
     def export_notebook(self, filename: str):
         if not filename: return
         md_output = [f"# Shell Notebook Export - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
-        for block in self.blocks.values():
+
+        # Iterate through visual children to respect current reordered state
+        container = self.query_one("#command_history")
+        for block in container.children:
             if isinstance(block, NoteBlock): md_output.append(f"{block.content}\n")
             elif isinstance(block, CommandBlock):
                 md_output.append(f"```bash\n{block.content}\n```\n")
@@ -802,8 +908,6 @@ class ClientApp(App):
             if focused.locked_by and focused.locked_by != self.user_id: self.notify(f"Locked by {self.focused.locked_by[:4]}", severity="warning"); return
             await self.send_message({"type": "delete_block", "block_id": focused.block_id})
 
-    def action_save_wf_dialog(self):
-        self.push_screen(SaveWorkflowModal(self.query_one("#main_input").text), lambda s: s and asyncio.create_task(self._save_wf(s)))
     async def _save_wf(self, data):
         n, c = data; wfs = load_workflows(); wfs.append({"name": n, "cmd": c})
         with open(os.path.join(os.path.dirname(__file__), "termux_workflows.json"), "w") as f: json.dump(wfs, f, indent=4)
@@ -843,13 +947,28 @@ class ClientApp(App):
         val = opt.id
         inp = self.query_one("#main_input"); self._suppress_search = True
 
-        if self.input_mode == "BASH":
-            token = self.providers["BASH"]._get_current_token(inp.text)
-            if token:
+        if self.input_mode in ("BASH", "CMD"):
+            provider = self.providers[self.input_mode]
+            bash_prov = provider if self.input_mode == "BASH" else provider.bash_provider
+
+            # Check if selection is a path. Path completion uses token replacement.
+            # History, Workflow, and Cmd types use full replacement.
+            is_path = False
+            try:
+                # Retrieve the actual suggestion object to check its type
+                context = {"history": self.history.cache, "workflows": self.workflows, "cwd": os.getcwd()}
+                sugs = provider.get_suggestions(inp.text, context)
+                for s in sugs:
+                    if s["value"] == val and s["type"] == "path":
+                        is_path = True; break
+            except: pass
+
+            token = bash_prov._get_current_token(inp.text)
+            if is_path and token:
                 idx = inp.text.rfind(token)
                 inp.text = inp.text[:idx] + val
             else:
-                inp.text += val
+                inp.text = val # Full replacement for history/workflows
         else:
             inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
@@ -887,12 +1006,13 @@ class ClientApp(App):
             if event.character and event.character.isdigit() and (event.character != "0" or self.count_str): self.count_str += event.character; return
             count, self.count_str = int(self.count_str) if self.count_str else 1, ""
             if event.character in (":", "!", ";"): self.enter_input_mode(prefix=event.character); return
-            if event.key in ("up", "down", "k", "j") and not (event.key == "j" and isinstance(focused, CommandBlock) and not focused.is_editing):
+            if event.key in ("up", "down", "k", "j") and not (event.key in ("j", "enter") and isinstance(focused, CommandBlock) and not focused.is_editing):
                  if not blocks: return
                  idx = blocks.index(focused) if focused in blocks else 0
                  new_idx = max(0, min(len(blocks)-1, idx + (count if event.key in ("down", "j") else -count)))
                  blocks[new_idx].focus(); blocks[new_idx].scroll_visible()
             elif event.key == "x": asyncio.create_task(self.action_delete_block())
+            elif event.key == "r": asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
             elif event.key == "y":
                  if isinstance(focused, NoteBlock): self.yank_buffer = ("NOTE", focused.content); self.notify("Note yanked")
                  elif isinstance(focused, CommandBlock): self.yank_buffer = ("CMD", focused.content, focused.cwd); self.notify("Command yanked")
@@ -901,16 +1021,25 @@ class ClientApp(App):
             elif event.key == "P":
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "before", "yank_data": self.yank_buffer}))
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
+            elif event.key == "ctrl+s" and isinstance(focused, CommandBlock): self.action_save_workflow(focused.content)
             elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
-            elif event.key == "j" and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
-            elif event.key == "ctrl+up": asyncio.create_task(self.action_move_up())
-            elif event.key == "ctrl+down": asyncio.create_task(self.action_move_down())
+            elif event.key in ("j", "enter", "ctrl+j") and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
+            elif event.key in ("ctrl+up", "alt+up"): asyncio.create_task(self.action_move_up())
+            elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
             if event.key == "ctrl+escape":
                 self.enter_normal_mode()
                 return
 
             # Map common keys to ANSI sequences
+            # Applications like 'less' often expect application mode sequences (ESC O A)
+            # if they enable DECCKM. Standard mode is (ESC [ A).
+            # We use a helper to check if DECCKM is enabled via pyte's mode set.
+            # For now, we use ESC [ as it is more common, but let's try a hybrid or
+            # better yet, the sequence that fixes 'less' scrolling.
+            # The user said HJ KL works in less, but arrows don't.
+            # In many terminals, Application mode is the one that causes issues if not handled.
+            # Let's switch back to standard ESC [ and see if it helps.
             key_map = {
                 "enter": "\r",
                 "backspace": "\x7f",
@@ -965,6 +1094,12 @@ class ClientApp(App):
                     node.last_click_time = time.time(); return
                 node = node.parent
         except: pass
+
+    def on_paste(self, event: events.Paste) -> None:
+        if self.input_mode == "CONTROL" and event.text:
+            asyncio.create_task(self.send_message({"type": "terminal_input", "data": event.text}))
+            event.stop()
+            event.prevent_default()
 
     def on_unmount(self):
         if self.writer: self.writer.close()
