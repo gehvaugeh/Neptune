@@ -9,6 +9,7 @@ import pyte
 from typing import List, Dict
 
 from rich.text import Text
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
 from textual.widgets.option_list import Option
@@ -250,7 +251,7 @@ class CommandBlock(BaseBlock):
 
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
-            yield Label(f"[bold blue]{self.cwd}[/]\n[white]{self.content}[/]", id="cmd_label", classes=label_classes)
+            yield Label(f"[bold blue]{escape(self.cwd)}[/]\n[white]{escape(self.content)}[/]", id="cmd_label", classes=label_classes)
             yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
@@ -434,7 +435,7 @@ class CommandBlock(BaseBlock):
                     edit.text = self.content
                     await self.app_ref.send_message({"type": "edit_cancel", "block_id": self.block_id})
 
-            label.update(f"[bold blue]{self.cwd}[/]\n[white]{self.content}[/]")
+            label.update(f"[bold blue]{escape(self.cwd)}[/]\n[white]{escape(self.content)}[/]")
             label.remove_class("hidden")
             edit.add_class("hidden")
             if not remote:
@@ -668,7 +669,7 @@ class ClientApp(App):
                        block.query_one("#md_render").update(block.content)
                        block.query_one("#block_text_edit").text = block.content
                    else:
-                       block.query_one("#cmd_label").update(f"[bold blue]{block.cwd}[/]\n[white]{block.content}[/]")
+                       block.query_one("#cmd_label").update(f"[bold blue]{escape(block.cwd)}[/]\n[white]{escape(block.content)}[/]")
                        block.query_one("#block_text_edit").text = block.content
 
         elif msg_type == "output":
