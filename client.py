@@ -9,6 +9,7 @@ import pyte
 from typing import List, Dict
 
 from rich.text import Text
+from rich.style import Style
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
 from textual.widgets.option_list import Option
@@ -243,6 +244,9 @@ class CommandBlock(BaseBlock):
         # Initialize with fixed TTY dimensions established by the app
         self.terminal_screen = pyte.HistoryScreen(app_ref.preferred_cols, app_ref.preferred_rows, history=1000)
         self.stream = pyte.Stream(self.terminal_screen)
+        self._style_cache = {}
+        self._color_error = False
+        self._last_status_text = "Ready"
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -273,6 +277,7 @@ class CommandBlock(BaseBlock):
 
     def render_terminal(self):
         if not self.is_mounted: return
+        self._color_error = False
         # We always use the pyte screen for rendering to ensure consistent VT100 support
         rich_text = Text()
 
@@ -356,7 +361,19 @@ class CommandBlock(BaseBlock):
             out_widget.update(rich_text)
             out_widget._last_render_key = cache_key
 
+        if self._color_error:
+            info = self.query_one("#info")
+            if "⚠" not in str(info.renderable):
+                info.update(f"{self._last_status_text} [dim]⚠ color error[/]")
+
     def _get_rich_style(self, char):
+        # Cache key based on char attributes that affect style
+        cache_key = (char.fg, char.bg, char.bold, char.italics, char.underscore, char.reverse)
+        if cache_key in self._style_cache:
+            style, is_err = self._style_cache[cache_key]
+            if is_err: self._color_error = True
+            return style
+
         def map_color(c):
             if not c or c == "default": return None
             # Pyte color names to Rich-compatible names
@@ -365,41 +382,67 @@ class CommandBlock(BaseBlock):
                 "lightgray": "white",
                 "darkgray": "bright_black",
             }
-            c = mapping.get(c, c)
-            if c.startswith("bright"):
-                c = c.replace("bright", "bright_")
+            if isinstance(c, str):
+                c = mapping.get(c, c)
+                if c.startswith("bright") and "_" not in c:
+                    c = c.replace("bright", "bright_")
+
+                # Check for hex colors (6 or 8 hex digits)
+                if re.fullmatch(r"[0-9a-fA-F]{6}|[0-9a-fA-F]{8}", c):
+                    return f"#{c[:6]}"
             return c
 
         fg = map_color(char.fg)
         bg = map_color(char.bg)
 
-        style = ""
-        if fg: style += fg if not fg.isdigit() else f"color({fg})"
-        if bg: style += (" on " if style else "on ") + (bg if not bg.isdigit() else f"color({bg})")
-        if char.bold: style += " bold"
-        if char.italics: style += " italic"
-        if char.underscore: style += " underline"
-        if char.reverse: style += " reverse"
+        is_err = False
+        try:
+            parts = []
+            if fg: parts.append(fg if (not isinstance(fg, str) or not fg.isdigit()) else f"color({fg})")
+            if bg: parts.append(f"on {bg}" if (not isinstance(bg, str) or not bg.isdigit()) else f"on color({bg})")
+            if char.bold: parts.append("bold")
+            if char.italics: parts.append("italic")
+            if char.underscore: parts.append("underline")
+            if char.reverse: parts.append("reverse")
+
+            style = Style.parse(" ".join(parts))
+        except Exception:
+            self._color_error = True
+            is_err = True
+            # Fallback: keep non-color attributes
+            parts = []
+            if char.bold: parts.append("bold")
+            if char.italics: parts.append("italic")
+            if char.underscore: parts.append("underline")
+            if char.reverse: parts.append("reverse")
+            style = Style.parse(" ".join(parts)) if parts else Style.null()
+
+        self._style_cache[cache_key] = (style, is_err)
         return style
 
     def update_status(self, status):
         if not self.is_mounted: return
         info = self.query_one("#info")
         if status == "running":
-            info.update("[yellow]Running...[/]")
+            self._last_status_text = "[yellow]Running...[/]"
             self.add_class("running")
         elif "queued" in status:
             num = status.split("(")[1].split(")")[0]
-            info.update(f"[blue]⏳ In Queue (#{num})[/]")
+            self._last_status_text = f"[blue]⏳ In Queue (#{num})[/]"
             self.remove_class("running")
         elif status == "ok":
-            info.update("[green]✅ OK[/]")
+            self._last_status_text = "[green]✅ OK[/]"
             self.remove_class("running")
         elif "error" in status:
-            info.update(f"[red]❌ {status.upper()}[/]")
+            self._last_status_text = f"[red]❌ {status.upper()}[/]"
             self.remove_class("running")
         else:
-            info.update(f"[grey44]{status.capitalize()}[/]")
+            self._last_status_text = f"[grey44]{status.capitalize()}[/]"
+
+        if self._color_error:
+            info.update(f"{self._last_status_text} [dim]⚠ color error[/]")
+        else:
+            info.update(self._last_status_text)
 
     async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
