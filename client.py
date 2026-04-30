@@ -1099,7 +1099,7 @@ class ClientApp(App):
             elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
             focused = self.focused
-            if event.key == "ctrl+escape":
+            if event.key == "alt+escape":
                 if self.was_in_selection_mode:
                     self.enter_selection_mode()
                 else:
