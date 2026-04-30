@@ -7,6 +7,10 @@ import argparse
 import logging
 import pyte
 from typing import List, Dict
+from collections import namedtuple
+
+# Define FakeChar globally for performance and consistency
+FakeChar = namedtuple("FakeChar", ["fg", "bg", "bold", "italics", "underscore", "reverse"])
 
 from rich.text import Text
 from rich.style import Style
@@ -248,6 +252,10 @@ class CommandBlock(BaseBlock):
         self._style_cache = {}
         self._color_error = False
         self._last_status_text = "Ready"
+        self._render_task = None
+        self._needs_render = False
+        self._last_render_time = 0
+        self._render_throttle = 0.05 # Max 20 FPS during heavy output
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -274,7 +282,29 @@ class CommandBlock(BaseBlock):
 
         self.stream.feed(text)
         if self.is_mounted:
+            self.trigger_render()
+
+    def trigger_render(self):
+        now = time.time()
+        if now - self._last_render_time > self._render_throttle:
             self.render_terminal()
+            self._last_render_time = now
+            self._needs_render = False
+        else:
+            self._needs_render = True
+            if not self._render_task or self._render_task.done():
+                self._render_task = asyncio.create_task(self._throttled_render())
+
+    async def _throttled_render(self):
+        await asyncio.sleep(self._render_throttle)
+        if self._needs_render and self.is_mounted:
+            self.render_terminal()
+            self._last_render_time = time.time()
+            self._needs_render = False
+
+    def _get_rich_style_from_attrs(self, attrs):
+        if attrs is None: return None
+        return self._get_rich_style(FakeChar(*attrs))
 
     def render_terminal(self):
         if not self.is_mounted: return
@@ -289,48 +319,64 @@ class CommandBlock(BaseBlock):
         def append_line(y, line):
             if not line:
                 if show_cursor and y == cursor_y:
-                    # Render cursor even on empty line
                     rich_text.append(" ", style="reverse")
                 rich_text.append("\n")
                 return
 
-            # Ensure line is a list of characters (History lines are lists, Buffer lines are dicts)
-            if not isinstance(line, list):
-                line = [line[x] for x in range(self.terminal_screen.columns)]
+            # Optimization: Process runs of characters with identical attributes
+            # to minimize style lookups and append calls.
+            last_attrs = None
+            current_chunk = []
 
-            current_style = self._get_rich_style(line[0])
-            current_text = ""
-            for x, char in enumerate(line):
-                char_style = self._get_rich_style(char)
+            # For buffer lines (StaticDefaultDict), we iterate by column index
+            # For history lines (lists), we iterate directly
+            items = range(self.terminal_screen.columns) if not isinstance(line, list) else line
 
-                # Apply cursor style if needed
-                if show_cursor and y == cursor_y and x == cursor_x:
-                     # Flush current text
-                     rich_text.append(current_text, style=current_style)
-                     # Render cursor char (usually space or current char with reverse)
-                     # No blink as requested, just steady reverse.
-                     rich_text.append(char.data or " ", style="reverse" if not char_style else f"{char_style} reverse")
-                     # Reset for next chars
-                     current_style = char_style
-                     current_text = ""
-                     continue
+            for i in items:
+                char = line[i] if not isinstance(line, list) else i
+                x = i if not isinstance(line, list) else -2 # -2 means history line, no cursor
 
-                if char_style == current_style:
-                    current_text += char.data
+                # Pyte Char attributes that affect style
+                attrs = (char.fg, char.bg, char.bold, char.italics, char.underscore, char.reverse)
+
+                # Handle cursor as a style break
+                is_cursor = (x == cursor_x and y == cursor_y and show_cursor)
+
+                if is_cursor or attrs != last_attrs:
+                    if current_chunk:
+                        rich_text.append("".join(current_chunk), style=self._get_rich_style_from_attrs(last_attrs))
+                        current_chunk = []
+
+                    if is_cursor:
+                        char_style = self._get_rich_style_from_attrs(attrs)
+                        rich_text.append(char.data or " ", style="reverse" if not char_style else f"{char_style} reverse")
+                        last_attrs = None # Force style refresh after cursor
+                    else:
+                        last_attrs = attrs
+                        current_chunk.append(char.data)
                 else:
-                    rich_text.append(current_text, style=current_style)
-                    current_style = char_style
-                    current_text = char.data
-            rich_text.append(current_text, style=current_style)
+                    current_chunk.append(char.data)
+
+            if current_chunk:
+                rich_text.append("".join(current_chunk), style=self._get_rich_style_from_attrs(last_attrs))
+
             rich_text.append("\n")
 
-        # Prepend history only if NOT running, to keep TUI layouts stable
+        # Prepend history only if NOT running and explicitly focused (or small history)
+        # to keep TUI layouts stable and fast.
         is_running = getattr(self, "_last_status", "") == "running"
         if self.app_ref.input_mode != "CONTROL" and not is_running:
-            for line_obj in self.terminal_screen.history.top:
-                append_line(-1, line_obj)
-            for line_obj in self.terminal_screen.history.bottom:
-                append_line(-1, line_obj)
+            # Optimization: Only render history for the focused block or if it's small.
+            # Large history rendering for every block on screen is very expensive.
+            history_size = len(self.terminal_screen.history.top) + len(self.terminal_screen.history.bottom)
+            if self.app_ref.focused == self or history_size < 100:
+                for line_obj in self.terminal_screen.history.top:
+                    append_line(-1, line_obj)
+                for line_obj in self.terminal_screen.history.bottom:
+                    append_line(-1, line_obj)
+            else:
+                # Add a hint that history is hidden
+                rich_text.append(f"[dim]... {history_size} lines of history hidden (focus to see) ...[/]\n")
 
         # Find the last non-empty line (considering data and non-default background/formatting)
         # We always do this compact rendering to avoid empty trailing space
@@ -371,8 +417,10 @@ class CommandBlock(BaseBlock):
         # Cache key based on char attributes that affect style
         cache_key = (char.fg, char.bg, char.bold, char.italics, char.underscore, char.reverse)
         if cache_key in self._style_cache:
-            style, is_err = self._style_cache[cache_key]
-            if is_err: self._color_error = True
+            style = self._style_cache[cache_key]
+            # In some older versions of the code, cache might have been (style, is_err)
+            # but we standardized on style only for normal flow, and _color_error check
+            # will happen during Style creation.
             return style
 
         def map_color(c):
@@ -418,7 +466,7 @@ class CommandBlock(BaseBlock):
             if char.reverse: parts.append("reverse")
             style = Style.parse(" ".join(parts)) if parts else Style.null()
 
-        self._style_cache[cache_key] = (style, is_err)
+        self._style_cache[cache_key] = style
         return style
 
     def update_status(self, status):

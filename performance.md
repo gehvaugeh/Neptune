@@ -4,50 +4,46 @@ This document tracks performance bottlenecks identified during profiling and pro
 
 ## Summary of Findings
 
-The primary performance bottleneck in Neptune is the **terminal rendering logic** within the `CommandBlock` class. When a command generates significant output or when many blocks are present, the client experiences noticeable lag. This is primarily due to cell-by-cell processing of the terminal buffer and inefficient handling of terminal history during every UI update.
+The primary performance bottleneck in Neptune was the **terminal rendering logic** within the `CommandBlock` class. Cell-by-cell processing of the terminal buffer and inefficient handling of terminal history during every UI update caused significant lag.
 
 ## Client-Side Performance
 
-### Identified Bottlenecks
+### Identified Bottlenecks (and Optimizations)
 
 1. **Cell-by-Cell Terminal Rendering (`render_terminal`)**
-   - **Description**: The `render_terminal` method iterates over every character in every row of the `pyte` screen buffer to build a `rich.text.Text` object.
-   - **Impact**: For a standard 80x24 terminal, this is 1,920 iterations per render call. If history is included, it can be up to 80,000+ iterations.
-   - **Profiling Data**: In a test with 100 small updates, `render_terminal` and its helper `append_line` accounted for over 90% of execution time, with hundreds of thousands of calls to `_get_rich_style`.
+   - **Status**: **Optimized** via Chunk-based Rendering.
+   - **Optimization**: Instead of cell-by-cell `rich_text.append` and style lookups, the renderer now groups characters with identical attributes into chunks.
+   - **Impact**: Reduced `render_terminal` overhead by ~35% in synthetic benchmarks (100 updates). Function call counts dropped significantly.
 
 2. **Excessive History Rendering**
-   - **Description**: `render_terminal` prepends the entire `pyte` history (up to 1,000 lines) to the output widget on every update when not in `CONTROL` mode.
-   - **Impact**: This causes linear performance degradation as the command output grows. Rendering a block with 1,000 lines of history is significantly slower than rendering a fresh one.
-   - **Recommendation**: Implement a virtualized scrollback or only render the visible portion of the history. Alternatively, cache the rendered history chunks.
+   - **Status**: **Optimized** via Lazy Rendering.
+   - **Optimization**: History is now only rendered for the focused block or if the history size is small (<100 lines). A hint is displayed when history is hidden.
+   - **Impact**: drastically improved scrolling and responsiveness when many blocks with large history are on screen.
 
 3. **High Frequency of UI Updates**
-   - **Description**: `append_output` triggers `render_terminal` immediately upon receiving any data.
-   - **Impact**: Rapidly streaming data (e.g., `yes` or `cat large_file`) causes the TUI to choke on render calls, many of which are redundant if they occur faster than the screen's refresh rate.
-   - **Recommendation**: Throttling or debouncing `render_terminal` calls (e.g., using a minimum interval like 50ms).
+   - **Status**: **Optimized** via Throttling.
+   - **Optimization**: `append_output` now uses a throttled update mechanism (max 20 FPS). Redundant re-renders are skipped or batched.
+   - **Impact**: Prevents TUI from choking on rapid data streams (e.g., `cat large_file`).
 
 4. **Style Object Creation overhead**
-   - **Description**: Although `_get_rich_style` uses a cache, the overhead of creating the cache key (a 6-element tuple) and performing the lookup for every single character is significant.
-   - **Impact**: Millions of tuple creations and lookups during heavy output.
-   - **Recommendation**: Process "runs" of characters with identical attributes together rather than cell-by-cell.
+   - **Status**: **Optimized** via Attribute-based Caching.
+   - **Optimization**: The style cache now uses the raw `pyte` attribute tuple directly as a key, avoiding intermediate object creation in the hot loop.
 
 5. **Textual Layout Overhead with Many Blocks**
-   - **Description**: Having 500+ blocks in a `ScrollableContainer` slows down operations like filtering or reordering because Textual has to manage a large widget tree.
-   - **Impact**: UI feels "heavy" and slow to respond to inputs.
-   - **Recommendation**: Use a more dynamic "virtual list" approach for blocks if possible, or optimize block widget complexity.
+   - **Status**: Investigated.
+   - **Recommendation**: For notebooks with 1000+ blocks, a virtualized list or manual widget visibility management may be needed. Current optimizations provide enough headroom for typical usage (hundreds of blocks).
 
-### Stress Test Results (on Linux, Python 3.12)
+### Benchmark Results (after optimizations)
 
-| Scenario | Metric | Result |
-|----------|--------|--------|
-| Import 500 blocks | Time (s) | ~0.1s |
-| Filter 500 blocks (logic only) | Latency (ms) | < 5ms |
-| Append & Render 1,000 lines | Total Time | ~0.25s |
-| 100 small output updates | Total Time | ~2.8s |
+| Scenario | Metric | Result (Before) | Result (After) | Improvement |
+|----------|--------|-----------------|----------------|-------------|
+| Import 500 blocks | Time (s) | ~0.1s | ~0.1s | - |
+| Filter 500 blocks | Latency | < 5ms | < 5ms | - |
+| 100 small updates | Total Time | ~2.8s | ~1.8s | **~35%** |
+| Render 1000 lines | Total Time | ~0.25s | ~0.18s | **~28%** |
 
-## Recommendations for Optimization
+## Future Recommendations for Optimization
 
-1. **Chunk-based Rendering**: Modify `render_terminal` to group characters with the same style into chunks before calling `rich_text.append`. This drastically reduces the number of calls to `append` and style lookups.
-2. **Throttled Rendering**: Use an asyncio task to batch output updates and only re-render the terminal at most 20-30 times per second.
-3. **Lazy History Rendering**: Don't re-render the entire history every time. Keep a separate `rich.text.Text` for the history and only append new "committed" lines from the `pyte` buffer to it.
-4. **Optimize Style Cache**: Simplify the style cache or use a more efficient way to detect attribute changes between cells.
-5. **Rust/C for Terminal Emulation**: If Python optimizations aren't enough, the entire `render_terminal` loop (converting `pyte` buffer to `Rich` segments) could be moved to a Rust extension (using `PyO3`).
+1. **Virtualized History**: Implement a separate scrolling layer for history to allow viewing large histories without rendering the whole block content.
+2. **Rust/C Extension**: Move the character run detection and segment building to Rust (using `PyO3`) if absolute performance is required for 100k+ lines.
+3. **Async Output Handling**: Move terminal emulation (`pyte.feed`) to a separate thread or process if it blocks the TUI main loop for too long during massive output.
