@@ -35,8 +35,9 @@ def get_shell():
 DEFAULT_SHELL = get_shell()
 
 class Server:
-    def __init__(self, socket_path=DEFAULT_SOCKET_PATH):
+    def __init__(self, socket_path=DEFAULT_SOCKET_PATH, enable_hist_expansion=False):
         self.socket_path = socket_path
+        self.enable_hist_expansion = enable_hist_expansion
         self.blocks = []  # List of dicts: {id, type, content, cwd, output, status, locked_by}
         self.clients = {} # writer: {id, color, name}
         self.active_processes = {} # block_id: process (maintained for compatibility/tracking)
@@ -473,7 +474,9 @@ class Server:
         logging.info(f"Master shell started (PID: {self.master_proc.pid})")
 
         # Disable echo and enable job control explicitly
-        os.write(self.master_fd, b"stty -echo\nset -m\n")
+        # Also handle history expansion based on configuration
+        hist_exp = "set -H" if self.enable_hist_expansion else "set +H"
+        os.write(self.master_fd, f"stty -echo\nset -m\n{hist_exp}\n".encode())
         await asyncio.sleep(0.1)
         try:
             self.master_pgid = os.getpgid(self.master_proc.pid)
@@ -689,9 +692,10 @@ from branding import setup_parser
 if __name__ == "__main__":
     parser = setup_parser("Neptune Server")
     parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
+    parser.add_argument("--enable-hist-expansion", action="store_true", help="Enable Bash history expansion (e.g. using !)")
     args = parser.parse_args()
 
-    server = Server(socket_path=args.socket)
+    server = Server(socket_path=args.socket, enable_hist_expansion=args.enable_hist_expansion)
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:
