@@ -54,7 +54,7 @@ class Server:
         self.shell_cwd = os.getcwd()
         self.marked_for_deletion = set()
 
-    def add_block(self, block_type, content, cwd=None):
+    def add_block(self, block_type, content, cwd=None, index=None):
         block = {
             "id": str(uuid.uuid4()),
             "type": block_type,
@@ -64,7 +64,10 @@ class Server:
             "status": "ready",
             "locked_by": None
         }
-        self.blocks.append(block)
+        if index is not None and 0 <= index <= len(self.blocks):
+            self.blocks.insert(index, block)
+        else:
+            self.blocks.append(block)
         return block
 
     def get_block(self, block_id):
@@ -194,11 +197,21 @@ class Server:
                     mode = msg.get("mode")
                     content = msg.get("content")
                     cwd = msg.get("cwd", os.getcwd())
+                    insert_after = msg.get("insert_after")
                     logging.info(f"Received submit from {user_id}: {mode} - {content[:50]}")
 
-                    block = self.add_block(mode, content, cwd)
-                    block["cwd"] = self.shell_cwd
-                    await self.broadcast({"type": "new_block", "block": block})
+                    index = None
+                    if insert_after:
+                        target_idx = next((i for i, b in enumerate(self.blocks) if b["id"] == insert_after), -1)
+                        if target_idx != -1:
+                            index = target_idx + 1
+
+                    block = self.add_block(mode, content, self.shell_cwd, index=index)
+
+                    if index is not None:
+                        await self.broadcast({"type": "reorder", "blocks": self.blocks})
+                    else:
+                        await self.broadcast({"type": "new_block", "block": block})
 
                     if mode == "CMD":
                         async with self.queue_condition:

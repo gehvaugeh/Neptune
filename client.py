@@ -148,6 +148,8 @@ class BaseBlock(Static):
     def on_focus(self, event: events.Focus) -> None:
         if self.is_editing:
             self.query_one("#block_text_edit").focus()
+        if self.app_ref.input_mode == "SELECTION":
+            self.app_ref.last_selected_block_id = self.block_id
 
     def on_mount(self) -> None:
         if self.is_editing and self.cursor_pos:
@@ -203,7 +205,10 @@ class NoteBlock(BaseBlock):
             render.remove_class("hidden")
             edit.add_class("hidden")
             if not remote:
-                self.app_ref.enter_normal_mode()
+                if self.app_ref.was_in_selection_mode:
+                    self.app_ref.enter_selection_mode()
+                else:
+                    self.app_ref.enter_normal_mode()
 
 class NotebookInput(TextArea):
     def on_key(self, event: events.Key) -> None:
@@ -234,7 +239,7 @@ class NotebookInput(TextArea):
         elif event.key == "escape":
             event.stop()
             event.prevent_default()
-            self.app.enter_normal_mode()
+            self.app.action_esc_pressed()
 
 class CommandBlock(BaseBlock):
     def __init__(self, block_id, command, cwd, app_ref, is_editing=False, editing_content=None, cursor_pos=None, **kwargs):
@@ -439,7 +444,10 @@ class CommandBlock(BaseBlock):
             label.remove_class("hidden")
             edit.add_class("hidden")
             if not remote:
-                self.app_ref.enter_normal_mode()
+                if self.app_ref.was_in_selection_mode:
+                    self.app_ref.enter_selection_mode()
+                else:
+                    self.app_ref.enter_normal_mode()
 
 # --- APP ---
 
@@ -473,6 +481,9 @@ class ClientApp(App):
         self._suppress_search = False
         self.workflows = load_workflows()
         self.yank_buffer = None
+        self.last_selected_block_id = None
+        self.was_in_selection_mode = False
+        self.insert_after_id = None
         self.count_str = ""
         self.available_commands = [
             {"name": "export", "params": "[file]", "desc": "Save current session as a Markdown file"},
@@ -660,7 +671,10 @@ class ClientApp(App):
                     # Auto-exit CONTROL mode if block finishes
                     if self.input_mode == "CONTROL" and self.focused == block:
                         if old_status == "running" and data["status"] != "running":
-                            self.enter_normal_mode()
+                            if self.was_in_selection_mode:
+                                self.enter_selection_mode()
+                            else:
+                                self.enter_normal_mode()
                     block.full_output = ""
                     block.terminal_screen.reset()
                     block.append_output(data.get("output", ""))
@@ -705,7 +719,10 @@ class ClientApp(App):
                 if block.is_editing:
                     await block.toggle_edit(remote=True, restore=True)
             if self.input_mode == "CONTROL":
-                self.enter_normal_mode()
+                if self.was_in_selection_mode:
+                    self.enter_selection_mode()
+                else:
+                    self.enter_normal_mode()
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data["id"]
@@ -727,14 +744,28 @@ class ClientApp(App):
 
     def action_esc_pressed(self):
         bar = self.query_one("#filter_bar")
-        if not bar.has_class("hidden"): self.action_toggle_filter()
-        self.enter_normal_mode()
+        if not bar.has_class("hidden"):
+            self.action_toggle_filter()
+            return
+
+        if self.input_mode == "SELECTION":
+            self.was_in_selection_mode = False
+            self.enter_normal_mode()
+        elif self.input_mode in ("BLOCKEDIT", "CONTROL", "BASH", "CMD", "NOTE"):
+            if self.was_in_selection_mode:
+                self.enter_selection_mode()
+            else:
+                self.enter_normal_mode()
+        else:
+            self.enter_normal_mode()
 
     def enter_normal_mode(self):
         if self.input_mode == "CONTROL":
             asyncio.create_task(self.send_message({"type": "control_stop"}))
         self.input_mode = "NORMAL"
         self.count_str = ""
+        self.insert_after_id = None
+        self.was_in_selection_mode = False
         self.update_mode_label()
         self.query_one("#mode_prefix").update("")
         self.query_one("#palette").remove_class("visible")
@@ -755,15 +786,31 @@ class ClientApp(App):
         container = self.query_one("#command_history")
         blocks = [c for c in container.children if isinstance(c, BaseBlock)]
         if blocks:
-            blocks[-1].focus()
-            blocks[-1].scroll_visible()
+            target = blocks[-1]
+            if self.last_selected_block_id in self.blocks:
+                target = self.blocks[self.last_selected_block_id]
+            target.focus()
+            target.scroll_visible()
+            self.last_selected_block_id = target.block_id
 
     def enter_blockedit_mode(self):
+        if self.input_mode == "SELECTION":
+            self.was_in_selection_mode = True
         self.input_mode = "BLOCKEDIT"
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
 
     def enter_input_mode(self, prefix=""):
+        if self.input_mode == "SELECTION":
+            self.was_in_selection_mode = True
+            focused = self.focused
+            while focused and not isinstance(focused, BaseBlock):
+                focused = focused.parent
+            if focused:
+                self.insert_after_id = focused.block_id
+        else:
+            self.insert_after_id = None
+
         mode_map = {"!": "BASH", ":": "CMD", ";": "NOTE"}
         self.input_mode = mode_map.get(prefix, "INPUT")
         self.update_mode_label()
@@ -814,6 +861,8 @@ class ClientApp(App):
     def enter_control_mode(self, block):
         if not isinstance(block, CommandBlock):
             return
+        if self.input_mode == "SELECTION":
+            self.was_in_selection_mode = True
         self.input_mode = "CONTROL"
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
@@ -828,18 +877,36 @@ class ClientApp(App):
 
         if self.input_mode == "CMD":
             await self.handle_internal_command(text.strip())
-            self.enter_normal_mode()
+            if self.was_in_selection_mode:
+                self.enter_selection_mode()
+            else:
+                self.enter_normal_mode()
             return
 
         if self.input_mode == "BASH":
             content = text.strip()
             self.history.add(content)
             # No longer intercepting 'cd' here; it will be handled by the server's master shell.
-            await self.send_message({"type": "submit", "mode": "CMD", "content": content, "cwd": os.getcwd()})
+            await self.send_message({
+                "type": "submit",
+                "mode": "CMD",
+                "content": content,
+                "cwd": os.getcwd(),
+                "insert_after": self.insert_after_id
+            })
         elif self.input_mode == "NOTE":
-            await self.send_message({"type": "submit", "mode": "NOTE", "content": text.strip(), "cwd": os.getcwd()})
+            await self.send_message({
+                "type": "submit",
+                "mode": "NOTE",
+                "content": text.strip(),
+                "cwd": os.getcwd(),
+                "insert_after": self.insert_after_id
+            })
 
-        self.enter_normal_mode()
+        if self.was_in_selection_mode:
+            self.enter_selection_mode()
+        else:
+            self.enter_normal_mode()
 
     async def handle_internal_command(self, cmd_line):
         parts = cmd_line.split(" ", 1)
@@ -983,7 +1050,9 @@ class ClientApp(App):
             self.update_palette(self.query_one("#main_input").text)
 
     def on_key(self, event: events.Key):
-        if event.key == "escape": self.enter_normal_mode(); return
+        if event.key == "escape":
+            self.action_esc_pressed()
+            return
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
         if self.input_mode == "NORMAL":
             if event.character == "!": self.enter_input_mode(prefix="!"); event.stop(); event.prevent_default()
@@ -1012,6 +1081,7 @@ class ClientApp(App):
                  idx = blocks.index(focused) if focused in blocks else 0
                  new_idx = max(0, min(len(blocks)-1, idx + (count if event.key in ("down", "j") else -count)))
                  blocks[new_idx].focus(); blocks[new_idx].scroll_visible()
+                 self.last_selected_block_id = blocks[new_idx].block_id
             elif event.key == "x": asyncio.create_task(self.action_delete_block())
             elif event.key == "r": asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
             elif event.key == "y":
@@ -1028,28 +1098,36 @@ class ClientApp(App):
             elif event.key in ("ctrl+up", "alt+up"): asyncio.create_task(self.action_move_up())
             elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
+            focused = self.focused
             if event.key == "ctrl+escape":
-                self.enter_normal_mode()
+                if self.was_in_selection_mode:
+                    self.enter_selection_mode()
+                else:
+                    self.enter_normal_mode()
                 return
 
             # Map common keys to ANSI sequences
             # Applications like 'less' often expect application mode sequences (ESC O A)
             # if they enable DECCKM. Standard mode is (ESC [ A).
             # We use a helper to check if DECCKM is enabled via pyte's mode set.
-            # For now, we use ESC [ as it is more common, but let's try a hybrid or
-            # better yet, the sequence that fixes 'less' scrolling.
-            # The user said HJ KL works in less, but arrows don't.
-            # In many terminals, Application mode is the one that causes issues if not handled.
-            # Let's switch back to standard ESC [ and see if it helps.
+            # If DECCKM (Cursor Keys Mode) is enabled, we should send ESC O sequences
+            # instead of ESC [ for arrow keys. This is often required by tools like 'less'.
+            # In pyte, private modes are stored as (mode_number << 5) in the mode set.
+            # DECCKM is Private Mode 1, so we check for (1 << 5) which is 32.
+            app_mode = False
+            if isinstance(focused, CommandBlock):
+                app_mode = (1 << 5) in focused.terminal_screen.mode
+            key_prefix = "\x1bO" if app_mode else "\x1b["
+
             key_map = {
                 "enter": "\r",
                 "backspace": "\x7f",
                 "tab": "\t",
                 "escape": "\x1b",
-                "up": "\x1b[A",
-                "down": "\x1b[B",
-                "right": "\x1b[C",
-                "left": "\x1b[D",
+                "up": f"{key_prefix}A",
+                "down": f"{key_prefix}B",
+                "right": f"{key_prefix}C",
+                "left": f"{key_prefix}D",
                 "home": "\x1b[H",
                 "end": "\x1b[F",
                 "pageup": "\x1b[5~",
