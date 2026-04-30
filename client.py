@@ -1050,7 +1050,7 @@ class ClientApp(App):
             self.update_palette(self.query_one("#main_input").text)
 
     def on_key(self, event: events.Key):
-        if event.key == "escape":
+        if event.key == "escape" and self.app.input_mode != "CONTROL":
             self.action_esc_pressed()
             return
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
