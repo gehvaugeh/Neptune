@@ -1095,6 +1095,7 @@ class ClientApp(App):
             elif event.key in ("ctrl+up", "alt+up"): asyncio.create_task(self.action_move_up())
             elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
+            focused = self.focused
             if event.key == "ctrl+escape":
                 self.enter_normal_mode()
                 return
@@ -1107,7 +1108,9 @@ class ClientApp(App):
             # instead of ESC [ for arrow keys. This is often required by tools like 'less'.
             # In pyte, private modes are stored as (mode_number << 5) in the mode set.
             # DECCKM is Private Mode 1, so we check for (1 << 5) which is 32.
-            app_mode = (1 << 5) in focused.terminal_screen.mode
+            app_mode = False
+            if isinstance(focused, CommandBlock):
+                app_mode = (1 << 5) in focused.terminal_screen.mode
             key_prefix = "\x1bO" if app_mode else "\x1b["
 
             key_map = {
