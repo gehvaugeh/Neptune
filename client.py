@@ -861,7 +861,10 @@ class ClientApp(App):
 
     @on(Input.Submitted, "#filter_input")
     def filter_submitted(self, event: Input.Submitted):
-        self.enter_normal_mode()
+        if not event.value.strip():
+            self.action_remove_filter()
+        else:
+            self.enter_normal_mode()
 
     @on(Input.Changed, "#filter_input")
     def filter_blocks(self, event: Input.Changed):
@@ -873,9 +876,8 @@ class ClientApp(App):
             self._filter_single_block(block, query)
 
     def _filter_single_block(self, block, query: str):
-        query = query.lower()
-        search_text = (block.content + getattr(block, 'full_output', '')).lower()
-        if not query or query in search_text:
+        search_text = block.content + getattr(block, 'full_output', '')
+        if fuzzy_match(query, search_text):
             block.remove_class("filtered-out")
         else:
             block.add_class("filtered-out")
@@ -1074,6 +1076,7 @@ class ClientApp(App):
             elif event.character == ";": self.enter_input_mode(prefix=";"); event.stop(); event.prevent_default()
             elif event.character == "s": self.enter_selection_mode(); event.stop(); event.prevent_default()
         elif self.input_mode in ("BASH", "CMD", "NOTE", "INPUT"):
+            if event.key == "alt+f": self.action_remove_filter(); return
             vis = p.has_class("visible")
             if event.key == "ctrl+p":
                 event.prevent_default()
@@ -1086,6 +1089,7 @@ class ClientApp(App):
                 if not vis: p.add_class("visible"); self.update_palette(inp.text)
                 else: self.sync_input(); p.remove_class("visible")
         elif self.input_mode == "SELECTION":
+            if event.key == "alt+f": self.action_remove_filter(); return
             focused = self.focused; blocks = [c for c in self.query_one("#command_history").children if isinstance(c, BaseBlock) and not c.has_class("filtered-out")]
             if event.character and event.character.isdigit() and (event.character != "0" or self.count_str): self.count_str += event.character; return
             count, self.count_str = int(self.count_str) if self.count_str else 1, ""
