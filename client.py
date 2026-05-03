@@ -804,10 +804,6 @@ class ClientApp(App):
             self.enter_normal_mode()
             return
 
-        if not bar.has_class("hidden"):
-            self.action_toggle_filter()
-            return
-
         if self.input_mode == "SELECTION":
             self.was_in_selection_mode = False
             self.enter_normal_mode()
@@ -818,7 +814,6 @@ class ClientApp(App):
                 self.enter_normal_mode()
         else:
             self.enter_normal_mode()
-
 
     def enter_normal_mode(self):
         if self.input_mode == "CONTROL":
