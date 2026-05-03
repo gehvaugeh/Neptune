@@ -496,7 +496,7 @@ class ClientApp(App):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+f", "toggle_filter", "Filter"),
-        Binding("alt+f", "remove_filter", "Remove Filter"),
+        Binding("ctrl+g", "remove_filter", "Remove Filter"),
         Binding("escape", "esc_pressed", "Back/Clear")
     ]
 
@@ -838,11 +838,13 @@ class ClientApp(App):
 
     def action_remove_filter(self):
         bar = self.query_one("#filter_bar")
+        inp = self.query_one("#filter_input")
         bar.add_class("hidden")
-        self.query_one("#filter_input").value = ""
+        inp.value = ""
         for block in self.blocks.values():
             block.remove_class("filtered-out")
-        self.enter_normal_mode()
+        if self.focused == inp:
+            self.enter_normal_mode()
 
     def action_toggle_filter(self):
         bar = self.query_one("#filter_bar")
@@ -1069,7 +1071,8 @@ class ClientApp(App):
 
     def on_key(self, event: events.Key):
         if event.key == "escape": self.action_esc_pressed(); return
-        if event.key == "alt+f": self.action_remove_filter(); return
+        if event.key == "ctrl+g" and self.input_mode != "CONTROL":
+            self.action_remove_filter(); return
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
         if self.input_mode == "NORMAL":
             if event.character == "!": self.enter_input_mode(prefix="!"); event.stop(); event.prevent_default()
