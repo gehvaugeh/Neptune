@@ -112,7 +112,8 @@ class TerminalOutput(Widget):
     def update(self, rich_text: Text, cache_key: Any):
         self._rich_text = rich_text
         self._last_render_key = cache_key
-        self.refresh()
+        # Ensure the parent container knows the content size might have changed
+        self.refresh(layout=True)
 
     def render(self) -> Text:
         return self._rich_text
