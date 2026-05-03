@@ -1099,7 +1099,8 @@ class ClientApp(App):
             elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
             focused = self.focused
-            if event.key == "alt+escape":
+            # Multiple escape hatches for terminal compatibility (e.g. Termux, Windows Terminal)
+            if event.key in ("alt+escape", "ctrl+alt+e", "ctrl+backslash"):
                 if self.was_in_selection_mode:
                     self.enter_selection_mode()
                 else:
