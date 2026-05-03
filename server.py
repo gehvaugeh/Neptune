@@ -503,6 +503,19 @@ class Server:
     async def master_shell_reader(self):
         loop = asyncio.get_event_loop()
         buffer = ""
+        # Batching state
+        unbroadcasted = ""
+        last_broadcast_time = 0
+        batch_interval = 0.02 # 20ms batching for rapid output
+        flush_timer = None
+
+        async def flush_unbroadcasted(active_id):
+            nonlocal unbroadcasted, last_broadcast_time, flush_timer
+            flush_timer = None
+            if unbroadcasted:
+                await self.broadcast({"type": "output", "block_id": active_id, "data": unbroadcasted})
+                unbroadcasted = ""
+                last_broadcast_time = loop.time()
 
         try:
             while True:
@@ -523,6 +536,7 @@ class Server:
 
                     if active_block_id:
                         block = self.get_block(active_block_id)
+
                         if active_sentinel:
                             while True:
                                 # Look for status sentinel between \x1e and \x1f
@@ -533,9 +547,13 @@ class Server:
 
                                     # Any output before the status sentinel is part of the command's stream
                                     before_sentinel = buffer[:match.start()]
-                                    if block and before_sentinel:
-                                        block["output"] += before_sentinel
-                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
+                                    if block and (unbroadcasted or before_sentinel):
+                                        to_send = unbroadcasted + before_sentinel
+                                        block["output"] += to_send
+                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+
+                                    unbroadcasted = ""
+                                    last_broadcast_time = loop.time()
 
                                     exit_code = int(match.group(1))
                                     new_cwd = match.group(2).strip()
@@ -558,14 +576,21 @@ class Server:
                                         if buffer:
                                             if block:
                                                 block["output"] += buffer
-                                                await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
+                                                unbroadcasted += buffer
+                                                now = loop.time()
+                                                if now - last_broadcast_time > batch_interval or len(unbroadcasted) > 8192:
+                                                    await flush_unbroadcasted(active_block_id)
+                                                elif not flush_timer:
+                                                    flush_timer = loop.call_later(batch_interval,
+                                                        lambda: asyncio.create_task(flush_unbroadcasted(active_block_id)))
                                             buffer = ""
                                         break
                                     elif s_idx > 0:
                                         to_send = buffer[:s_idx]
                                         if block:
                                             block["output"] += to_send
-                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                            unbroadcasted += to_send
+                                            await flush_unbroadcasted(active_block_id)
                                         buffer = buffer[s_idx:]
                                         # Now buffer starts with \x1e, we wait for more data to match pattern
                                         break
@@ -577,19 +602,35 @@ class Server:
                                              to_send = buffer[:1]
                                              if block:
                                                  block["output"] += to_send
-                                                 await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                                 unbroadcasted += to_send
+                                                 await flush_unbroadcasted(active_block_id)
                                              buffer = buffer[1:]
                                         break
                         else:
-                            # No sentinel yet, just stream output
+                            # No sentinel yet (streaming command output)
                             if buffer:
                                 if block:
                                     block["output"] += buffer
-                                    await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
-                                buffer = ""
+                                    unbroadcasted += buffer
+                                    buffer = ""
+
+                                    now = loop.time()
+                                    if now - last_broadcast_time > batch_interval or len(unbroadcasted) > 8192:
+                                        await flush_unbroadcasted(active_block_id)
+                                    elif not flush_timer:
+                                        flush_timer = loop.call_later(batch_interval,
+                                            lambda: asyncio.create_task(flush_unbroadcasted(active_block_id)))
+                                    else:
+                                        # Set a timer to flush eventually if no more data arrives
+                                        flush_timer = loop.call_later(batch_interval,
+                                            lambda: asyncio.create_task(flush_unbroadcasted(active_block_id)))
+                                else:
+                                    buffer = ""
+                                    unbroadcasted = ""
                     else:
                         # No active block, discard buffer to avoid leak
                         buffer = ""
+                        unbroadcasted = ""
                 except OSError:
                     logging.info("Master shell PTY error/closed")
                     break
