@@ -342,8 +342,29 @@ class Server:
                         await self.broadcast_queue_status()
 
                 elif msg_type == "clear_session":
+                    logging.info(f"Clear session request from {user_id}")
+                    # 1. Kill any running process
+                    await self.terminate_foreground_process()
+
+                    # 2. Reset blocks and queue
                     self.blocks = []
+                    async with self.queue_condition:
+                        self.command_queue = []
+                    self.marked_for_deletion.clear()
+
+                    # 3. Reset execution state
+                    self.current_block_id = None
+                    self.control_block_id = None
+                    self.current_sentinel = None
+
+                    # 4. Reset shell working directory to initial state
+                    initial_cwd = os.getcwd()
+                    os.write(self.master_fd, f"cd {initial_cwd}\n".encode())
+                    self.shell_cwd = initial_cwd
+
+                    # 5. Broadcast changes
                     await self.broadcast({"type": "reorder", "blocks": self.blocks})
+                    await self.broadcast_queue_status()
 
                 elif msg_type == "import_blocks":
                     new_blocks = msg.get("blocks")

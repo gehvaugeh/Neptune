@@ -6,11 +6,21 @@ import time
 import argparse
 import logging
 import pyte
+
+# Monkeypatch pyte to fix: TypeError: Screen.report_device_status() got an unexpected keyword argument 'private'
+# This happens in some environments (like Termux) when tmux or other tools send certain escape sequences.
+_original_report_device_status = pyte.Screen.report_device_status
+def _patched_report_device_status(self, *args, **kwargs):
+    kwargs.pop('private', None)
+    return _original_report_device_status(self, *args, **kwargs)
+pyte.Screen.report_device_status = _patched_report_device_status
+
 from typing import List, Dict, Any
 from collections import namedtuple
 
 # Define FakeChar globally for performance and consistency
 FakeChar = namedtuple("FakeChar", ["fg", "bg", "bold", "italics", "underscore", "reverse"])
+
 
 from rich.text import Text
 from rich.style import Style
@@ -579,6 +589,7 @@ class ClientApp(App):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+f", "toggle_filter", "Filter"),
+        Binding("ctrl+g", "remove_filter", "Remove Filter"),
         Binding("escape", "esc_pressed", "Back/Clear")
     ]
 
@@ -596,6 +607,7 @@ class ClientApp(App):
         self.users = {}
         self.reader = None
         self.writer = None
+        self.previous_filter = ""
         self._suppress_search = False
         self._filter_timer = None
         self.workflows = load_workflows()
@@ -860,12 +872,22 @@ class ClientApp(App):
         if data["locked_by"]:
                 user_info = self.users.get(data["locked_by"], {})
                 new_block.update_lock(data["locked_by"], user_info.get("color", "white"))
+
+        # Apply current filter to the new block
+        inp = self.query_one("#filter_input")
+        self._filter_single_block(new_block, inp.value)
+
         self.call_after_refresh(new_block.scroll_visible)
 
     def action_esc_pressed(self):
         bar = self.query_one("#filter_bar")
-        if not bar.has_class("hidden"):
-            self.action_toggle_filter()
+        inp = self.query_one("#filter_input")
+
+        if not bar.has_class("hidden") and self.focused == inp:
+            inp.value = self.previous_filter
+            if not inp.value:
+                bar.add_class("hidden")
+            self.enter_normal_mode()
             return
 
         if self.input_mode == "SELECTION":
@@ -896,15 +918,19 @@ class ClientApp(App):
         for b in self.blocks.values():
              if isinstance(b, CommandBlock): b.render_terminal()
         try:
-            self.screen.focus()
-        except: pass
+            self.query_one("#bottom_dock").focus()
+        except:
+            try: self.screen.focus()
+            except: pass
 
     def enter_selection_mode(self):
+        if self.input_mode == "CONTROL":
+            asyncio.create_task(self.send_message({"type": "control_stop"}))
         self.input_mode = "SELECTION"
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
         container = self.query_one("#command_history")
-        blocks = [c for c in container.children if isinstance(c, BaseBlock)]
+        blocks = [c for c in container.children if isinstance(c, BaseBlock) and not c.has_class("filtered-out")]
         if blocks:
             target = blocks[-1]
             if self.last_selected_block_id in self.blocks:
@@ -943,17 +969,36 @@ class ClientApp(App):
         inp.language = "bash" if prefix in ("!", ":") else "markdown"
         inp.focus()
 
+    def action_remove_filter(self):
+        bar = self.query_one("#filter_bar")
+        inp = self.query_one("#filter_input")
+        bar.add_class("hidden")
+        inp.value = ""
+        for block in self.blocks.values():
+            block.remove_class("filtered-out")
+        if self.focused == inp:
+            self.enter_normal_mode()
+
     def action_toggle_filter(self):
         bar = self.query_one("#filter_bar")
-        if bar.has_class("hidden"):
+        inp = self.query_one("#filter_input")
+        if bar.has_class("hidden") or self.focused != inp:
+            self.previous_filter = inp.value
             bar.remove_class("hidden")
-            self.query_one("#filter_input").focus()
+            inp.focus()
             self.input_mode = "INPUT"
             self.update_mode_label()
         else:
             bar.add_class("hidden")
-            self.query_one("#filter_input").value = ""
+            inp.value = ""
             for block in self.blocks.values(): block.remove_class("filtered-out")
+            self.enter_normal_mode()
+
+    @on(Input.Submitted, "#filter_input")
+    def filter_submitted(self, event: Input.Submitted):
+        if not event.value.strip():
+            self.action_remove_filter()
+        else:
             self.enter_normal_mode()
 
     @on(Input.Changed, "#filter_input")
@@ -975,10 +1020,12 @@ class ClientApp(App):
                 block._search_text = text.lower()
                 block._search_text_dirty = False
 
-            if not query or query in block._search_text:
+            # Use fuzzy match for better search
+            if not query or fuzzy_match(query, block._search_text):
                 block.remove_class("filtered-out")
             else:
                 block.add_class("filtered-out")
+
 
     def update_mode_label(self):
         if not hasattr(self, "mode_label"): return
@@ -1197,9 +1244,14 @@ class ClientApp(App):
                     return
                 self.last_escape_time = now
 
-        if event.key == "escape" and self.app.input_mode != "CONTROL":
+        if event.key == "escape" and self.input_mode != "CONTROL":
             self.action_esc_pressed()
             return
+
+        if event.key == "ctrl+g" and self.input_mode != "CONTROL":
+            self.action_remove_filter()
+            return
+
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
         if self.input_mode == "NORMAL":
             if event.character == "!": self.enter_input_mode(prefix="!"); event.stop(); event.prevent_default()
@@ -1219,14 +1271,17 @@ class ClientApp(App):
                 if not vis: p.add_class("visible"); self.update_palette(inp.text)
                 else: self.sync_input(); p.remove_class("visible")
         elif self.input_mode == "SELECTION":
-            focused = self.focused; blocks = [c for c in self.query_one("#command_history").children if isinstance(c, BaseBlock)]
+            focused = self.focused; blocks = [c for c in self.query_one("#command_history").children if isinstance(c, BaseBlock) and not c.has_class("filtered-out")]
             if event.character and event.character.isdigit() and (event.character != "0" or self.count_str): self.count_str += event.character; return
             count, self.count_str = int(self.count_str) if self.count_str else 1, ""
             if event.character in (":", "!", ";"): self.enter_input_mode(prefix=event.character); return
             if event.key in ("up", "down", "k", "j") and not (event.key in ("j", "enter") and isinstance(focused, CommandBlock) and not focused.is_editing):
                  if not blocks: return
-                 idx = blocks.index(focused) if focused in blocks else 0
-                 new_idx = max(0, min(len(blocks)-1, idx + (count if event.key in ("down", "j") else -count)))
+                 idx = blocks.index(focused) if focused in blocks else -1
+                 if event.key in ("down", "j"):
+                    new_idx = min(len(blocks)-1, idx + count) if idx != -1 else 0
+                 else:
+                    new_idx = max(0, idx - count) if idx != -1 else len(blocks) - 1
                  blocks[new_idx].focus(); blocks[new_idx].scroll_visible()
                  self.last_selected_block_id = blocks[new_idx].block_id
             elif event.key == "x": asyncio.create_task(self.action_delete_block())
