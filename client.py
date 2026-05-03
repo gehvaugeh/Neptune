@@ -6,7 +6,7 @@ import time
 import argparse
 import logging
 import pyte
-from typing import List, Dict
+from typing import List, Dict, Any
 from collections import namedtuple
 
 # Define FakeChar globally for performance and consistency
@@ -16,6 +16,7 @@ from rich.text import Text
 from rich.style import Style
 from rich.markup import escape
 from textual.app import App, ComposeResult
+from textual.widget import Widget
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, ScrollableContainer
@@ -101,6 +102,21 @@ class SaveWorkflowModal(ModalScreen):
 
 # --- BLOCKS ---
 
+class TerminalOutput(Widget):
+    """A high-performance terminal output widget."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._rich_text = Text()
+        self._last_render_key = None
+
+    def update(self, rich_text: Text, cache_key: Any):
+        self._rich_text = rich_text
+        self._last_render_key = cache_key
+        self.refresh()
+
+    def render(self) -> Text:
+        return self._rich_text
+
 class BlockEditor(TextArea):
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
@@ -131,6 +147,8 @@ class BaseBlock(Static):
         self.locked_by = None
         self.lock_color = None
         self.last_click_time = 0
+        self._search_text = ""
+        self._search_text_dirty = True
 
     def update_lock(self, user_id, user_color):
         self.locked_by = user_id
@@ -265,7 +283,7 @@ class CommandBlock(BaseBlock):
             yield Label("➜", classes="prompt-symbol")
             yield Label(f"[bold blue]{escape(self.cwd)}[/]\n[white]{escape(self.content)}[/]", id="cmd_label", classes=label_classes)
             yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
-        yield Static("", id="output", classes="block-output", markup=False)
+        yield TerminalOutput(id="output", classes="block-output")
         yield Label("[grey44]Ready[/]", id="info", classes="block-info")
 
     def on_resize(self, event: events.Resize) -> None:
@@ -280,6 +298,10 @@ class CommandBlock(BaseBlock):
         if len(self.full_output) > 1_000_000:
             self.full_output = self.full_output[-1_000_000:]
 
+        self._search_text_dirty = True
+
+        # Keep terminal emulation in the main thread for thread-safety with pyte,
+        # but the actual UI rendering is throttled separately.
         self.stream.feed(text)
         if self.is_mounted:
             self.trigger_render()
@@ -404,9 +426,8 @@ class CommandBlock(BaseBlock):
         # Optimize: Only update if content or cursor changed
         out_widget = self.query_one("#output")
         cache_key = (str(rich_text), cursor_x, cursor_y, show_cursor)
-        if getattr(out_widget, "_last_render_key", None) != cache_key:
-            out_widget.update(rich_text)
-            out_widget._last_render_key = cache_key
+        if out_widget._last_render_key != cache_key:
+            out_widget.update(rich_text, cache_key)
 
         if self._color_error:
             info = self.query_one("#info")
@@ -562,6 +583,7 @@ class ClientApp(App):
         self.reader = None
         self.writer = None
         self._suppress_search = False
+        self._filter_timer = None
         self.workflows = load_workflows()
         self.yank_buffer = None
         self.count_str = ""
@@ -882,11 +904,27 @@ class ClientApp(App):
 
     @on(Input.Changed, "#filter_input")
     def filter_blocks(self, event: Input.Changed):
-        query = event.value.lower()
+        if self._filter_timer:
+            self._filter_timer.cancel()
+
+        # Debounce filtering for better responsiveness
+        self._filter_timer = asyncio.get_event_loop().call_later(
+            0.1, lambda: asyncio.create_task(self._run_filter(event.value.lower()))
+        )
+
+    async def _run_filter(self, query: str):
         for block in self.blocks.values():
-            search_text = (block.content + block.full_output).lower() if isinstance(block, CommandBlock) else block.content.lower()
-            if not query or query in search_text: block.remove_class("filtered-out")
-            else: block.add_class("filtered-out")
+            if block._search_text_dirty:
+                text = block.content
+                if hasattr(block, "full_output"):
+                    text += block.full_output
+                block._search_text = text.lower()
+                block._search_text_dirty = False
+
+            if not query or query in block._search_text:
+                block.remove_class("filtered-out")
+            else:
+                block.add_class("filtered-out")
 
     def update_mode_label(self):
         if not hasattr(self, "mode_label"): return

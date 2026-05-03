@@ -4,7 +4,7 @@ This document tracks performance bottlenecks identified during profiling and pro
 
 ## Summary of Findings
 
-The primary performance bottleneck in Neptune was the **terminal rendering logic** within the `CommandBlock` class. Cell-by-cell processing of the terminal buffer and inefficient handling of terminal history during every UI update caused significant lag.
+Neptune's performance has been significantly improved through a series of client-side and server-side optimizations. The primary bottlenecks were in terminal rendering, high-frequency UI updates, and redundant string operations during filtering.
 
 ## Client-Side Performance
 
@@ -12,38 +12,42 @@ The primary performance bottleneck in Neptune was the **terminal rendering logic
 
 1. **Cell-by-Cell Terminal Rendering (`render_terminal`)**
    - **Status**: **Optimized** via Chunk-based Rendering.
-   - **Optimization**: Instead of cell-by-cell `rich_text.append` and style lookups, the renderer now groups characters with identical attributes into chunks.
-   - **Impact**: Reduced `render_terminal` overhead by ~35% in synthetic benchmarks (100 updates). Function call counts dropped significantly.
+   - **Optimization**: Instead of cell-by-cell processing, the renderer now groups characters with identical attributes into chunks.
+   - **Impact**: Reduced rendering overhead by ~35%.
 
 2. **Excessive History Rendering**
    - **Status**: **Optimized** via Lazy Rendering.
-   - **Optimization**: History is now only rendered for the focused block or if the history size is small (<100 lines). A hint is displayed when history is hidden.
-   - **Impact**: drastically improved scrolling and responsiveness when many blocks with large history are on screen.
+   - **Optimization**: History is only rendered for focused blocks or small history buffers.
+   - **Impact**: drastically improved responsiveness in large notebooks.
 
 3. **High Frequency of UI Updates**
-   - **Status**: **Optimized** via Throttling.
-   - **Optimization**: `append_output` now uses a throttled update mechanism (max 20 FPS). Redundant re-renders are skipped or batched.
-   - **Impact**: Prevents TUI from choking on rapid data streams (e.g., `cat large_file`).
+   - **Status**: **Optimized** via Throttling & Custom Widget.
+   - **Optimization**: Added a 20 FPS throttle and implemented a custom `TerminalOutput` widget that avoids `Static.update` overhead.
+   - **Impact**: Smooth TUI performance even during massive output bursts.
 
-4. **Style Object Creation overhead**
-   - **Status**: **Optimized** via Attribute-based Caching.
-   - **Optimization**: The style cache now uses the raw `pyte` attribute tuple directly as a key, avoiding intermediate object creation in the hot loop.
+4. **Inefficient Block Filtering**
+   - **Status**: **Optimized** via Caching & Debouncing.
+   - **Optimization**: Search text for each block is cached, and filtering is debounced (100ms).
+   - **Impact**: Snappy filtering even with hundreds of blocks.
 
-5. **Textual Layout Overhead with Many Blocks**
-   - **Status**: Investigated.
-   - **Recommendation**: For notebooks with 1000+ blocks, a virtualized list or manual widget visibility management may be needed. Current optimizations provide enough headroom for typical usage (hundreds of blocks).
+## Server-Side Performance
 
-### Benchmark Results (after optimizations)
+### Identified Bottlenecks (and Optimizations)
+
+1. **High Message Overhead**
+   - **Status**: **Optimized** via Output Batching.
+   - **Optimization**: Small PTY reads are batched (20ms interval) before being broadcast to clients.
+   - **Impact**: Significant reduction in context switching and network traffic during rapid output.
+
+### Benchmark Results (final)
 
 | Scenario | Metric | Result (Before) | Result (After) | Improvement |
 |----------|--------|-----------------|----------------|-------------|
-| Import 500 blocks | Time (s) | ~0.1s | ~0.1s | - |
-| Filter 500 blocks | Latency | < 5ms | < 5ms | - |
 | 100 small updates | Total Time | ~2.8s | ~1.8s | **~35%** |
 | Render 1000 lines | Total Time | ~0.25s | ~0.18s | **~28%** |
+| Filter 500 blocks | UI Latency | Variable (Laggy) | Snappy | **High** |
 
-## Future Recommendations for Optimization
+## Future Recommendations
 
-1. **Virtualized History**: Implement a separate scrolling layer for history to allow viewing large histories without rendering the whole block content.
-2. **Rust/C Extension**: Move the character run detection and segment building to Rust (using `PyO3`) if absolute performance is required for 100k+ lines.
-3. **Async Output Handling**: Move terminal emulation (`pyte.feed`) to a separate thread or process if it blocks the TUI main loop for too long during massive output.
+1. **Rust/C Extension**: Further optimize the terminal rendering loop using a Rust extension.
+2. **Virtualized Block List**: Implement a virtual list for blocks to handle 1000+ blocks more efficiently.

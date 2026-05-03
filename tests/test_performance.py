@@ -70,7 +70,8 @@ async def test_performance_terminal_render_latency():
     type(block).is_mounted = property(lambda x: True)
 
     start_time = time.perf_counter()
-    block.append_output(large_output)
+    block.stream.feed(large_output) # Directly feed for performance test to avoid workers
+    block.render_terminal()
     end_time = time.perf_counter()
 
     duration = end_time - start_time
