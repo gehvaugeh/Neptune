@@ -313,18 +313,22 @@ class CommandBlock(BaseBlock):
             self.trigger_render()
 
     def trigger_render(self):
+        # Interactive mode (CONTROL) should be very responsive,
+        # so we reduce throttling or disable it.
+        throttle = 0.01 if self.app_ref.input_mode == "CONTROL" else self._render_throttle
+
         now = time.time()
-        if now - self._last_render_time > self._render_throttle:
+        if now - self._last_render_time > throttle:
             self.render_terminal()
             self._last_render_time = now
             self._needs_render = False
         else:
             self._needs_render = True
             if not self._render_task or self._render_task.done():
-                self._render_task = asyncio.create_task(self._throttled_render())
+                self._render_task = asyncio.create_task(self._throttled_render(throttle))
 
-    async def _throttled_render(self):
-        await asyncio.sleep(self._render_throttle)
+    async def _throttled_render(self, throttle):
+        await asyncio.sleep(throttle)
         if self._needs_render and self.is_mounted:
             self.render_terminal()
             self._last_render_time = time.time()
@@ -408,23 +412,26 @@ class CommandBlock(BaseBlock):
 
         # Find the last non-empty line (considering data and non-default background/formatting)
         # We always do this compact rendering to avoid empty trailing space
+        # EXCEPT in interactive mode or when running where we want the full terminal height.
         end_y = self.terminal_screen.lines
-        for y in range(self.terminal_screen.lines - 1, -1, -1):
-            row = self.terminal_screen.buffer[y]
-            is_empty = True
-            if y == cursor_y and show_cursor:
-                 is_empty = False
+        is_running = getattr(self, "_last_status", "") == "running"
+        if self.app_ref.input_mode != "CONTROL" and not is_running:
+            for y in range(self.terminal_screen.lines - 1, -1, -1):
+                row = self.terminal_screen.buffer[y]
+                is_empty = True
+                if y == cursor_y and show_cursor:
+                     is_empty = False
+                else:
+                    for x in range(self.terminal_screen.columns):
+                        char = row[x]
+                        if char.data != ' ' or char.bg != 'default' or char.reverse:
+                            is_empty = False
+                            break
+                if not is_empty:
+                    end_y = y + 1
+                    break
             else:
-                for x in range(self.terminal_screen.columns):
-                    char = row[x]
-                    if char.data != ' ' or char.bg != 'default' or char.reverse:
-                        is_empty = False
-                        break
-            if not is_empty:
-                end_y = y + 1
-                break
-        else:
-            end_y = 1 # Keep at least one line
+                end_y = 1 # Keep at least one line
 
         for y in range(end_y):
             append_line(y, self.terminal_screen.buffer[y])
@@ -444,10 +451,8 @@ class CommandBlock(BaseBlock):
         # Cache key based on char attributes that affect style
         cache_key = (char.fg, char.bg, char.bold, char.italics, char.underscore, char.reverse)
         if cache_key in self._style_cache:
-            style = self._style_cache[cache_key]
-            # In some older versions of the code, cache might have been (style, is_err)
-            # but we standardized on style only for normal flow, and _color_error check
-            # will happen during Style creation.
+            style, is_err = self._style_cache[cache_key]
+            if is_err: self._color_error = True
             return style
 
         def map_color(c):
@@ -493,7 +498,7 @@ class CommandBlock(BaseBlock):
             if char.reverse: parts.append("reverse")
             style = Style.parse(" ".join(parts)) if parts else Style.null()
 
-        self._style_cache[cache_key] = style
+        self._style_cache[cache_key] = (style, is_err)
         return style
 
     def update_status(self, status):
@@ -1286,6 +1291,9 @@ class ClientApp(App):
 
             if data:
                 asyncio.create_task(self.send_message({"type": "terminal_input", "data": data}))
+                # Manually trigger a render refresh to show typed characters/cursor move immediately
+                if isinstance(focused, CommandBlock):
+                    focused.trigger_render()
                 event.stop()
                 event.prevent_default()
 

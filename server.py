@@ -507,9 +507,11 @@ class Server:
         unbroadcasted = ""
         last_broadcast_time = 0
         batch_interval = 0.02 # 20ms batching for rapid output
+        flush_timer = None
 
         async def flush_unbroadcasted(active_id):
-            nonlocal unbroadcasted, last_broadcast_time
+            nonlocal unbroadcasted, last_broadcast_time, flush_timer
+            flush_timer = None
             if unbroadcasted:
                 await self.broadcast({"type": "output", "block_id": active_id, "data": unbroadcasted})
                 unbroadcasted = ""
@@ -534,6 +536,7 @@ class Server:
 
                     if active_block_id:
                         block = self.get_block(active_block_id)
+
                         if active_sentinel:
                             while True:
                                 # Look for status sentinel between \x1e and \x1f
@@ -577,6 +580,9 @@ class Server:
                                                 now = loop.time()
                                                 if now - last_broadcast_time > batch_interval or len(unbroadcasted) > 8192:
                                                     await flush_unbroadcasted(active_block_id)
+                                                elif not flush_timer:
+                                                    flush_timer = loop.call_later(batch_interval,
+                                                        lambda: asyncio.create_task(flush_unbroadcasted(active_block_id)))
                                             buffer = ""
                                         break
                                     elif s_idx > 0:
@@ -611,6 +617,13 @@ class Server:
                                     now = loop.time()
                                     if now - last_broadcast_time > batch_interval or len(unbroadcasted) > 8192:
                                         await flush_unbroadcasted(active_block_id)
+                                    elif not flush_timer:
+                                        flush_timer = loop.call_later(batch_interval,
+                                            lambda: asyncio.create_task(flush_unbroadcasted(active_block_id)))
+                                    else:
+                                        # Set a timer to flush eventually if no more data arrives
+                                        flush_timer = loop.call_later(batch_interval,
+                                            lambda: asyncio.create_task(flush_unbroadcasted(active_block_id)))
                                 else:
                                     buffer = ""
                                     unbroadcasted = ""
