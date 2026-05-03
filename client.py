@@ -1069,6 +1069,7 @@ class ClientApp(App):
 
     def on_key(self, event: events.Key):
         if event.key == "escape": self.action_esc_pressed(); return
+        if event.key == "alt+f": self.action_remove_filter(); return
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
         if self.input_mode == "NORMAL":
             if event.character == "!": self.enter_input_mode(prefix="!"); event.stop(); event.prevent_default()
@@ -1076,7 +1077,6 @@ class ClientApp(App):
             elif event.character == ";": self.enter_input_mode(prefix=";"); event.stop(); event.prevent_default()
             elif event.character == "s": self.enter_selection_mode(); event.stop(); event.prevent_default()
         elif self.input_mode in ("BASH", "CMD", "NOTE", "INPUT"):
-            if event.key == "alt+f": self.action_remove_filter(); return
             vis = p.has_class("visible")
             if event.key == "ctrl+p":
                 event.prevent_default()
@@ -1089,7 +1089,6 @@ class ClientApp(App):
                 if not vis: p.add_class("visible"); self.update_palette(inp.text)
                 else: self.sync_input(); p.remove_class("visible")
         elif self.input_mode == "SELECTION":
-            if event.key == "alt+f": self.action_remove_filter(); return
             focused = self.focused; blocks = [c for c in self.query_one("#command_history").children if isinstance(c, BaseBlock) and not c.has_class("filtered-out")]
             if event.character and event.character.isdigit() and (event.character != "0" or self.count_str): self.count_str += event.character; return
             count, self.count_str = int(self.count_str) if self.count_str else 1, ""
