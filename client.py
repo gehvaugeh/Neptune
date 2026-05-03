@@ -6,6 +6,14 @@ import time
 import argparse
 import logging
 import pyte
+# Monkeypatch pyte to fix: TypeError: Screen.report_device_status() got an unexpected keyword argument 'private'
+# This happens in some environments (like Termux) when tmux or other tools send certain escape sequences.
+_original_report_device_status = pyte.Screen.report_device_status
+def _patched_report_device_status(self, *args, **kwargs):
+    kwargs.pop('private', None)
+    return _original_report_device_status(self, *args, **kwargs)
+pyte.Screen.report_device_status = _patched_report_device_status
+
 from typing import List, Dict
 
 from rich.text import Text
@@ -838,6 +846,8 @@ class ClientApp(App):
             except: pass
 
     def enter_selection_mode(self):
+        if self.input_mode == "CONTROL":
+            asyncio.create_task(self.send_message({"type": "control_stop"}))
         self.input_mode = "SELECTION"
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
