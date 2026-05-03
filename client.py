@@ -485,6 +485,7 @@ class ClientApp(App):
         self.was_in_selection_mode = False
         self.insert_after_id = None
         self.count_str = ""
+        self.last_escape_time = 0
         self.available_commands = [
             {"name": "export", "params": "[file]", "desc": "Save current session as a Markdown file"},
             {"name": "import", "params": "[file]", "desc": "Load blocks from an external Markdown file"},
@@ -1050,6 +1051,22 @@ class ClientApp(App):
             self.update_palette(self.query_one("#main_input").text)
 
     def on_key(self, event: events.Key):
+        # Global exit hatch for CONTROL mode (failsafe)
+        if self.input_mode == "CONTROL":
+            # 1. Double Escape within 0.5s
+            if event.key == "escape":
+                now = time.time()
+                if now - self.last_escape_time < 0.5:
+                    self.action_esc_pressed()
+                    event.stop(); event.prevent_default()
+                    return
+                self.last_escape_time = now
+            # 2. Explicit Escape Hatches
+            if event.key in ("alt+escape", "ctrl+alt+e", "ctrl+backslash", "f10", "alt+q", "alt+x"):
+                self.action_esc_pressed()
+                event.stop(); event.prevent_default()
+                return
+
         if event.key == "escape" and self.app.input_mode != "CONTROL":
             self.action_esc_pressed()
             return
@@ -1099,14 +1116,6 @@ class ClientApp(App):
             elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
             focused = self.focused
-            # Multiple escape hatches for terminal compatibility (e.g. Termux, Windows Terminal)
-            if event.key in ("alt+escape", "ctrl+alt+e", "ctrl+backslash"):
-                if self.was_in_selection_mode:
-                    self.enter_selection_mode()
-                else:
-                    self.enter_normal_mode()
-                return
-
             # Map common keys to ANSI sequences
             # Applications like 'less' often expect application mode sequences (ESC O A)
             # if they enable DECCKM. Standard mode is (ESC [ A).
