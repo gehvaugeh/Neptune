@@ -528,6 +528,7 @@ class ClientApp(App):
         self.was_in_selection_mode = False
         self.insert_after_id = None
         self.count_str = ""
+        self.last_escape_time = 0
         self.available_commands = [
             {"name": "export", "params": "[file]", "desc": "Save current session as a Markdown file"},
             {"name": "import", "params": "[file]", "desc": "Load blocks from an external Markdown file"},
@@ -762,7 +763,10 @@ class ClientApp(App):
                 if block.is_editing:
                     await block.toggle_edit(remote=True, restore=True)
             if self.input_mode == "CONTROL":
-                self.enter_normal_mode()
+                if self.was_in_selection_mode:
+                    self.enter_selection_mode()
+                else:
+                    self.enter_normal_mode()
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data["id"]
@@ -1090,7 +1094,18 @@ class ClientApp(App):
             self.update_palette(self.query_one("#main_input").text)
 
     def on_key(self, event: events.Key):
-        if event.key == "escape":
+        # Global exit hatch for CONTROL mode (failsafe)
+        if self.input_mode == "CONTROL":
+            # 1. Double Escape within 0.5s
+            if event.key == "escape":
+                now = time.time()
+                if now - self.last_escape_time < 0.5:
+                    self.action_esc_pressed()
+                    event.stop(); event.prevent_default()
+                    return
+                self.last_escape_time = now
+
+        if event.key == "escape" and self.app.input_mode != "CONTROL":
             self.action_esc_pressed()
             return
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
@@ -1139,10 +1154,6 @@ class ClientApp(App):
             elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
             focused = self.focused
-            if event.key == "ctrl+escape":
-                self.enter_normal_mode()
-                return
-
             # Map common keys to ANSI sequences
             # Applications like 'less' often expect application mode sequences (ESC O A)
             # if they enable DECCKM. Standard mode is (ESC [ A).
