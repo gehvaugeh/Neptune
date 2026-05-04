@@ -1011,20 +1011,24 @@ class ClientApp(App):
             0.1, lambda: asyncio.create_task(self._run_filter(event.value.lower()))
         )
 
+    def _filter_single_block(self, block, query: str):
+        query = query.lower()
+        if block._search_text_dirty:
+            text = block.content
+            if hasattr(block, "full_output"):
+                text += block.full_output
+            block._search_text = text.lower()
+            block._search_text_dirty = False
+
+        if not query or fuzzy_match(query, block._search_text):
+            block.remove_class("filtered-out")
+        else:
+            block.add_class("filtered-out")
+
     async def _run_filter(self, query: str):
         for block in self.blocks.values():
-            if block._search_text_dirty:
-                text = block.content
-                if hasattr(block, "full_output"):
-                    text += block.full_output
-                block._search_text = text.lower()
-                block._search_text_dirty = False
+            self._filter_single_block(block, query)
 
-            # Use fuzzy match for better search
-            if not query or fuzzy_match(query, block._search_text):
-                block.remove_class("filtered-out")
-            else:
-                block.add_class("filtered-out")
 
 
     def update_mode_label(self):
