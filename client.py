@@ -6,13 +6,30 @@ import time
 import argparse
 import logging
 import pyte
-# Monkeypatch pyte to fix: TypeError: Screen.report_device_status() got an unexpected keyword argument 'private'
-# This happens in some environments (like Termux) when tmux or other tools send certain escape sequences.
-_original_report_device_status = pyte.Screen.report_device_status
-def _patched_report_device_status(self, *args, **kwargs):
-    kwargs.pop('private', None)
-    return _original_report_device_status(self, *args, **kwargs)
-pyte.Screen.report_device_status = _patched_report_device_status
+import inspect
+from functools import wraps
+
+# Global Monkeypatch for pyte to handle 'private' keyword argument in CSI sequences.
+# pyte.Stream passes 'private=True' to Screen methods when it encounters CSI sequences starting with '?'.
+# However, many Screen methods (like select_graphic_rendition) do not accept this argument, causing TypeErrors.
+# This patch automatically wraps all Screen/HistoryScreen methods to ignore 'private' if they don't support it.
+def _patch_pyte():
+    for cls in [pyte.Screen, pyte.HistoryScreen]:
+        for name, attr in inspect.getmembers(cls, predicate=inspect.isfunction):
+            if not name.startswith("__"):
+                try:
+                    sig = inspect.signature(attr)
+                    if 'private' not in sig.parameters:
+                        def make_wrapper(func):
+                            @wraps(func)
+                            def wrapper(*args, **kwargs):
+                                kwargs.pop('private', None)
+                                return func(*args, **kwargs)
+                            return wrapper
+                        setattr(cls, name, make_wrapper(attr))
+                except (ValueError, TypeError):
+                    continue
+_patch_pyte()
 
 from typing import List, Dict
 
