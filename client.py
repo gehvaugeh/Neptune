@@ -19,7 +19,8 @@ def _patch_pyte():
             if not name.startswith("__"):
                 try:
                     sig = inspect.signature(attr)
-                    if 'private' not in sig.parameters:
+                    has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    if 'private' not in sig.parameters and not has_kwargs:
                         def make_wrapper(func):
                             @wraps(func)
                             def wrapper(*args, **kwargs):
