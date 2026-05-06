@@ -703,7 +703,10 @@ class ClientApp(App):
                 self.notify(f"User {u_id[:4]} left", severity="information")
 
         elif msg_type == "new_block":
-            await self.create_block(msg.get("block"))
+            block_data = msg.get("block")
+            await self.create_block(block_data)
+            if block_data.get("type") == "CMD":
+                self.history.add(block_data.get("content", ""))
             self.refresh()
 
         elif msg_type == "reorder":
@@ -1306,7 +1309,6 @@ class ClientApp(App):
 
     def on_unmount(self):
         if self.writer: self.writer.close()
-        self.history.save()
 
 from branding import setup_parser
 

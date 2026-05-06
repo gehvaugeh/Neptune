@@ -13,6 +13,7 @@ import re
 import fcntl
 import struct
 from typing import Dict, List, Any, Optional, Tuple
+from common import HISTORY_FILE
 
 # Setup logging
 logging.basicConfig(
@@ -35,9 +36,13 @@ def get_shell():
 DEFAULT_SHELL = get_shell()
 
 class Server:
-    def __init__(self, socket_path=DEFAULT_SOCKET_PATH, enable_hist_expansion=False):
+    def __init__(self, socket_path=DEFAULT_SOCKET_PATH, enable_hist_expansion=False, clean_history=False):
         self.socket_path = socket_path
         self.enable_hist_expansion = enable_hist_expansion
+        self.clean_history = clean_history
+        if self.clean_history and os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, "w") as f:
+                f.truncate(0)
         self.blocks = []  # List of dicts: {id, type, content, cwd, output, status, locked_by}
         self.clients = {} # writer: {id, color, name}
         self.active_processes = {} # block_id: process (maintained for compatibility/tracking)
@@ -359,7 +364,7 @@ class Server:
 
                     # 4. Reset shell working directory to initial state
                     initial_cwd = os.getcwd()
-                    os.write(self.master_fd, f"cd {initial_cwd}\n".encode())
+                    os.write(self.master_fd, f" cd {initial_cwd}\n".encode())
                     self.shell_cwd = initial_cwd
 
                     # 5. Broadcast changes
@@ -494,6 +499,10 @@ class Server:
         env["PROMPT_COMMAND"] = ""
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
+        env["HISTFILE"] = HISTORY_FILE
+        env["HISTCONTROL"] = "ignorespace"
+        env["HISTSIZE"] = "10000"
+        env["HISTFILESIZE"] = "20000"
 
         # Use --noediting to disable readline which can cause issues with echo and escape codes
         self.master_proc = await asyncio.create_subprocess_exec(
@@ -509,8 +518,9 @@ class Server:
 
         # Disable echo and enable job control explicitly
         # Also handle history expansion based on configuration
+        # We prepend spaces to avoid these initialization commands from entering history
         hist_exp = "set -H" if self.enable_hist_expansion else "set +H"
-        os.write(self.master_fd, f"stty -echo\nset -m\n{hist_exp}\n".encode())
+        os.write(self.master_fd, f" stty -echo\n set -m\n {hist_exp}\n set -o history\n history -r\n".encode())
         await asyncio.sleep(0.1)
         try:
             self.master_pgid = os.getpgid(self.master_proc.pid)
@@ -645,6 +655,12 @@ class Server:
                 logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
 
                 try:
+                    # Inject raw command into shell history
+                    # We use ANSI-C quoting to safely handle multi-line commands and special characters.
+                    # We must escape backslashes before single quotes.
+                    hist_cmd = cmd.replace("\\", "\\\\").replace("'", "\\'")
+                    os.write(self.master_fd, f" history -s $'{hist_cmd}'\n".encode())
+
                     # Retrieval of status and CWD
                     # We use non-printable separators to avoid collision with terminal output
                     status_sentinel = f"NEPTUNE_STATUS_{os.urandom(4).hex()}"
@@ -655,9 +671,11 @@ class Server:
 
                     # Combine command and status retrieval into a single write operation.
                     # We use \x1e (Record Separator) and \x1f (Unit Separator)
+                    # We prepend a space to avoid this internal wrapper command appearing in history
                     full_cmd = (
-                        f"eval \"{escaped_cmd}\"; "
-                        f"printf '\\x1e{status_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
+                        f"  eval \"{escaped_cmd}\"; "
+                        f"printf '\\x1e{status_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; "
+                        f"history -a\n"
                     )
                     os.write(self.master_fd, full_cmd.encode())
 
@@ -727,9 +745,14 @@ if __name__ == "__main__":
     parser = setup_parser("Neptune Server")
     parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
     parser.add_argument("--enable-hist-expansion", action="store_true", help="Enable Bash history expansion (e.g. using !)")
+    parser.add_argument("--clean-history", action="store_true", help="Start with a fresh history file")
     args = parser.parse_args()
 
-    server = Server(socket_path=args.socket, enable_hist_expansion=args.enable_hist_expansion)
+    server = Server(
+        socket_path=args.socket,
+        enable_hist_expansion=args.enable_hist_expansion,
+        clean_history=args.clean_history
+    )
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:
