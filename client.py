@@ -6,14 +6,38 @@ import time
 import argparse
 import logging
 import pyte
+import inspect
+from functools import wraps
 
-# Monkeypatch pyte to fix: TypeError: Screen.report_device_status() got an unexpected keyword argument 'private'
-# This happens in some environments (like Termux) when tmux or other tools send certain escape sequences.
-_original_report_device_status = pyte.Screen.report_device_status
-def _patched_report_device_status(self, *args, **kwargs):
-    kwargs.pop('private', None)
-    return _original_report_device_status(self, *args, **kwargs)
-pyte.Screen.report_device_status = _patched_report_device_status
+# Global Monkeypatch for pyte to handle 'private' keyword argument in CSI sequences.
+# pyte.Stream passes 'private=True' to Screen methods when it encounters CSI sequences starting with '?'.
+# However, many Screen methods (like select_graphic_rendition) do not accept this argument, causing TypeErrors.
+# This patch automatically wraps all Screen/HistoryScreen methods to ignore 'private' if they don't support it.
+def _patch_pyte():
+    for cls in [pyte.Screen, pyte.HistoryScreen]:
+        for name, attr in inspect.getmembers(cls, predicate=inspect.isfunction):
+            if not name.startswith("__"):
+                try:
+                    sig = inspect.signature(attr)
+                    has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    if 'private' not in sig.parameters and not has_kwargs:
+                        def make_wrapper(func):
+                            @wraps(func)
+                            def wrapper(*args, **kwargs):
+                                kwargs.pop('private', None)
+                                return func(*args, **kwargs)
+                            return wrapper
+                        setattr(cls, name, make_wrapper(attr))
+                except (ValueError, TypeError):
+                    continue
+_patch_pyte()
+
+from typing import List, Dict, Any
+from collections import namedtuple
+
+# Define FakeChar globally for performance and consistency
+FakeChar = namedtuple("FakeChar", ["fg", "bg", "bold", "italics", "underscore", "reverse"])
+
 
 from typing import List, Dict, Any
 from collections import namedtuple
@@ -764,7 +788,10 @@ class ClientApp(App):
                 self.notify(f"User {u_id[:4]} left", severity="information")
 
         elif msg_type == "new_block":
-            await self.create_block(msg.get("block"))
+            block_data = msg.get("block")
+            await self.create_block(block_data)
+            if block_data.get("type") == "CMD":
+                self.history.add(block_data.get("content", ""))
             self.refresh()
 
         elif msg_type == "reorder":
@@ -1384,7 +1411,6 @@ class ClientApp(App):
 
     def on_unmount(self):
         if self.writer: self.writer.close()
-        self.history.save()
 
 from branding import setup_parser
 

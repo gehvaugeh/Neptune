@@ -160,3 +160,57 @@ tmux
 
 - Press `:` to enter CMD mode and type `clear`.
 - **Expected Result:** All blocks are removed and the session is reset to a blank state.
+
+---
+
+## 7. Filtering & Navigation
+
+**Objective:** Verify that the filtering system and navigation modes work correctly with large amounts of data.
+
+1. **Fuzzy Filtering**
+   - **Instructions:**
+     1. Create several Note and Command blocks with varying content.
+     2. Press `Ctrl+F` to open the filter bar.
+     3. Type a query that matches only a few blocks (e.g., a specific word).
+   - **Expected Result:**
+     - Only matching blocks remain visible.
+     - Filtering is snappy and doesn't lag (due to debouncing and caching).
+     - Press `Enter` in the filter bar to commit the filter and return to focus the bottom dock.
+     - Press `Ctrl+G` to clear the filter and hide the bar immediately.
+
+2. **Selection Mode Navigation with Filtering**
+   - **Instructions:**
+     1. Apply a filter so some blocks are hidden.
+     2. Enter Selection Mode (`s`).
+     3. Use `j/k` to navigate.
+   - **Expected Result:** The focus should only move between **visible** blocks, skipping the hidden ones.
+
+3. **Block Insertion (Selection Mode)**
+   - **Instructions:**
+     1. Enter Selection Mode (`s`).
+     2. Highlight a block in the middle of the notebook.
+     3. Press `!` to enter BASH mode.
+     4. Type a command and press `Enter`.
+   - **Expected Result:** The new block is inserted **directly below** the previously highlighted block, not at the end.
+
+---
+
+## 8. Performance & UI Stability
+
+**Objective:** Verify that optimizations don't break UI correctness.
+
+1. **Dynamic Resizing**
+   - **Instructions:** Run a command that produces output line-by-line (e.g., `for i in {1..10}; do echo $i; sleep 0.5; done`).
+   - **Expected Result:** The block should grow vertically to fit the new lines (up to the max-height limit).
+
+2. **History Hiding (Lazy Rendering)**
+   - **Instructions:**
+     1. Generate a large amount of output in a block (e.g., `seq 1 200`).
+     2. Create another block and focus it.
+   - **Expected Result:**
+     - The first block should show a hint like "... lines of history hidden ...".
+     - When you focus the first block again (via Selection Mode or click), the full history should become visible.
+
+3. **Rapid Output Stress**
+   - **Instructions:** Run `cat /dev/urandom | base64 | head -c 10000`.
+   - **Expected Result:** The TUI should remain responsive during the burst. You should still be able to switch modes or type in the input bar.

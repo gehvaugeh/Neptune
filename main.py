@@ -9,6 +9,7 @@ def main():
     parser.add_argument("mode", choices=["server", "client", "all"], nargs="?", help="Mode to start: server, client, or all")
     parser.add_argument("-s", "--socket", default="/tmp/neptune.sock", help="Path to the Unix Domain Socket")
     parser.add_argument("--enable-hist-expansion", action="store_true", help="Enable Bash history expansion (e.g. using !)")
+    parser.add_argument("--clean-history", action="store_true", help="Start with a fresh history file")
 
     check_args(parser)
 
@@ -23,7 +24,11 @@ def main():
 
     if mode == "server":
         import server
-        s = server.Server(socket_path=socket_path, enable_hist_expansion=args.enable_hist_expansion)
+        s = server.Server(
+            socket_path=socket_path,
+            enable_hist_expansion=args.enable_hist_expansion,
+            clean_history=args.clean_history
+        )
         server.asyncio.run(s.start())
     elif mode == "client":
         import client
@@ -33,6 +38,8 @@ def main():
         server_args = [sys.executable, "server.py", "-s", socket_path]
         if args.enable_hist_expansion:
             server_args.append("--enable-hist-expansion")
+        if args.clean_history:
+            server_args.append("--clean-history")
         server_proc = subprocess.Popen(server_args)
         try:
             # Start client
