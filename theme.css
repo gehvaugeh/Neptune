@@ -156,6 +156,10 @@ NoteBlock {
     background: #1a1010;
 }
 
+.remote-block {
+    border-left: thick #2196f3;
+}
+
 .locked-local {
     background: #101a10;
 }

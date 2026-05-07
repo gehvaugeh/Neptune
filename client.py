@@ -465,6 +465,9 @@ class CommandBlock(BaseBlock):
         elif status == "ok":
             self._last_status_text = "[green]✅ OK[/]"
             self.remove_class("running")
+        elif status == "aborted":
+            self._last_status_text = "[red]❌ ABORTED[/]"
+            self.remove_class("running")
         elif "error" in status:
             self._last_status_text = f"[red]❌ {status.upper()}[/]"
             self.remove_class("running")
@@ -554,6 +557,8 @@ class ClientApp(App):
         self.yank_buffer = None
         self.last_selected_block_id = None
         self.was_in_selection_mode = False
+        self.is_remote = False
+        self.remote_info = None
         self.insert_after_id = None
         self.count_str = ""
         self.last_escape_time = 0
@@ -673,6 +678,10 @@ class ClientApp(App):
             new_id = msg.get("your_id")
             if new_id and new_id != "all": self.user_id = new_id
             self.users = msg.get("users", {})
+            self.is_remote = msg.get("is_remote", False)
+            self.remote_info = msg.get("remote_info")
+            self.update_mode_label()
+
             container = self.query_one("#command_history")
             for b_id in list(self.blocks.keys()):
                 try: self.blocks[b_id].remove()
@@ -799,6 +808,22 @@ class ClientApp(App):
                 else:
                     self.enter_normal_mode()
 
+        elif msg_type == "remote_status":
+            self.is_remote = msg.get("is_remote", False)
+            self.remote_info = msg.get("remote_info")
+            self.update_mode_label()
+            if self.is_remote:
+                self.notify(f"Remote Gateway Open: {self.remote_info}", severity="information")
+            else:
+                self.notify("Remote Gateway Closed", severity="warning")
+
+        elif msg_type == "ambient_output":
+            # For now, we notify but we could add this to a session log
+            data = msg.get("data", "")
+            logging.info(f"Ambient Output: {data}")
+            # Optional: show in a notification if it's not too frequent
+            # self.notify(f"Ambient: {data[:50]}...", severity="information")
+
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data["id"]
         if b_id in self.blocks: return
@@ -815,6 +840,9 @@ class ClientApp(App):
         if data["locked_by"]:
                 user_info = self.users.get(data["locked_by"], {})
                 new_block.update_lock(data["locked_by"], user_info.get("color", "white"))
+
+        if data.get("remote") and isinstance(new_block, CommandBlock):
+            new_block.add_class("remote-block")
 
         # Apply current filter to the new block
         inp = self.query_one("#filter_input")
@@ -972,7 +1000,8 @@ class ClientApp(App):
             "CONTROL": "#f44336"
         }
         c = colors.get(self.input_mode, "#7c4dff")
-        self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
+        remote_str = f" [bold #f44336][REMOTE: {self.remote_info}][/]" if self.is_remote else ""
+        self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]{remote_str}")
 
     def enter_control_mode(self, block):
         if not isinstance(block, CommandBlock):

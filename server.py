@@ -59,7 +59,11 @@ class Server:
         self.shell_cwd = os.getcwd()
         self.marked_for_deletion = set()
 
-    def add_block(self, block_type, content, cwd=None, index=None):
+        self.is_remote = False
+        self.remote_info = None # e.g. "user@host"
+        self.ssh_pgid = None
+
+    def add_block(self, block_type, content, cwd=None, index=None, remote=False):
         block = {
             "id": str(uuid.uuid4()),
             "type": block_type,
@@ -67,7 +71,8 @@ class Server:
             "cwd": cwd or os.getcwd(),
             "output": "",
             "status": "ready",
-            "locked_by": None
+            "locked_by": None,
+            "remote": remote
         }
         if index is not None and 0 <= index <= len(self.blocks):
             self.blocks.insert(index, block)
@@ -186,7 +191,9 @@ class Server:
                         "type": "init",
                         "blocks": self.blocks,
                         "users": {c["id"]: {"color": c["color"], "name": c.get("name", c["id"][:4])} for c in self.clients.values()},
-                        "your_id": user_id
+                        "your_id": user_id,
+                        "is_remote": self.is_remote,
+                        "remote_info": self.remote_info
                     }
                     writer.write(json.dumps(init_msg).encode() + b"\n")
                     await writer.drain()
@@ -211,7 +218,7 @@ class Server:
                         if target_idx != -1:
                             index = target_idx + 1
 
-                    block = self.add_block(mode, content, self.shell_cwd, index=index)
+                    block = self.add_block(mode, content, self.shell_cwd, index=index, remote=self.is_remote)
 
                     if index is not None:
                         await self.broadcast({"type": "reorder", "blocks": self.blocks})
@@ -530,6 +537,35 @@ class Server:
         self.reader_task = asyncio.create_task(self.master_shell_reader())
         if not hasattr(self, 'executor_task') or self.executor_task.done():
             self.executor_task = asyncio.create_task(self.master_shell_executor())
+        if not hasattr(self, 'monitor_task') or self.monitor_task.done():
+            self.monitor_task = asyncio.create_task(self.session_monitor())
+
+    async def session_monitor(self):
+        while True:
+            try:
+                if self.is_remote and self.master_fd and self.ssh_pgid:
+                    try:
+                        fg_pgid = os.tcgetpgrp(self.master_fd)
+                        if fg_pgid != self.ssh_pgid:
+                            logging.info(f"SSH Session terminated. FG PGID: {fg_pgid}, expected: {self.ssh_pgid}")
+
+                            # Handle ABORTED status for currently injecting remote block
+                            if self.current_block_id:
+                                block = self.get_block(self.current_block_id)
+                                if block and block.get("remote"):
+                                    block["status"] = "aborted"
+                                    await self.broadcast({"type": "update_block", "block": block})
+
+                            self.is_remote = False
+                            self.remote_info = None
+                            self.ssh_pgid = None
+                            await self.broadcast({"type": "remote_status", "is_remote": False})
+                    except Exception as e:
+                        logging.error(f"Error in session_monitor check: {e}")
+                await asyncio.sleep(2.0)
+            except Exception as e:
+                logging.error(f"Error in session_monitor loop: {e}")
+                await asyncio.sleep(5.0)
 
     async def master_shell_reader(self):
         loop = asyncio.get_event_loop()
@@ -556,71 +592,125 @@ class Server:
                         block = self.get_block(active_block_id)
                         if active_sentinel:
                             while True:
-                                # Look for status sentinel between \x1e and \x1f
-                                pattern = rf'\x1e{re.escape(active_sentinel)}_(-?\d+)_([^\x1f]*?)\x1f'
-                                match = re.search(pattern, buffer)
-                                if match:
-                                    logging.debug(f"Status sentinel matched: {match.group(0)}")
+                                if active_sentinel == "REMOTE_EXIT":
+                                    # Remote mode sentinel handling: \x1eREMOTE_EXIT_(\d+)\x1e
+                                    pattern = r'\x1eREMOTE_EXIT_(-?\d+)\x1e'
+                                    match = re.search(pattern, buffer)
+                                    if match:
+                                        logging.debug(f"Remote status sentinel matched: {match.group(0)}")
+                                        before_sentinel = buffer[:match.start()]
 
-                                    # Any output before the status sentinel is part of the command's stream
-                                    before_sentinel = buffer[:match.start()]
-                                    if block and before_sentinel:
-                                        block["output"] += before_sentinel
-                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
+                                        # Handle Echo Suppression: Detect and remove sentinel command echo
+                                        # sentinel_cmd = f"echo -e \"\\x1eREMOTE_EXIT_$?\\x1e\"\n"
+                                        # It might appear as echo -e "\x1eREMOTE_EXIT_$?\x1e" or similar
+                                        echo_pattern = r'echo -e ".*REMOTE_EXIT_.*".*?[\r\n]+'
+                                        before_sentinel = re.sub(echo_pattern, '', before_sentinel)
 
-                                    exit_code = int(match.group(1))
-                                    new_cwd = match.group(2).strip()
-                                    logging.info(f"Status sentinel matched. Exit: {exit_code}, CWD: {new_cwd}")
+                                        if block and before_sentinel:
+                                            block["output"] += before_sentinel
+                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
+
+                                        exit_code = int(match.group(1))
+                                        logging.info(f"Remote exit code: {exit_code}")
+                                        if block:
+                                            block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
+                                            await self.broadcast({"type": "update_block", "block": block})
+
+                                        buffer = buffer[match.end():]
+                                        self.current_command_finished.set()
+                                        break
+                                else:
+                                    # Local status sentinel between \x1e and \x1f
+                                    pattern = rf'\x1e{re.escape(active_sentinel)}_(-?\d+)_([^\x1f]*?)\x1f'
+                                    match = re.search(pattern, buffer)
+                                    if match:
+                                        logging.debug(f"Local status sentinel matched: {match.group(0)}")
+
+                                        # Any output before the status sentinel is part of the command's stream
+                                        before_sentinel = buffer[:match.start()]
+                                        if block and before_sentinel:
+                                            block["output"] += before_sentinel
+                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": before_sentinel})
+
+                                        exit_code = int(match.group(1))
+                                        new_cwd = match.group(2).strip()
+                                        logging.info(f"Status sentinel matched. Exit: {exit_code}, CWD: {new_cwd}")
+
+                                        if block:
+                                            block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
+                                            block["cwd"] = new_cwd
+                                            await self.broadcast({"type": "update_block", "block": block})
+
+                                        self.shell_cwd = new_cwd
+                                        buffer = buffer[match.end():]
+                                        self.current_command_finished.set()
+                                        break
+
+                                # Common logic for partial match / output streaming
+                                s_idx = buffer.find('\x1e')
+                                if s_idx == -1:
+                                    if buffer:
+                                        # In remote mode, we must be careful not to stream the echo of the sentinel command
+                                        to_stream = buffer
+                                        if active_sentinel == "REMOTE_EXIT":
+                                            # If buffer ends with part of the sentinel command, hold it
+                                            # sentinel_cmd = f"echo -e \"\\x1eREMOTE_EXIT_$?\\x1e\"\n"
+                                            sentinel_cmd_start = "echo -e"
+                                            if sentinel_cmd_start in to_stream:
+                                                idx = to_stream.find(sentinel_cmd_start)
+                                                # Stream only up to before the sentinel command
+                                                if idx > 0:
+                                                    can_stream = to_stream[:idx]
+                                                    if block:
+                                                        block["output"] += can_stream
+                                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": can_stream})
+                                                    buffer = buffer[idx:]
+                                                break # Wait for more data
+
+                                        if block:
+                                            block["output"] += to_stream
+                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_stream})
+                                        buffer = ""
+                                    break
+                                elif s_idx > 0:
+                                    to_send = buffer[:s_idx]
+                                    if active_sentinel == "REMOTE_EXIT" and "echo -e" in to_send:
+                                        # Potential sentinel command echo
+                                        idx = to_send.find("echo -e")
+                                        if idx > 0:
+                                            can_send = to_send[:idx]
+                                            if block:
+                                                block["output"] += can_send
+                                                await self.broadcast({"type": "output", "block_id": active_block_id, "data": can_send})
+                                            buffer = buffer[idx:]
+                                        break # Wait for full sentinel match
 
                                     if block:
-                                        block["status"] = "ok" if exit_code == 0 else f"error({exit_code})"
-                                        block["cwd"] = new_cwd
-                                        await self.broadcast({"type": "update_block", "block": block})
-
-                                    self.shell_cwd = new_cwd
-                                    buffer = buffer[match.end():]
-                                    self.current_command_finished.set()
+                                        block["output"] += to_send
+                                        await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                    buffer = buffer[s_idx:]
                                     break
                                 else:
-                                    # If \x1e is present, we buffer from there to see if it's the sentinel.
-                                    # Everything before \x1e is definitely output.
-                                    s_idx = buffer.find('\x1e')
-                                    if s_idx == -1:
-                                        if buffer:
-                                            if block:
-                                                block["output"] += buffer
-                                                await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
-                                            buffer = ""
-                                        break
-                                    elif s_idx > 0:
-                                        to_send = buffer[:s_idx]
-                                        if block:
-                                            block["output"] += to_send
-                                            await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
-                                        buffer = buffer[s_idx:]
-                                        # Now buffer starts with \x1e, we wait for more data to match pattern
-                                        break
-                                    else:
-                                        # buffer starts with \x1e but pattern didn't match yet.
-                                        # We must wait for more data or check if it's a false positive.
-                                        # If buffer gets too long without a match, it might be output containing \x1e
-                                        if len(buffer) > 1024:
-                                             to_send = buffer[:1]
-                                             if block:
-                                                 block["output"] += to_send
-                                                 await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
-                                             buffer = buffer[1:]
-                                        break
+                                    if len(buffer) > 1024:
+                                         to_send = buffer[:1]
+                                         if block:
+                                             block["output"] += to_send
+                                             await self.broadcast({"type": "output", "block_id": active_block_id, "data": to_send})
+                                         buffer = buffer[1:]
+                                    break
                         else:
-                            # No sentinel yet, just stream output
+                            # No sentinel yet (Handshake or CONTROL mode), just stream output
                             if buffer:
                                 if block:
                                     block["output"] += buffer
                                     await self.broadcast({"type": "output", "block_id": active_block_id, "data": buffer})
                                 buffer = ""
                     else:
-                        # No active block, discard buffer to avoid leak
-                        buffer = ""
+                        # No active block, handle Ambient Output
+                        if buffer:
+                            logging.debug(f"Ambient Output captured: {buffer!r}")
+                            await self.broadcast({"type": "ambient_output", "data": buffer})
+                            buffer = ""
                 except OSError:
                     logging.info("Master shell PTY error/closed")
                     break
@@ -654,61 +744,139 @@ class Server:
                 cmd = block["content"].strip()
                 logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
 
-                try:
-                    # Inject raw command into shell history
-                    # We use ANSI-C quoting to safely handle multi-line commands and special characters.
-                    # We must escape backslashes before single quotes.
-                    hist_cmd = cmd.replace("\\", "\\\\").replace("'", "\\'")
-                    os.write(self.master_fd, f" history -s $'{hist_cmd}'\n".encode())
+                if not self.is_remote and (cmd.startswith("ssh ") or cmd == "ssh"):
+                    # SSH Handshake Logic
+                    try:
+                        # Inject raw command into shell history
+                        hist_cmd = cmd.replace("\\", "\\\\").replace("'", "\\'")
+                        os.write(self.master_fd, f" history -s $'{hist_cmd}'\n".encode())
 
-                    # Retrieval of status and CWD
-                    # We use non-printable separators to avoid collision with terminal output
-                    status_sentinel = f"NEPTUNE_STATUS_{os.urandom(4).hex()}"
-                    self.current_sentinel = status_sentinel
+                        # Execute ssh
+                        os.write(self.master_fd, f" {cmd}\n".encode())
 
-                    # Escape command for eval
-                    escaped_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+                        # Monitor for stability
+                        start_time = asyncio.get_event_loop().time()
+                        ssh_stable = False
+                        while asyncio.get_event_loop().time() - start_time < 10.0:
+                            await asyncio.sleep(0.1)
+                            try:
+                                fg_pgid = os.tcgetpgrp(self.master_fd)
+                                if fg_pgid > 0 and fg_pgid != self.master_pgid:
+                                    # SSH is in foreground. Now wait for some output or a bit more time.
+                                    if len(block["output"]) > 0:
+                                        ssh_stable = True
+                                        self.ssh_pgid = fg_pgid
+                                        break
+                            except Exception:
+                                pass
 
-                    # Combine command and status retrieval into a single write operation.
-                    # We use \x1e (Record Separator) and \x1f (Unit Separator)
-                    # We prepend a space to avoid this internal wrapper command appearing in history
-                    full_cmd = (
-                        f"  eval \"{escaped_cmd}\"; "
-                        f"printf '\\x1e{status_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; "
-                        f"history -a\n"
-                    )
-                    os.write(self.master_fd, full_cmd.encode())
+                        if ssh_stable:
+                            logging.info(f"SSH Handshake stable. PGID: {self.ssh_pgid}")
+                            self.is_remote = True
+                            # Try to extract remote info from command
+                            parts = cmd.split()
+                            self.remote_info = parts[-1] if len(parts) > 1 else "remote"
+                            block["status"] = "ok"
+                            await self.broadcast({"type": "update_block", "block": block})
+                            await self.broadcast({"type": "remote_status", "is_remote": True, "remote_info": self.remote_info})
+                            self.current_command_finished.set()
+                        else:
+                            logging.warning("SSH Handshake failed or timed out")
+                            # We don't mark as error here, maybe it's just slow or needs input
+                            # But for this implementation, we want to release the UI
+                            # If it's still running but not "stable", we might just wait or error out.
+                            # The prompt says: "Force-set the status ... to SUCCESS immediately after the connection is stable"
+                            pass
 
-                    # Wait for command to start (foreground PGID changes)
-                    start_time = asyncio.get_event_loop().time()
-                    while asyncio.get_event_loop().time() - start_time < 0.5:
-                        try:
-                            if os.tcgetpgrp(self.master_fd) != self.master_pgid:
-                                break
-                        except: pass
-                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logging.error(f"Error in SSH Handshake: {e}")
+                        block["status"] = "error"
+                        await self.broadcast({"type": "update_block", "block": block})
 
-                    # Wait for command to finish (foreground PGID returns to shell)
-                    while True:
-                        try:
-                            if os.tcgetpgrp(self.master_fd) == self.master_pgid:
-                                break
-                        except: pass
-
-                        if self.master_proc.returncode is not None or self.reader_task.done():
-                             break
-                        await asyncio.sleep(0.1)
-
-                    # Wait for status sentinel
-                    while not self.current_command_finished.is_set():
-                         if self.master_proc.returncode is not None or self.reader_task.done():
-                             break
-                         await asyncio.sleep(0.1)
-
-                except Exception as e:
-                    logging.error(f"Error executing command: {e}")
-                    block["status"] = "error"
+                elif self.is_remote:
+                    # Decoupled Command Injection
+                    block["remote"] = True
                     await self.broadcast({"type": "update_block", "block": block})
+                    self.current_command_finished.clear()
+
+                    try:
+                        # Inject command
+                        os.write(self.master_fd, f"{cmd}\n".encode())
+
+                        # Inject Sentinel
+                        # We use a specific remote sentinel format
+                        self.current_sentinel = "REMOTE_EXIT"
+                        sentinel_cmd = f"echo -e \"\\x1eREMOTE_EXIT_$?\\x1e\"\n"
+                        os.write(self.master_fd, sentinel_cmd.encode())
+
+                        # Wait for command to finish (detected by reader)
+                        while not self.current_command_finished.is_set():
+                            if self.master_proc.returncode is not None or self.reader_task.done() or not self.is_remote:
+                                break
+                            await asyncio.sleep(0.1)
+
+                    except Exception as e:
+                        logging.error(f"Error in Remote Injection: {e}")
+                        block["status"] = "error"
+                        await self.broadcast({"type": "update_block", "block": block})
+
+                else:
+                    # Normal Local Execution
+                    try:
+                        # Inject raw command into shell history
+                        # We use ANSI-C quoting to safely handle multi-line commands and special characters.
+                        # We must escape backslashes before single quotes.
+                        hist_cmd = cmd.replace("\\", "\\\\").replace("'", "\\'")
+                        os.write(self.master_fd, f" history -s $'{hist_cmd}'\n".encode())
+
+                        # Retrieval of status and CWD
+                        # We use non-printable separators to avoid collision with terminal output
+                        status_sentinel = f"NEPTUNE_STATUS_{os.urandom(4).hex()}"
+                        self.current_sentinel = status_sentinel
+
+                        # Escape command for eval
+                        escaped_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+
+                        # Combine command and status retrieval into a single write operation.
+                        # We use \x1e (Record Separator) and \x1f (Unit Separator)
+                        # We prepend a space to avoid this internal wrapper command appearing in history
+                        full_cmd = (
+                            f"  eval \"{escaped_cmd}\"; "
+                            f"printf '\\x1e{status_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; "
+                            f"history -a\n"
+                        )
+                        os.write(self.master_fd, full_cmd.encode())
+
+                        # Wait for command to start (foreground PGID changes)
+                        start_time = asyncio.get_event_loop().time()
+                        while asyncio.get_event_loop().time() - start_time < 0.5:
+                            try:
+                                if os.tcgetpgrp(self.master_fd) != self.master_pgid:
+                                    break
+                            except: pass
+                            await asyncio.sleep(0.05)
+
+                        # Wait for command to finish (foreground PGID returns to shell)
+                        while True:
+                            try:
+                                if os.tcgetpgrp(self.master_fd) == self.master_pgid:
+                                    break
+                            except: pass
+
+                            if self.master_proc.returncode is not None or self.reader_task.done():
+                                 break
+                            await asyncio.sleep(0.1)
+
+                        # Wait for status sentinel
+                        while not self.current_command_finished.is_set():
+                             if self.master_proc.returncode is not None or self.reader_task.done():
+                                 break
+                             await asyncio.sleep(0.1)
+
+                    except Exception as e:
+                        logging.error(f"Error executing command: {e}")
+                        block["status"] = "error"
+                        await self.broadcast({"type": "update_block", "block": block})
                 finally:
                     if self.current_block_id in self.marked_for_deletion:
                         block_id = self.current_block_id
