@@ -744,146 +744,132 @@ class Server:
                 cmd = block["content"].strip()
                 logging.info(f"Executing block {block['id'][:8]}: {cmd!r}")
 
-                if not self.is_remote and (cmd.startswith("ssh ") or cmd == "ssh"):
-                    # SSH Handshake Logic
-                    try:
-                        # Inject raw command into shell history
-                        hist_cmd = cmd.replace("\\", "\\\\").replace("'", "\\'")
-                        os.write(self.master_fd, f" history -s $'{hist_cmd}'\n".encode())
+                try:
+                    if not self.is_remote and (cmd.startswith("ssh ") or cmd == "ssh"):
+                        # SSH Handshake Logic
+                        try:
+                            # Inject raw command into shell history
+                            hist_cmd = cmd.replace("\\", "\\\\").replace("'", "\\'")
+                            os.write(self.master_fd, f" history -s $'{hist_cmd}'\n".encode())
 
-                        # Execute ssh
-                        os.write(self.master_fd, f" {cmd}\n".encode())
+                            # Execute ssh
+                            os.write(self.master_fd, f" {cmd}\n".encode())
 
-                        # Monitor for stability
-                        start_time = asyncio.get_event_loop().time()
-                        ssh_stable = False
-                        while asyncio.get_event_loop().time() - start_time < 10.0:
-                            await asyncio.sleep(0.1)
-                            try:
-                                fg_pgid = os.tcgetpgrp(self.master_fd)
-                                if fg_pgid > 0 and fg_pgid != self.master_pgid:
-                                    # SSH is in foreground. Now wait for some output or a bit more time.
-                                    if len(block["output"]) > 0:
-                                        ssh_stable = True
-                                        self.ssh_pgid = fg_pgid
-                                        break
-                            except Exception:
+                            # Monitor for stability
+                            start_time = asyncio.get_event_loop().time()
+                            ssh_stable = False
+                            while asyncio.get_event_loop().time() - start_time < 10.0:
+                                await asyncio.sleep(0.1)
+                                try:
+                                    fg_pgid = os.tcgetpgrp(self.master_fd)
+                                    if fg_pgid > 0 and fg_pgid != self.master_pgid:
+                                        # SSH is in foreground. Now wait for some output or a bit more time.
+                                        if len(block["output"]) > 0:
+                                            ssh_stable = True
+                                            self.ssh_pgid = fg_pgid
+                                            break
+                                except Exception:
+                                    pass
+
+                            if ssh_stable:
+                                logging.info(f"SSH Handshake stable. PGID: {self.ssh_pgid}")
+                                self.is_remote = True
+                                # Try to extract remote info from command
+                                parts = cmd.split()
+                                self.remote_info = parts[-1] if len(parts) > 1 else "remote"
+                                block["status"] = "ok"
+                                await self.broadcast({"type": "update_block", "block": block})
+                                await self.broadcast({"type": "remote_status", "is_remote": True, "remote_info": self.remote_info})
+                                self.current_command_finished.set()
+                            else:
+                                logging.warning("SSH Handshake failed or timed out")
                                 pass
 
-                        if ssh_stable:
-                            logging.info(f"SSH Handshake stable. PGID: {self.ssh_pgid}")
-                            self.is_remote = True
-                            # Try to extract remote info from command
-                            parts = cmd.split()
-                            self.remote_info = parts[-1] if len(parts) > 1 else "remote"
-                            block["status"] = "ok"
+                        except Exception as e:
+                            logging.error(f"Error in SSH Handshake: {e}")
+                            block["status"] = "error"
                             await self.broadcast({"type": "update_block", "block": block})
-                            await self.broadcast({"type": "remote_status", "is_remote": True, "remote_info": self.remote_info})
-                            self.current_command_finished.set()
-                        else:
-                            logging.warning("SSH Handshake failed or timed out")
-                            # We don't mark as error here, maybe it's just slow or needs input
-                            # But for this implementation, we want to release the UI
-                            # If it's still running but not "stable", we might just wait or error out.
-                            # The prompt says: "Force-set the status ... to SUCCESS immediately after the connection is stable"
-                            pass
 
-                    except Exception as e:
-                        logging.error(f"Error in SSH Handshake: {e}")
-                        block["status"] = "error"
+                    elif self.is_remote:
+                        # Decoupled Command Injection
+                        block["remote"] = True
                         await self.broadcast({"type": "update_block", "block": block})
+                        self.current_command_finished.clear()
 
-                elif self.is_remote:
-                    # Decoupled Command Injection
-                    block["remote"] = True
-                    await self.broadcast({"type": "update_block", "block": block})
-                    self.current_command_finished.clear()
+                        try:
+                            # Inject command
+                            os.write(self.master_fd, f"{cmd}\n".encode())
 
-                    try:
-                        # Inject command
-                        os.write(self.master_fd, f"{cmd}\n".encode())
+                            # Inject Sentinel
+                            self.current_sentinel = "REMOTE_EXIT"
+                            sentinel_cmd = f'echo -e "\\x1eREMOTE_EXIT_$?\\x1e"\n'
+                            os.write(self.master_fd, sentinel_cmd.encode())
 
-                        # Inject Sentinel
-                        # We use a specific remote sentinel format
-                        self.current_sentinel = "REMOTE_EXIT"
-                        sentinel_cmd = f"echo -e \"\\x1eREMOTE_EXIT_$?\\x1e\"\n"
-                        os.write(self.master_fd, sentinel_cmd.encode())
-
-                        # Wait for command to finish (detected by reader)
-                        while not self.current_command_finished.is_set():
-                            if self.master_proc.returncode is not None or self.reader_task.done() or not self.is_remote:
-                                break
-                            await asyncio.sleep(0.1)
-
-                    except Exception as e:
-                        logging.error(f"Error in Remote Injection: {e}")
-                        block["status"] = "error"
-                        await self.broadcast({"type": "update_block", "block": block})
-
-                else:
-                    # Normal Local Execution
-                    try:
-                        # Inject raw command into shell history
-                        # We use ANSI-C quoting to safely handle multi-line commands and special characters.
-                        # We must escape backslashes before single quotes.
-                        hist_cmd = cmd.replace("\\", "\\\\").replace("'", "\\'")
-                        os.write(self.master_fd, f" history -s $'{hist_cmd}'\n".encode())
-
-                        # Retrieval of status and CWD
-                        # We use non-printable separators to avoid collision with terminal output
-                        status_sentinel = f"NEPTUNE_STATUS_{os.urandom(4).hex()}"
-                        self.current_sentinel = status_sentinel
-
-                        # Escape command for eval
-                        escaped_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-
-                        # Combine command and status retrieval into a single write operation.
-                        # We use \x1e (Record Separator) and \x1f (Unit Separator)
-                        # We prepend a space to avoid this internal wrapper command appearing in history
-                        full_cmd = (
-                            f"  eval \"{escaped_cmd}\"; "
-                            f"printf '\\x1e{status_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; "
-                            f"history -a\n"
-                        )
-                        os.write(self.master_fd, full_cmd.encode())
-
-                        # Wait for command to start (foreground PGID changes)
-                        start_time = asyncio.get_event_loop().time()
-                        while asyncio.get_event_loop().time() - start_time < 0.5:
-                            try:
-                                if os.tcgetpgrp(self.master_fd) != self.master_pgid:
+                            # Wait for command to finish (detected by reader)
+                            while not self.current_command_finished.is_set():
+                                if self.master_proc.returncode is not None or self.reader_task.done() or not self.is_remote:
                                     break
-                            except: pass
-                            await asyncio.sleep(0.05)
+                                await asyncio.sleep(0.1)
 
-                        # Wait for command to finish (foreground PGID returns to shell)
-                        while True:
-                            try:
-                                if os.tcgetpgrp(self.master_fd) == self.master_pgid:
-                                    break
-                            except: pass
+                        except Exception as e:
+                            logging.error(f"Error in Remote Injection: {e}")
+                            block["status"] = "error"
+                            await self.broadcast({"type": "update_block", "block": block})
 
-                            if self.master_proc.returncode is not None or self.reader_task.done():
-                                 break
-                            await asyncio.sleep(0.1)
+                    else:
+                        # Normal Local Execution
+                        try:
+                            # Inject raw command into shell history
+                            hist_cmd = cmd.replace("\\", "\\\\").replace("'", "\\'")
+                            os.write(self.master_fd, f" history -s $'{hist_cmd}'\n".encode())
 
-                        # Wait for status sentinel
-                        while not self.current_command_finished.is_set():
-                             if self.master_proc.returncode is not None or self.reader_task.done():
-                                 break
-                             await asyncio.sleep(0.1)
+                            status_sentinel = f"NEPTUNE_STATUS_{os.urandom(4).hex()}"
+                            self.current_sentinel = status_sentinel
+                            escaped_cmd = cmd.replace("\\", "\\\\").replace('"', '\\\"').replace("$", "\\$").replace("`", "\\`")
+                            full_cmd = (
+                                f'  eval "{escaped_cmd}"; '
+                                f'printf "\\x1e{status_sentinel}_%s_%s\\x1f" "$?" "$(pwd)"; '
+                                f'history -a\n'
+                            )
+                            os.write(self.master_fd, full_cmd.encode())
 
-                    except Exception as e:
-                        logging.error(f"Error executing command: {e}")
-                        block["status"] = "error"
-                        await self.broadcast({"type": "update_block", "block": block})
+                            # Wait for command to start
+                            start_time = asyncio.get_event_loop().time()
+                            while asyncio.get_event_loop().time() - start_time < 0.5:
+                                try:
+                                    if os.tcgetpgrp(self.master_fd) != self.master_pgid:
+                                        break
+                                except: pass
+                                await asyncio.sleep(0.05)
+
+                            # Wait for command to finish
+                            while True:
+                                try:
+                                    if os.tcgetpgrp(self.master_fd) == self.master_pgid:
+                                        break
+                                except: pass
+                                if self.master_proc.returncode is not None or self.reader_task.done():
+                                     break
+                                await asyncio.sleep(0.1)
+
+                            # Wait for status sentinel
+                            while not self.current_command_finished.is_set():
+                                 if self.master_proc.returncode is not None or self.reader_task.done():
+                                     break
+                                 await asyncio.sleep(0.1)
+
+                        except Exception as e:
+                            logging.error(f"Error executing command: {e}")
+                            block["status"] = "error"
+                            await self.broadcast({"type": "update_block", "block": block})
+                except Exception as e:
+                    logging.error(f"Error in master_shell_executor inner: {e}")
                 finally:
                     if self.current_block_id in self.marked_for_deletion:
                         block_id = self.current_block_id
                         self.blocks = [b for b in self.blocks if b["id"] != block_id]
                         self.marked_for_deletion.remove(block_id)
                         await self.broadcast({"type": "remove_block", "block_id": block_id})
-
                     self.current_block_id = None
                     self.current_sentinel = None
             except Exception as e:
