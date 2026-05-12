@@ -33,7 +33,8 @@ class RemotePTY(BasePTY):
         logging.info(f"[{self.pty_id}] Connecting to {user}@{host}...")
         try:
             self.conn = await asyncssh.connect(host, username=user, client_keys=[key_path] if key_path else None, known_hosts=None)
-            self.chan, _ = await self.conn.create_session(asyncssh.SSHClientProcess, term_type='xterm-256color', request_pty=True)
+            # Create session with encoding to get string output from read()
+            self.chan, _ = await self.conn.create_session(asyncssh.SSHClientProcess, term_type='xterm-256color', request_pty=True, encoding='utf-8')
             self.reader_task = asyncio.create_task(self.remote_reader())
             await self.send_input("export PS1='NEPTUNE> '\n")
             logging.info(f"[{self.pty_id}] Connected to {host}")
@@ -47,6 +48,7 @@ class RemotePTY(BasePTY):
             while True:
                 data = await self.chan.read(4096)
                 if not data: break
+                # data is str because of encoding='utf-8' in create_session
                 self.buffer += data
                 await self.process_buffer()
         except Exception as e:

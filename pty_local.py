@@ -71,7 +71,8 @@ class LocalPTY(BasePTY):
         self.finished.clear()
         is_tui = cmd.split()[0] in TUI_CMDS if cmd.split() else False
         try:
-            os.write(self.master_fd, f" history -s $'{cmd.replace('\\','\\\\').replace(\"'\",\"\\'\")}'\n".encode())
+            h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
+            os.write(self.master_fd, f" history -s $'{h_cmd}'\n".encode())
             if is_tui:
                 self.mode, self.current_sentinel = "interactive", None
                 os.write(self.master_fd, f" {cmd}\n".encode())
@@ -85,14 +86,15 @@ class LocalPTY(BasePTY):
                 await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok","pty_id":self.pty_id}})
             else:
                 self.mode, self.current_sentinel = "sentinel", f"NS_{os.urandom(4).hex()}"
-                os.write(self.master_fd, f" eval \"{cmd.replace('\\','\\\\').replace('\"','\\\"').replace('$','\\$').replace('`','\\`')}\"; printf '\\x1e{self.current_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n".encode())
+                e_cmd = cmd.replace('\\', '\\\\').replace('\"', '\\\"').replace('$','\\$').replace('`','\\`')
+                os.write(self.master_fd, f" eval \"{e_cmd}\"; printf '\\x1e{self.current_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n".encode())
                 start_time = asyncio.get_running_loop().time()
                 while asyncio.get_running_loop().time() - start_time < 0.5:
                     try:
                         if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
                     except: pass
                     await asyncio.sleep(0.05)
-                while not self.finished.is_set(): await asyncio.sleep(0.1)
+                await self.finished.wait()
         finally: self.current_block_id, self.current_sentinel, self.mode = None, None, "sentinel"
 
     async def send_input(self, data: str):
