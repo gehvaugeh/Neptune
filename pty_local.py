@@ -67,7 +67,7 @@ class LocalPTY(BasePTY):
 
     async def run_command(self, block: dict):
         if not self.master_proc or self.master_proc.returncode is not None: await self.start()
-        self.current_block_id, cmd = block["id"], block["content"].strip()
+        self.current_block_id, cmd = block.get("id"), block.get("content").strip()
         self.finished.clear()
         is_tui = cmd.split()[0] in TUI_CMDS if cmd.split() else False
         try:

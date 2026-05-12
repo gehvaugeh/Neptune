@@ -53,17 +53,17 @@ class PTYManager:
         try:
             while True:
                 block = await pty.queue.get()
-                if block["id"] in self.running_blocks:
-                    logging.warning(f"[{pty.pty_id}] Block {block['id']} already running, skipping")
+                if block.get("id") in self.running_blocks:
+                    logging.warning(f"[{pty.pty_id}] Block {block.get('id')} already running, skipping")
                     pty.queue.task_done()
                     continue
 
-                self.running_blocks.add(block["id"])
+                self.running_blocks.add(block.get("id"))
                 try:
                     await self.broadcast_queues_status()
                     await pty.run_command(block)
                 finally:
-                    self.running_blocks.remove(block["id"])
+                    self.running_blocks.remove(block.get("id"))
                     pty.queue.task_done()
                     await self.broadcast_queues_status()
         except asyncio.CancelledError:

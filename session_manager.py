@@ -13,7 +13,7 @@ class SessionManager:
 
         clients = list(self.clients.items())
         for writer, client_info in clients:
-            asyncio.create_task(self.send_to_client(writer, data, client_info['id']))
+            asyncio.create_task(self.send_to_client(writer, data, client_info.get('id')))
 
     async def send_to_client(self, writer: asyncio.StreamWriter, data: bytes, user_id: str):
         try:

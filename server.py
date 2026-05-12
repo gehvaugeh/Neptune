@@ -28,7 +28,7 @@ class Server:
 
     def get_block(self, block_id):
         for b in self.blocks:
-            if b["id"] == block_id: return b
+            if b.get("id") == block_id: return b
         return None
 
     async def handle_client(self, reader, writer):
@@ -42,40 +42,47 @@ class Server:
                 except: continue
                 msg_type = msg.get("type")
                 if msg_type == "connect":
-                    self.session_manager.clients[writer].update({"color":msg.get("color","white"), "name":msg.get("user", user_id[:4])})
+                    c_info = self.session_manager.clients.get(writer)
+                    if not c_info: continue
+                    c_info.update({"color":msg.get("color","white"), "name":msg.get("user", user_id[:4])})
                     init_msg = {"type":"init", "blocks":self.blocks, "users":{c["id"]:{"color":c["color"],"name":c.get("name",c["id"][:4])} for c in self.session_manager.clients.values()}, "your_id":user_id, "ptys":self.pty_manager.list_ptys()}
                     writer.write(json.dumps(init_msg).encode() + b"\n"); await writer.drain()
-                    await self.session_manager.broadcast({"type":"user_join", "user_id":user_id, "color":self.session_manager.clients[writer]["color"], "name":self.session_manager.clients[writer]["name"]})
+                    await self.session_manager.broadcast({"type":"user_join", "user_id":user_id, "color":c_info.get("color"), "name":c_info.get("name")})
                 elif msg_type == "submit":
                     idx = None
                     if msg.get("insert_after"):
-                        t_idx = next((i for i, b in enumerate(self.blocks) if b["id"] == msg["insert_after"]), -1)
+                        t_idx = next((i for i, b in enumerate(self.blocks) if b.get("id") == msg.get("insert_after")), -1)
                         if t_idx != -1: idx = t_idx + 1
-                    block = self.add_block(msg["mode"], msg["content"], index=idx, pty_id=msg.get("pty_id"))
+                    block = self.add_block(msg.get("mode"), msg.get("content"), index=idx, pty_id=msg.get("pty_id"))
                     if idx is not None: await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
                     else: await self.session_manager.broadcast({"type":"new_block", "block":block})
-                    if block["type"] == "CMD" and block["pty_id"] in self.pty_manager.ptys:
-                        await self.pty_manager.ptys[block["pty_id"]].queue.put(block); await self.pty_manager.broadcast_queues_status()
+                    b_type = block.get("type")
+                    b_pty_id = block["pty_id"]
+                    if b_type == "CMD" and b_pty_id in self.pty_manager.ptys:
+                        await self.pty_manager.ptys[b_pty_id].queue.put(block); await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "edit_start":
                     block = self.get_block(msg.get("block_id"))
                     if block:
-                        if not block["locked_by"] or block["locked_by"] == user_id:
+                        b_locked_by = block["locked_by"]
+                        if not b_locked_by or b_locked_by == user_id:
                             block["locked_by"] = user_id
-                            await self.session_manager.broadcast({"type":"lock", "block_id":block["id"], "user_id":user_id, "user_color":self.session_manager.clients[writer]["color"], "user_name":self.session_manager.clients[writer]["name"]})
+                            await self.session_manager.broadcast({"type":"lock", "block_id":block.get("id"), "user_id":user_id, "user_color":self.session_manager.clients[writer]["color"], "user_name":self.session_manager.clients[writer]["name"]})
                         else:
-                            locked_by = self.session_manager.clients.get(next((w for w, c in self.session_manager.clients.items() if c['id'] == block["locked_by"]), None), {})
-                            await self.session_manager.send_to_client(writer, json.dumps({"type":"lock_denied", "block_id":block["id"], "reason":f"Block is locked by {locked_by.get('name', block['locked_by'][:4])}"}).encode()+b"\n", user_id)
+                            locked_by = self.session_manager.clients.get(next((w for w, c in self.session_manager.clients.items() if c.get('id') == b_locked_by), None), {})
+                            await self.session_manager.send_to_client(writer, json.dumps({"type":"lock_denied", "block_id":block.get("id"), "reason":f"Block is locked by {locked_by.get('name', b_locked_by[:4])}"}).encode()+b"\n", user_id)
                 elif msg_type == "edit_save":
                     block = self.get_block(msg.get("block_id"))
                     if block and block["locked_by"] == user_id:
                         block["content"], block["locked_by"] = msg.get("content"), None
-                        await self.session_manager.broadcast({"type":"update_block", "block":block}); await self.session_manager.broadcast({"type":"unlock", "block_id":block["id"]})
-                        if block["type"] == "CMD" and block["pty_id"] in self.pty_manager.ptys:
-                            block["output"] = ""; await self.pty_manager.ptys[block["pty_id"]].queue.put(block); await self.pty_manager.broadcast_queues_status()
+                        await self.session_manager.broadcast({"type":"update_block", "block":block}); await self.session_manager.broadcast({"type":"unlock", "block_id":block.get("id")})
+                        b_type = block.get("type")
+                        b_pty_id = block["pty_id"]
+                        if b_type == "CMD" and b_pty_id in self.pty_manager.ptys:
+                            block["output"] = ""; await self.pty_manager.ptys[b_pty_id].queue.put(block); await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "edit_cancel":
                     block = self.get_block(msg.get("block_id"))
                     if block and block["locked_by"] == user_id:
-                        block["locked_by"] = None; await self.session_manager.broadcast({"type":"unlock", "block_id":block["id"]})
+                        block["locked_by"] = None; await self.session_manager.broadcast({"type":"unlock", "block_id":block.get("id")})
                 elif msg_type == "move_block":
                     idx = next((i for i, b in enumerate(self.blocks) if b["id"] == msg.get("block_id")), -1)
                     if idx != -1:
@@ -86,10 +93,11 @@ class Server:
                 elif msg_type == "delete_block":
                     block = self.get_block(msg.get("block_id"))
                     if block:
-                        self.blocks = [b for b in self.blocks if b["id"] != block["id"]]
-                        await self.session_manager.broadcast({"type":"remove_block", "block_id":block["id"]})
+                        b_id = block.get("id")
+                        self.blocks = [b for b in self.blocks if b["id"] != b_id]
+                        await self.session_manager.broadcast({"type":"remove_block", "block_id":b_id})
                         for pty in self.pty_manager.ptys.values():
-                            if pty.current_block_id == block["id"]: await pty.stop()
+                            if pty.current_block_id == b_id: await pty.stop()
                         await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "stop_process":
                     for pty in self.pty_manager.ptys.values():
@@ -97,16 +105,18 @@ class Server:
                 elif msg_type == "paste_block":
                     idx = next((i for i, b in enumerate(self.blocks) if b["id"] == msg.get("target_id")), -1)
                     if idx != -1:
-                        y = msg.get("yank_data")
-                        self.add_block(y[0], y[1], cwd=y[2] if len(y)>2 else None, index=idx+1 if msg.get("position")=="after" else idx)
-                        await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
+                        y = msg.get("yank_data", [])
+                        if len(y) >= 2:
+                            self.add_block(y[0], y[1], cwd=y[2] if len(y)>2 else None, index=idx+1 if msg.get("position")=="after" else idx)
+                            await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
                 elif msg_type == "run_block":
                     block = self.get_block(msg.get("block_id"))
-                    if block and block["type"] == "CMD":
+                    if block and block.get("type") == "CMD":
                         if msg.get("pty_id"): block["pty_id"] = msg.get("pty_id")
                         block["output"] = ""
-                        if block["pty_id"] in self.pty_manager.ptys:
-                            await self.pty_manager.ptys[block["pty_id"]].queue.put(block); await self.pty_manager.broadcast_queues_status()
+                        b_pty_id = block["pty_id"]
+                        if b_pty_id in self.pty_manager.ptys:
+                            await self.pty_manager.ptys[b_pty_id].queue.put(block); await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "clear_session":
                     for pty in self.pty_manager.ptys.values(): await pty.stop()
                     self.blocks, self.control_block_id = [], None
@@ -114,32 +124,35 @@ class Server:
                 elif msg_type == "import_blocks":
                     self.blocks = []
                     for b_data in msg.get("blocks", []):
-                        block = self.add_block(b_data["type"], b_data["content"], b_data.get("cwd"))
+                        block = self.add_block(b_data.get("type"), b_data.get("content"), b_data.get("cwd"))
                         block.update({"output":b_data.get("output",""), "status":b_data.get("status","ready")})
                     await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
                 elif msg_type == "control_start":
                     block = self.get_block(msg.get("block_id"))
                     if block:
-                        if not block["locked_by"] or block["locked_by"] == user_id:
-                            block["locked_by"], self.control_block_id = user_id, block["id"]
-                            await self.session_manager.broadcast({"type":"lock", "block_id":block["id"], "user_id":user_id, "user_color":self.session_manager.clients[writer]["color"], "user_name":self.session_manager.clients[writer]["name"]})
+                        b_locked_by = block["locked_by"]
+                        if not b_locked_by or b_locked_by == user_id:
+                            block["locked_by"], self.control_block_id = user_id, block.get("id")
+                            await self.session_manager.broadcast({"type":"lock", "block_id":block.get("id"), "user_id":user_id, "user_color":self.session_manager.clients[writer]["color"], "user_name":self.session_manager.clients[writer]["name"]})
                         else:
-                            locked_by = self.session_manager.clients.get(next((w for w, c in self.session_manager.clients.items() if c['id'] == block["locked_by"]), None), {})
-                            await self.session_manager.send_to_client(writer, json.dumps({"type":"lock_denied", "block_id":block["id"], "reason":f"Block is locked by {locked_by.get('name', block['locked_by'][:4])}"}).encode()+b"\n", user_id)
+                            locked_by = self.session_manager.clients.get(next((w for w, c in self.session_manager.clients.items() if c.get('id') == b_locked_by), None), {})
+                            await self.session_manager.send_to_client(writer, json.dumps({"type":"lock_denied", "block_id":block.get("id"), "reason":f"Block is locked by {locked_by.get('name', b_locked_by[:4])}"}).encode()+b"\n", user_id)
                 elif msg_type == "control_stop":
                     if self.control_block_id:
                         block = self.get_block(self.control_block_id)
                         if block and block["locked_by"] == user_id:
                             block["locked_by"], self.control_block_id = None, None
-                            await self.session_manager.broadcast({"type":"unlock", "block_id":block["id"]})
+                            await self.session_manager.broadcast({"type":"unlock", "block_id":block.get("id")})
                 elif msg_type == "terminal_input":
                     bid = msg.get("block_id") or self.control_block_id
                     if bid:
                         block = self.get_block(bid)
-                        if block and block["pty_id"] in self.pty_manager.ptys: await self.pty_manager.ptys[block["pty_id"]].send_input(msg.get("data"))
+                        b_pty_id = block["pty_id"] if block else None
+                        if block and b_pty_id in self.pty_manager.ptys: await self.pty_manager.ptys[b_pty_id].send_input(msg.get("data"))
                 elif msg_type == "terminal_resize":
                     bid = self.control_block_id
-                    pid = msg.get("pty_id") or (self.get_block(bid)["pty_id"] if bid else self.pty_manager.default_pty_id)
+                    b = self.get_block(bid) if bid else None
+                    pid = msg.get("pty_id") or (b["pty_id"] if b else self.pty_manager.default_pty_id)
                     if pid in self.pty_manager.ptys: await self.pty_manager.ptys[pid].resize(msg.get("rows"), msg.get("cols"))
                 elif msg_type == "terminal_set_echo":
                     pid = msg.get("pty_id") or self.pty_manager.default_pty_id
@@ -168,10 +181,10 @@ class Server:
             if writer in self.session_manager.clients: del self.session_manager.clients[writer]
             await self.session_manager.broadcast({"type":"user_leave", "user_id":user_id})
             for b in self.blocks:
-                if b["locked_by"] == user_id:
+                if b.get("locked_by") == user_id:
                     b["locked_by"] = None
-                    if self.control_block_id == b["id"]: self.control_block_id = None
-                    await self.session_manager.broadcast({"type":"unlock", "block_id":b["id"]})
+                    if self.control_block_id == b.get("id"): self.control_block_id = None
+                    await self.session_manager.broadcast({"type":"unlock", "block_id":b.get("id")})
             writer.close()
             try: await writer.wait_closed()
             except: pass
