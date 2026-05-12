@@ -180,7 +180,8 @@ class Server:
         await self.pty_manager.create_local("local-1")
         if os.path.exists(self.socket_path): os.remove(self.socket_path)
         s = await asyncio.start_unix_server(self.handle_client, self.socket_path, limit=10*1024*1024)
-        print(f"Server started on {self.socket_path}"); async with s:
+        print(f"Server started on {self.socket_path}")
+        async with s:
             try: await s.serve_forever()
             finally:
                 if os.path.exists(self.socket_path): os.remove(self.socket_path)

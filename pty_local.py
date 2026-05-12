@@ -43,10 +43,10 @@ class LocalPTY(BasePTY):
         self.reader_task = asyncio.create_task(self.reader())
 
     async def reader(self):
-        buf = ""
+        buf, loop = "", asyncio.get_running_loop()
         try:
             while True:
-                data = await asyncio.get_event_loop().run_in_executor(None, os.read, self.master_fd, 4096)
+                data = await loop.run_in_executor(None, os.read, self.master_fd, 4096)
                 if not data: break
                 buf += data.decode(errors="replace")
                 if self.current_block_id:
@@ -75,13 +75,34 @@ class LocalPTY(BasePTY):
             if is_tui:
                 self.mode, self.current_sentinel = "interactive", None
                 os.write(self.master_fd, f" {cmd}\n".encode())
+                start_time = asyncio.get_running_loop().time()
+                while asyncio.get_running_loop().time() - start_time < 0.5:
+                    try:
+                        if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
+                    except: pass
+                    await asyncio.sleep(0.05)
                 while self.is_running(): await asyncio.sleep(0.1)
                 await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok","pty_id":self.pty_id}})
             else:
                 self.mode, self.current_sentinel = "sentinel", f"NS_{os.urandom(4).hex()}"
                 os.write(self.master_fd, f" eval \"{cmd.replace('\\','\\\\').replace('\"','\\\"').replace('$','\\$').replace('`','\\`')}\"; printf '\\x1e{self.current_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n".encode())
+                start_time = asyncio.get_running_loop().time()
+                while asyncio.get_running_loop().time() - start_time < 0.5:
+                    try:
+                        if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
+                    except: pass
+                    await asyncio.sleep(0.05)
                 while not self.finished.is_set(): await asyncio.sleep(0.1)
         finally: self.current_block_id, self.current_sentinel, self.mode = None, None, "sentinel"
+
+    async def send_input(self, data: str):
+        if self.master_fd:
+            if data == "\x03" and self.master_proc:
+                try:
+                    fg = os.tcgetpgrp(self.master_fd)
+                    os.killpg(fg if fg > 0 and fg != self.master_pgid else os.getpgid(self.master_proc.pid), signal.SIGINT)
+                except: pass
+            os.write(self.master_fd, data.encode())
 
     async def stop(self):
         if not self.master_fd: return
