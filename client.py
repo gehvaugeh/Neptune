@@ -864,6 +864,17 @@ class ClientApp(App):
             elif focused_id and focused_id in self.blocks:
                 self.call_after_refresh(self.blocks[focused_id].focus)
 
+            if "ptys" in msg:
+                for p in msg["ptys"]:
+                    pid = p["pty_id"]
+                    if pid not in self.ptys:
+                        self.pty_creation_counter += 1
+                        idx = self.pty_creation_counter
+                        self.ptys[pid] = {"type": p["type"], "status": p["status"], "block_count": p["block_count"], "index": idx}
+                        self.pty_index_map[idx] = pid
+                    else:
+                        self.ptys[pid].update({"status": p["status"], "block_count": p["block_count"]})
+
         elif msg_type == "user_join":
             u_id, u_col, u_name = msg.get("user_id"), msg.get("color"), msg.get("name")
             self.users[u_id] = {"color": u_col, "name": u_name}
@@ -1026,13 +1037,14 @@ class ClientApp(App):
                     del self.ptys[pid]
 
         elif msg_type == "queue_status":
-            # For now, just logging or showing a brief notification if needed
-            # "queues": [{"pty_id": "...", "count": N}, ...]
+            # "queues": [{"pty_id": "...", "block_count": N, "status": "..."}, ...]
             queues = msg.get("queues", [])
             for q in queues:
                 pid = q["pty_id"]
                 if pid in self.ptys:
-                    self.ptys[pid]["block_count"] = q["count"]
+                    self.ptys[pid]["block_count"] = q.get("block_count", 0)
+                    if "status" in q:
+                        self.ptys[pid]["status"] = q["status"]
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data["id"]
