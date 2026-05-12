@@ -409,7 +409,7 @@ class CommandBlock(BaseBlock):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
         self.pty_id = pty_id
-        self.full_output = ""
+        self.output = ""
         # Initialize with fixed TTY dimensions established by the app
         self.terminal_screen = pyte.HistoryScreen(app_ref.preferred_cols, app_ref.preferred_rows, history=1000)
         self.stream = pyte.Stream(self.terminal_screen)
@@ -440,9 +440,9 @@ class CommandBlock(BaseBlock):
         if not isinstance(text, str):
             text = text.decode(errors="replace")
 
-        self.full_output += text
-        if len(self.full_output) > 1_000_000:
-            self.full_output = self.full_output[-1_000_000:]
+        self.output += text
+        if len(self.output) > 1_000_000:
+            self.output = self.output[-1_000_000:]
 
         self.stream.feed(text)
         if self.is_mounted:
@@ -870,10 +870,20 @@ class ClientApp(App):
                     if pid not in self.ptys:
                         self.pty_creation_counter += 1
                         idx = self.pty_creation_counter
-                        self.ptys[pid] = {"type": p["type"], "status": p["status"], "block_count": p["block_count"], "index": idx}
+                        self.ptys[pid] = {
+                            "type": p.get("type", "local"),
+                            "status": p.get("status", "idle"),
+                            "block_count": p.get("block_count", 0),
+                            "active_block_id": p.get("active_block_id"),
+                            "index": idx
+                        }
                         self.pty_index_map[idx] = pid
                     else:
-                        self.ptys[pid].update({"status": p["status"], "block_count": p["block_count"]})
+                        self.ptys[pid].update({
+                            "status": p.get("status", "idle"),
+                            "block_count": p.get("block_count", 0),
+                            "active_block_id": p.get("active_block_id")
+                        })
 
         elif msg_type == "user_join":
             u_id, u_col, u_name = msg.get("user_id"), msg.get("color"), msg.get("name")
@@ -934,7 +944,7 @@ class ClientApp(App):
                                 self.enter_selection_mode()
                             else:
                                 self.enter_normal_mode()
-                    block.full_output = ""
+                    block.output = ""
                     block.terminal_screen.reset()
                     block.append_output(data.get("output", ""))
                 if not block.is_editing:
@@ -1024,10 +1034,20 @@ class ClientApp(App):
                 if pid not in self.ptys:
                     self.pty_creation_counter += 1
                     idx = self.pty_creation_counter
-                    self.ptys[pid] = {"type": p["type"], "status": p["status"], "block_count": p["block_count"], "index": idx}
+                    self.ptys[pid] = {
+                        "type": p.get("type", "local"),
+                        "status": p.get("status", "idle"),
+                        "block_count": p.get("block_count", 0),
+                        "active_block_id": p.get("active_block_id"),
+                        "index": idx
+                    }
                     self.pty_index_map[idx] = pid
                 else:
-                    self.ptys[pid].update({"status": p["status"], "block_count": p["block_count"]})
+                    self.ptys[pid].update({
+                        "status": p.get("status", "idle"),
+                        "block_count": p.get("block_count", 0),
+                        "active_block_id": p.get("active_block_id")
+                    })
             # Remove ptys no longer on server (except local-1)
             active_ids = [p["pty_id"] for p in server_ptys]
             for pid in list(self.ptys.keys()):
@@ -1045,23 +1065,31 @@ class ClientApp(App):
                     self.ptys[pid]["block_count"] = q.get("block_count", 0)
                     if "status" in q:
                         self.ptys[pid]["status"] = q["status"]
+                    if "active_block_id" in q:
+                        self.ptys[pid]["active_block_id"] = q["active_block_id"]
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
-        b_id = data["id"]
-        if b_id in self.blocks: return
-        if data["type"] == "NOTE": new_block = NoteBlock(b_id, data["content"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
+        b_id = data.get("id")
+        if not b_id or b_id in self.blocks: return
+        b_type = data.get("type", "CMD")
+        b_content = data.get("content", "")
+        if b_type == "NOTE":
+            new_block = NoteBlock(b_id, b_content, self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
         else:
-            new_block = CommandBlock(b_id, data["content"], data["cwd"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos, pty_id=data.get("pty_id", "local-1"))
+            b_cwd = data.get("cwd", os.getcwd())
+            b_pty = data.get("pty_id", "local-1")
+            new_block = CommandBlock(b_id, b_content, b_cwd, self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos, pty_id=b_pty)
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
         await container.mount(new_block)
 
-        if data["type"] == "CMD":
-            new_block.append_output(data["output"])
-            new_block.update_status(data["status"])
-        if data["locked_by"]:
-                user_info = self.users.get(data["locked_by"], {})
-                new_block.update_lock(data["locked_by"], user_info.get("color", "white"))
+        if b_type == "CMD":
+            new_block.append_output(data.get("output", ""))
+            new_block.update_status(data.get("status", "ready"))
+        locked_by = data.get("locked_by")
+        if locked_by:
+            user_info = self.users.get(locked_by, {})
+            new_block.update_lock(locked_by, user_info.get("color", "white"))
 
         # Apply current filter to the new block
         inp = self.query_one("#filter_input")
@@ -1213,7 +1241,7 @@ class ClientApp(App):
             self._filter_single_block(block, query)
 
     def _filter_single_block(self, block, query: str):
-        search_text = block.content + getattr(block, 'full_output', '')
+        search_text = block.content + getattr(block, 'output', '')
         if fuzzy_match(query, search_text):
             block.remove_class("filtered-out")
         else:
@@ -1381,8 +1409,8 @@ class ClientApp(App):
             if isinstance(block, NoteBlock): md_output.append(f"{block.content}\n")
             elif isinstance(block, CommandBlock):
                 md_output.append(f"```bash\n{block.content}\n```\n")
-                if block.full_output.strip():
-                    clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.full_output)
+                if block.output.strip():
+                    clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.output)
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
