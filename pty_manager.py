@@ -94,8 +94,8 @@ class PTYManager:
             {
                 "pty_id": p_id,
                 "type": "local" if isinstance(pty, LocalPTY) else "remote",
-                "is_running": pty.is_running(),
-                "queue_size": pty.queue.qsize(),
+                "status": "running" if pty.is_running() else "idle",
+                "block_count": pty.queue.qsize(),
                 "default": p_id == self.default_pty_id
             }
             for p_id, pty in self.ptys.items()
@@ -108,7 +108,8 @@ class PTYManager:
         for p_id, pty in self.ptys.items():
             queues_data.append({
                 "pty_id": p_id,
-                "pending": pty.queue.qsize(),
+                "block_count": pty.queue.qsize(),
+                "status": "running" if pty.is_running() else "idle",
                 "active_block_id": pty.current_block_id
             })
 
@@ -118,7 +119,8 @@ class PTYManager:
         }
 
         if default_pty:
-            msg["pending"] = default_pty.queue.qsize()
+            msg["block_count"] = default_pty.queue.qsize()
+            msg["status"] = "running" if default_pty.is_running() else "idle"
             msg["active_block_id"] = default_pty.current_block_id
             msg["pty_id"] = self.default_pty_id
 
