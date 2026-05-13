@@ -78,13 +78,13 @@ class RemotePTYAuthModal(ModalScreen):
         self.dismiss({"method": "key" if is_key else "password", "value": val, **host_user})
 
 class ConfirmKillModal(ModalScreen):
-    def __init__(self, name: str):
+    def __init__(self, pty_name: str):
         super().__init__()
-        self.name = name
+        self.pty_name = pty_name
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
-            yield Label(f"[bold red]WARNING: Kill PTY '{self.name}'?[/]")
+            yield Label(f"[bold red]WARNING: Kill PTY '{self.pty_name}'?[/]")
             yield Label("This PTY has running blocks. Killing it will stop all processes.")
             with Horizontal(id="modal_buttons"):
                 yield Button("Cancel", variant="primary", id="cancel")
