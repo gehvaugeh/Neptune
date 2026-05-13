@@ -113,7 +113,7 @@ class Server:
                     block = self.get_block(msg.get("block_id"))
                     if block and block.get("type") == "CMD":
                         if msg.get("pty_id"): 
-                            if block.get("pty_id") == msg.get("pty_id")
+                            if block.get("pty_id") == msg.get("pty_id"):
                                 block["output"] = ""
                         b_pty_id = block.get("pty_id")
                         if b_pty_id in self.pty_manager.ptys:
