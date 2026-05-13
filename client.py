@@ -847,7 +847,10 @@ class ClientApp(App):
                        block.query_one("#md_render").update(block.content)
                        block.query_one("#block_text_edit").text = block.content
                    else:
-                       block.query_one("#cmd_label").update(f"[bold blue]{escape(block.cwd)}[/]\n[white]{escape(block.content)}[/]")
+                       header_text = f"[bold blue]{escape(block.cwd)}[/]"
+                       if block.pty_uid != 0 or block.pty_name != "local-0":
+                           header_text = f"[bold cyan][{escape(block.pty_name)}][/] {header_text}"
+                       block.query_one("#cmd_label").update(f"{header_text}\n[white]{escape(block.content)}[/]")
                        block.query_one("#block_text_edit").text = block.content
 
         elif msg_type == "output":
@@ -1223,17 +1226,20 @@ class ClientApp(App):
         action = res.get("action")
         if action == "select":
             uid = res.get("uid")
-            asyncio.create_task(self.send_message({"type": "pty.set_default", "pty_uid": uid}))
+            self.run_worker(self.send_message({"type": "pty.set_default", "pty_uid": uid}))
             self.enter_input_mode(prefix="!", pty_uid=uid)
         elif action == "delete":
-            asyncio.create_task(self.send_message({"type": "pty.destroy", "pty_uid": res.get("uid")}))
+            self.run_worker(self.send_message({"type": "pty.destroy", "pty_uid": res.get("uid")}))
         elif action == "rename":
-            asyncio.create_task(self.send_message({"type": "pty.rename", "pty_uid": res.get("uid"), "name": res.get("name")}))
+            self.run_worker(self.send_message({"type": "pty.rename", "pty_uid": res.get("uid"), "name": res.get("name")}))
         elif action == "new_local":
-            asyncio.create_task(self.send_message({"type": "pty.create.local"}))
+            self.run_worker(self.send_message({"type": "pty.create.local"}))
         elif action == "new_remote":
              self.push_screen(RemotePTYAuthModal("", ""),
-                        lambda r: asyncio.create_task(self._finish_remote_pty_create("", "", r)))
+                        self._finish_remote_pty_create_callback)
+
+    def _finish_remote_pty_create_callback(self, res):
+        self.run_worker(self._finish_remote_pty_create("", "", res))
 
     def action_save_notebook_dialog(self): self.push_screen(SaveNotebookModal(), self.export_notebook)
     def action_import_notebook_dialog(self): self.push_screen(ImportNotebookModal(), lambda f: asyncio.create_task(self.import_notebook(f)))

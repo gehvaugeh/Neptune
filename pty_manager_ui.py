@@ -77,6 +77,11 @@ class RemotePTYAuthModal(ModalScreen):
 
         self.dismiss({"method": "key" if is_key else "password", "value": val, **host_user})
 
+    @on(Input.Submitted, "#auth_host_user")
+    @on(Input.Submitted, "#auth_key")
+    @on(Input.Submitted, "#auth_pass")
+    def on_submit(self): self.ok()
+
 class ConfirmKillModal(ModalScreen):
     def __init__(self, pty_name: str):
         super().__init__()
@@ -115,6 +120,9 @@ class RenamePTYModal(ModalScreen):
     def cancel(self): self.dismiss(None)
     @on(Button.Pressed, "#rename")
     def rename(self): self.dismiss(self.query_one("#new_name").value)
+
+    @on(Input.Submitted, "#new_name")
+    def on_submit(self): self.rename()
 
 class PTYManagerModal(ModalScreen):
     def __init__(self, ptys: Dict[int, Dict], default_pty_uid: int):
@@ -157,6 +165,10 @@ class PTYManagerModal(ModalScreen):
             if not self.search_query or fuzzy_match(self.search_query, f"{uid} {name}"):
                 items.append(Option(display, id=str(uid)))
 
+        # Always ensure something is highlighted if list not empty
+        if items and ol.highlighted is None:
+             ol.highlighted = 0
+
         for item in items:
             ol.add_option(item)
 
@@ -190,7 +202,7 @@ class PTYManagerModal(ModalScreen):
                         info = self.ptys[uid]
                         if info.get("block_count", 0) > 0 or info.get("status") == "running":
                             self.app.push_screen(ConfirmKillModal(info.get("name")),
-                                lambda res: self._do_delete(uid) if res else None)
+                                lambda res, u=uid: self._do_delete(u) if res else None)
                         else:
                             self._do_delete(uid)
             event.stop()
@@ -201,7 +213,7 @@ class PTYManagerModal(ModalScreen):
                 if uid_str:
                     uid = int(uid_str)
                     self.app.push_screen(RenamePTYModal(self.ptys[uid].get("name")),
-                        lambda res: self._do_rename(uid, res) if res else None)
+                        lambda res, u=uid: self._do_rename(u, res) if res else None)
             event.stop()
         elif event.key == "n":
             self.dismiss({"action": "new_local"})

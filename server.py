@@ -157,9 +157,13 @@ class Server:
                     bid = self.control_block_id
                     b = self.get_block(bid) if bid else None
                     uid = msg.get("pty_uid") if msg.get("pty_uid") is not None else (b["pty_uid"] if b else self.pty_manager.default_pty_uid)
+                    try: uid = int(uid)
+                    except: pass
                     if uid in self.pty_manager.ptys: await self.pty_manager.ptys[uid].resize(msg.get("rows"), msg.get("cols"))
                 elif msg_type == "terminal_set_echo":
                     uid = msg.get("pty_uid") if msg.get("pty_uid") is not None else self.pty_manager.default_pty_uid
+                    try: uid = int(uid)
+                    except: pass
                     if uid in self.pty_manager.ptys:
                         pty = self.pty_manager.ptys[uid]
                         if isinstance(pty, LocalPTY): await pty.set_echo(msg.get("enabled", False))
@@ -172,16 +176,22 @@ class Server:
                     except Exception as e:
                         await self.session_manager.send_to_client(writer, json.dumps({"type":"pty.error", "error":"create_failed", "message":str(e)}).encode()+b"\n", user_id)
                 elif msg_type == "pty.destroy":
-                    await self.pty_manager.destroy(msg.get("pty_uid")); await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
+                    try: uid = int(msg.get("pty_uid"))
+                    except: uid = msg.get("pty_uid")
+                    await self.pty_manager.destroy(uid); await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                 elif msg_type == "pty.set_default":
-                    if self.pty_manager.set_default(msg.get("pty_uid")):
-                        await self.session_manager.broadcast({"type":"pty.default_changed", "pty_uid":msg.get("pty_uid")})
+                    try: uid = int(msg.get("pty_uid"))
+                    except: uid = msg.get("pty_uid")
+                    if self.pty_manager.set_default(uid):
+                        await self.session_manager.broadcast({"type":"pty.default_changed", "pty_uid":uid})
                         await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                 elif msg_type == "pty.rename":
-                    if self.pty_manager.rename_pty(msg.get("pty_uid"), msg.get("name")):
+                    try: uid = int(msg.get("pty_uid"))
+                    except: uid = msg.get("pty_uid")
+                    if self.pty_manager.rename_pty(uid, msg.get("name")):
                         # Update blocks that use this PTY to show the new name
                         for b in self.blocks:
-                            if b.get("pty_uid") == msg.get("pty_uid"):
+                            if b.get("pty_uid") == uid:
                                 b["pty_name"] = msg.get("name")
                                 await self.session_manager.broadcast({"type":"update_block", "block":b})
                         await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
