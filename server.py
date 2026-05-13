@@ -112,8 +112,9 @@ class Server:
                 elif msg_type == "run_block":
                     block = self.get_block(msg.get("block_id"))
                     if block and block.get("type") == "CMD":
-                        if msg.get("pty_id"): block["pty_id"] = msg.get("pty_id")
-                        block["output"] = ""
+                        if msg.get("pty_id"): 
+                            if block.get("pty_id") == msg.get("pty_id"):
+                                block["output"] = ""
                         b_pty_id = block.get("pty_id")
                         if b_pty_id in self.pty_manager.ptys:
                             await self.pty_manager.ptys[b_pty_id].queue.put(block); await self.pty_manager.broadcast_queues_status()
