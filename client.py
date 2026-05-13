@@ -1218,19 +1218,19 @@ class ClientApp(App):
                 self.insert_after_id = focused.block_id
         self.push_screen(PTYManagerModal(self.ptys, self.default_pty_uid), self._handle_manager_result)
 
-    async def _handle_manager_result(self, res):
+    def _handle_manager_result(self, res):
         if not res: return
         action = res.get("action")
         if action == "select":
             uid = res.get("uid")
-            await self.send_message({"type": "pty.set_default", "pty_uid": uid})
+            asyncio.create_task(self.send_message({"type": "pty.set_default", "pty_uid": uid}))
             self.enter_input_mode(prefix="!", pty_uid=uid)
         elif action == "delete":
-            await self.send_message({"type": "pty.destroy", "pty_uid": res.get("uid")})
+            asyncio.create_task(self.send_message({"type": "pty.destroy", "pty_uid": res.get("uid")}))
         elif action == "rename":
-            await self.send_message({"type": "pty.rename", "pty_uid": res.get("uid"), "name": res.get("name")})
+            asyncio.create_task(self.send_message({"type": "pty.rename", "pty_uid": res.get("uid"), "name": res.get("name")}))
         elif action == "new_local":
-            await self.send_message({"type": "pty.create.local"})
+            asyncio.create_task(self.send_message({"type": "pty.create.local"}))
         elif action == "new_remote":
              self.push_screen(RemotePTYAuthModal("", ""),
                         lambda r: asyncio.create_task(self._finish_remote_pty_create("", "", r)))
@@ -1487,6 +1487,7 @@ class ClientApp(App):
                     self.input_mode = "INPUT"
                 else:
                     self.bang_time = now
+                    self._bang_uid_buffer = ""
                     async def delayed_bang(t):
                         await asyncio.sleep(0.3)
                         if self.bang_time == t:
