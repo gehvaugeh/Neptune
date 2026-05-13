@@ -851,7 +851,7 @@ class ClientApp(App):
                 except: pass
             self.blocks = {}
             for block_data in msg.get("blocks", []):
-                b_id = block_data["id"]
+                b_id = block_data.get("id")
                 is_editing = (b_id == editing_id)
                 await self.create_block(
                     block_data,
@@ -865,8 +865,8 @@ class ClientApp(App):
                 self.call_after_refresh(self.blocks[focused_id].focus)
 
             if "ptys" in msg:
-                for p in msg["ptys"]:
-                    pid = p["pty_id"]
+                for p in msg.get("ptys", []):
+                    pid = p.get("pty_id")
                     if pid not in self.ptys:
                         self.pty_creation_counter += 1
                         idx = self.pty_creation_counter
@@ -906,7 +906,7 @@ class ClientApp(App):
         elif msg_type == "reorder":
             container = self.query_one("#command_history")
             new_blocks_data = msg.get("blocks", [])
-            new_ids = [b["id"] for b in new_blocks_data]
+            new_ids = [b.get("id") for b in new_blocks_data]
 
             for b_id in list(self.blocks.keys()):
                 if b_id not in new_ids:
@@ -917,7 +917,7 @@ class ClientApp(App):
             header = container.query_one("#notebook_header")
             prev_widget = header
             for b_data in new_blocks_data:
-                b_id = b_data["id"]
+                b_id = b_data.get("id")
                 if b_id not in self.blocks: await self.create_block(b_data)
                 block = self.blocks[b_id]
                 container.move_child(block, after=prev_widget)
@@ -926,27 +926,32 @@ class ClientApp(App):
 
         elif msg_type == "update_block":
             data = msg.get("block")
-            b_id = data["id"]
+            if not data: return
+            b_id = data.get("id")
             if b_id in self.blocks:
                 block = self.blocks[b_id]
-                block.content = data["content"]
+                if "content" in data:
+                    block.content = data.get("content")
                 if isinstance(block, CommandBlock):
                     old_status = getattr(block, "_last_status", None)
-                    block._last_status = data["status"]
-                    block.cwd = data["cwd"]
+                    if "status" in data:
+                        block._last_status = data.get("status")
+                        block.update_status(data.get("status"))
+                    if "cwd" in data:
+                        block.cwd = data.get("cwd")
                     block.pty_id = data.get("pty_id", block.pty_id)
-                    block.update_status(data["status"])
 
                     # Auto-exit CONTROL mode if block finishes
                     if self.input_mode == "CONTROL" and self.focused == block:
-                        if old_status == "running" and data["status"] != "running":
+                        if old_status == "running" and data.get("status") != "running":
                             if self.was_in_selection_mode:
                                 self.enter_selection_mode()
                             else:
                                 self.enter_normal_mode()
-                    block.output = ""
-                    block.terminal_screen.reset()
-                    block.append_output(data.get("output", ""))
+                    if "output" in data:
+                        block.output = ""
+                        block.terminal_screen.reset()
+                        block.append_output(data.get("output", ""))
                 if not block.is_editing:
                    if isinstance(block, NoteBlock):
                        block.query_one("#md_render").update(block.content)
@@ -1030,7 +1035,7 @@ class ClientApp(App):
             server_ptys = msg.get("ptys", [])
             # Update local state from server list
             for p in server_ptys:
-                pid = p["pty_id"]
+                pid = p.get("pty_id")
                 if pid not in self.ptys:
                     self.pty_creation_counter += 1
                     idx = self.pty_creation_counter
@@ -1049,7 +1054,7 @@ class ClientApp(App):
                         "active_block_id": p.get("active_block_id")
                     })
             # Remove ptys no longer on server (except local-1)
-            active_ids = [p["pty_id"] for p in server_ptys]
+            active_ids = [p.get("pty_id") for p in server_ptys]
             for pid in list(self.ptys.keys()):
                 if pid != "local-1" and pid not in active_ids:
                     idx = self.ptys[pid].get("index")
@@ -1060,13 +1065,13 @@ class ClientApp(App):
             # "queues": [{"pty_id": "...", "block_count": N, "status": "..."}, ...]
             queues = msg.get("queues", [])
             for q in queues:
-                pid = q["pty_id"]
+                pid = q.get("pty_id")
                 if pid in self.ptys:
                     self.ptys[pid]["block_count"] = q.get("block_count", 0)
                     if "status" in q:
-                        self.ptys[pid]["status"] = q["status"]
+                        self.ptys[pid]["status"] = q.get("status")
                     if "active_block_id" in q:
-                        self.ptys[pid]["active_block_id"] = q["active_block_id"]
+                        self.ptys[pid]["active_block_id"] = q.get("active_block_id")
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data.get("id")
@@ -1500,7 +1505,7 @@ class ClientApp(App):
                 context = {"history": self.history.cache, "workflows": self.workflows, "cwd": os.getcwd()}
                 sugs = provider.get_suggestions(inp.text, context)
                 for s in sugs:
-                    if s["value"] == val and s["type"] == "path":
+                    if s.get("value") == val and s.get("type") == "path":
                         is_path = True; break
             except: pass
 
@@ -1580,10 +1585,10 @@ class ClientApp(App):
             "pty_id": h,
             "ssh_config": {"host": h, "user": u}
         }
-        if res["method"] == "key":
-            msg["ssh_config"]["key"] = res["value"]
+        if res.get("method") == "key":
+            msg.get("ssh_config", {})["key"] = res.get("value")
         else:
-            msg["ssh_config"]["password"] = res["value"]
+            msg.get("ssh_config", {})["password"] = res.get("value")
 
         await self.send_message(msg)
         self.enter_input_mode(prefix="!", pty_id=h)

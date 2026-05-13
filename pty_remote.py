@@ -79,11 +79,11 @@ class RemotePTY(BasePTY):
         if "password" in self.ssh_config: del self.ssh_config["password"]
 
     async def run_command(self, block: dict):
-        self.current_block_id = block["id"]
-        cmd = block["content"].strip()
+        self.current_block_id = block.get("id")
+        cmd = block.get("content").strip()
         self.shell_proc.stdin.write(f"{cmd}\n".encode())
         await self.shell_proc.stdin.drain()
-        await self._monitor_command(block["id"])
+        await self._monitor_command(block.get("id"))
 
     async def _monitor_command(self, block_id: str):
         try:
