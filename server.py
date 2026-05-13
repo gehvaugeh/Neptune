@@ -183,7 +183,7 @@ class Server:
             await self.session_manager.broadcast({"type":"user_leave", "user_id":user_id})
             for b in self.blocks:
                 if b.get("locked_by") == user_id:
-                    b.get("locked_by") = None
+                    b["locked_by"] = None
                     if self.control_block_id == b.get("id"): self.control_block_id = None
                     await self.session_manager.broadcast({"type":"unlock", "block_id":b.get("id")})
             writer.close()
