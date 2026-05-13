@@ -84,7 +84,7 @@ class Server:
                     if block and block["locked_by"] == user_id:
                         block["locked_by"] = None; await self.session_manager.broadcast({"type":"unlock", "block_id":block.get("id")})
                 elif msg_type == "move_block":
-                    idx = next((i for i, b in enumerate(self.blocks) if b["id"] == msg.get("block_id")), -1)
+                    idx = next((i for i, b in enumerate(self.blocks) if b.get("id") == msg.get("block_id")), -1)
                     if idx != -1:
                         new_idx = idx - 1 if msg.get("direction") == "up" else idx + 1
                         if 0 <= new_idx < len(self.blocks):
@@ -94,7 +94,7 @@ class Server:
                     block = self.get_block(msg.get("block_id"))
                     if block:
                         b_id = block.get("id")
-                        self.blocks = [b for b in self.blocks if b["id"] != b_id]
+                        self.blocks = [b for b in self.blocks if b.get("id") != b_id]
                         await self.session_manager.broadcast({"type":"remove_block", "block_id":b_id})
                         for pty in self.pty_manager.ptys.values():
                             if pty.current_block_id == b_id: await pty.stop()
@@ -103,7 +103,7 @@ class Server:
                     for pty in self.pty_manager.ptys.values():
                         if pty.current_block_id == msg.get("block_id"): await pty.stop()
                 elif msg_type == "paste_block":
-                    idx = next((i for i, b in enumerate(self.blocks) if b["id"] == msg.get("target_id")), -1)
+                    idx = next((i for i, b in enumerate(self.blocks) if b.get("id") == msg.get("target_id")), -1)
                     if idx != -1:
                         y = msg.get("yank_data", [])
                         if len(y) >= 2:
