@@ -57,13 +57,13 @@ class Server:
                     if idx is not None: await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
                     else: await self.session_manager.broadcast({"type":"new_block", "block":block})
                     b_type = block.get("type")
-                    b_pty_id = block["pty_id"]
+                    b_pty_id = block.get("pty_id")
                     if b_type == "CMD" and b_pty_id in self.pty_manager.ptys:
                         await self.pty_manager.ptys[b_pty_id].queue.put(block); await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "edit_start":
                     block = self.get_block(msg.get("block_id"))
                     if block:
-                        b_locked_by = block["locked_by"]
+                        b_locked_by = block.get("locked_by")
                         if not b_locked_by or b_locked_by == user_id:
                             block["locked_by"] = user_id
                             await self.session_manager.broadcast({"type":"lock", "block_id":block.get("id"), "user_id":user_id, "user_color":self.session_manager.clients[writer]["color"], "user_name":self.session_manager.clients[writer]["name"]})
@@ -76,7 +76,7 @@ class Server:
                         block["content"], block["locked_by"] = msg.get("content"), None
                         await self.session_manager.broadcast({"type":"update_block", "block":block}); await self.session_manager.broadcast({"type":"unlock", "block_id":block.get("id")})
                         b_type = block.get("type")
-                        b_pty_id = block["pty_id"]
+                        b_pty_id = block.get("pty_id")
                         if b_type == "CMD" and b_pty_id in self.pty_manager.ptys:
                             block["output"] = ""; await self.pty_manager.ptys[b_pty_id].queue.put(block); await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "edit_cancel":
@@ -112,9 +112,9 @@ class Server:
                 elif msg_type == "run_block":
                     block = self.get_block(msg.get("block_id"))
                     if block and block.get("type") == "CMD":
-                        if msg.get("pty_id"): block["pty_id"] = msg.get("pty_id")
+                        if msg.get("pty_id"): block.get("pty_id") = msg.get("pty_id")
                         block["output"] = ""
-                        b_pty_id = block["pty_id"]
+                        b_pty_id = block.get("pty_id")
                         if b_pty_id in self.pty_manager.ptys:
                             await self.pty_manager.ptys[b_pty_id].queue.put(block); await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "clear_session":
@@ -130,7 +130,7 @@ class Server:
                 elif msg_type == "control_start":
                     block = self.get_block(msg.get("block_id"))
                     if block:
-                        b_locked_by = block["locked_by"]
+                        b_locked_by = block.get("locked_by")
                         if not b_locked_by or b_locked_by == user_id:
                             block["locked_by"], self.control_block_id = user_id, block.get("id")
                             await self.session_manager.broadcast({"type":"lock", "block_id":block.get("id"), "user_id":user_id, "user_color":self.session_manager.clients[writer]["color"], "user_name":self.session_manager.clients[writer]["name"]})
@@ -147,12 +147,12 @@ class Server:
                     bid = msg.get("block_id") or self.control_block_id
                     if bid:
                         block = self.get_block(bid)
-                        b_pty_id = block["pty_id"] if block else None
+                        b_pty_id = block.get("pty_id") if block else None
                         if block and b_pty_id in self.pty_manager.ptys: await self.pty_manager.ptys[b_pty_id].send_input(msg.get("data"))
                 elif msg_type == "terminal_resize":
                     bid = self.control_block_id
                     b = self.get_block(bid) if bid else None
-                    pid = msg.get("pty_id") or (b["pty_id"] if b else self.pty_manager.default_pty_id)
+                    pid = msg.get("pty_id") or (b.get("pty_id") if b else self.pty_manager.default_pty_id)
                     if pid in self.pty_manager.ptys: await self.pty_manager.ptys[pid].resize(msg.get("rows"), msg.get("cols"))
                 elif msg_type == "terminal_set_echo":
                     pid = msg.get("pty_id") or self.pty_manager.default_pty_id
@@ -182,7 +182,7 @@ class Server:
             await self.session_manager.broadcast({"type":"user_leave", "user_id":user_id})
             for b in self.blocks:
                 if b.get("locked_by") == user_id:
-                    b["locked_by"] = None
+                    b.get("locked_by") = None
                     if self.control_block_id == b.get("id"): self.control_block_id = None
                     await self.session_manager.broadcast({"type":"unlock", "block_id":b.get("id")})
             writer.close()

@@ -60,6 +60,10 @@ class PTYManager:
 
                 self.running_blocks.add(block.get("id"))
                 try:
+                    await self.broadcast({
+                        "type": "update_block",
+                        "block": {"id": block.get("id"), "status": "running", "pty_id": pty.pty_id}
+                    })
                     await self.broadcast_queues_status()
                     await pty.run_command(block)
                 finally:
@@ -94,8 +98,9 @@ class PTYManager:
             {
                 "pty_id": p_id,
                 "type": "local" if isinstance(pty, LocalPTY) else "remote",
-                "status": "running" if pty.is_running() else "idle",
+                "status": "running" if (pty.is_running() or pty.current_block_id) else "idle",
                 "block_count": pty.queue.qsize(),
+                "active_block_id": pty.current_block_id,
                 "default": p_id == self.default_pty_id
             }
             for p_id, pty in self.ptys.items()
@@ -109,7 +114,7 @@ class PTYManager:
             queues_data.append({
                 "pty_id": p_id,
                 "block_count": pty.queue.qsize(),
-                "status": "running" if pty.is_running() else "idle",
+                "status": "running" if (pty.is_running() or pty.current_block_id) else "idle",
                 "active_block_id": pty.current_block_id
             })
 
@@ -120,7 +125,7 @@ class PTYManager:
 
         if default_pty:
             msg["block_count"] = default_pty.queue.qsize()
-            msg["status"] = "running" if default_pty.is_running() else "idle"
+            msg["status"] = "running" if (default_pty.is_running() or default_pty.current_block_id) else "idle"
             msg["active_block_id"] = default_pty.current_block_id
             msg["pty_id"] = self.default_pty_id
 

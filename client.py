@@ -214,6 +214,13 @@ class PTYPicker(ModalScreen):
         self.search_query = event.value
         self.update_list()
 
+    @on(Input.Submitted, "#picker_search")
+    def on_search_submit(self, event: Input.Submitted):
+        ol = self.query_one("#picker_list")
+        if ol.highlighted is not None:
+            opt = ol.get_option_at_index(ol.highlighted)
+            self.dismiss(opt.id)
+
     @on(OptionList.OptionSelected, "#picker_list")
     def on_select(self, event: OptionList.OptionSelected):
         self.dismiss(event.option.id)
@@ -221,6 +228,13 @@ class PTYPicker(ModalScreen):
     def on_key(self, event: events.Key):
         if event.key == "escape":
             self.dismiss(None)
+        elif event.key == "enter":
+            ol = self.query_one("#picker_list")
+            if ol.highlighted is not None:
+                opt = ol.get_option_at_index(ol.highlighted)
+                self.dismiss(opt.id)
+            event.stop()
+            event.prevent_default()
         elif event.key in ("up", "down", "k", "j"):
             ol = self.query_one("#picker_list")
             if event.key in ("up", "k"):
