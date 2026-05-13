@@ -77,7 +77,7 @@ class LocalPTY(BasePTY):
                 self.mode, self.current_sentinel = "interactive", None
                 os.write(self.master_fd, f" {cmd}\n".encode())
                 start_time = asyncio.get_running_loop().time()
-                while asyncio.get_running_loop().time() - start_time < 0.5:
+                while asyncio.get_running_loop().time() - start_time < 1.0:
                     try:
                         if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
                     except: pass
@@ -89,7 +89,7 @@ class LocalPTY(BasePTY):
                 e_cmd = cmd.replace('\\', '\\\\').replace('\"', '\\\"').replace('$','\\$').replace('`','\\`')
                 os.write(self.master_fd, f" eval \"{e_cmd}\"; printf '\\x1e{self.current_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n".encode())
                 start_time = asyncio.get_running_loop().time()
-                while asyncio.get_running_loop().time() - start_time < 0.5:
+                while asyncio.get_running_loop().time() - start_time < 1.0:
                     try:
                         if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
                     except: pass
