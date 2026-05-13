@@ -3,7 +3,8 @@ from abc import ABC, abstractmethod
 from typing import Literal, Optional
 
 class BasePTY(ABC):
-    def __init__(self, pty_id: str):
+    def __init__(self, pty_uid: int, pty_id: str):
+        self.pty_uid = pty_uid
         self.pty_id = pty_id
         self.queue: asyncio.Queue = asyncio.Queue()
         self.mode: Literal["sentinel", "interactive"] = "sentinel"

@@ -5,12 +5,12 @@ from pty_base import BasePTY
 TUI_COMMANDS = {"vim", "vi", "nano", "htop", "top", "less", "more", "man", "tmux", "neptune"}
 
 class RemotePTY(BasePTY):
-    def __init__(self, pty_id: str, broadcast_func: Callable[[dict], Awaitable[None]]):
-        super().__init__(pty_id)
+    def __init__(self, pty_uid: int, pty_id: str, broadcast_func: Callable[[dict], Awaitable[None]]):
+        super().__init__(pty_uid, pty_id)
         self.broadcast, self.ssh_config = broadcast_func, {}
         self.master_proc: Optional[asyncio.subprocess.Process] = None
         self.shell_proc: Optional[asyncio.subprocess.Process] = None
-        self.socket_path = os.path.abspath(f"neptune-{self.pty_id}.sock")
+        self.socket_path = os.path.abspath(f"neptune-{self.pty_uid}.sock")
         self.remote_tty: Optional[str] = None
         self.shell_pgid: Optional[int] = None
         self._cwd = ""
@@ -36,7 +36,7 @@ class RemotePTY(BasePTY):
         password = self.ssh_config.get("password")
         if password and not shutil.which("sshpass"):
             msg = "sshpass not installed. Password auth is insecure; please install sshpass or preferably use SSH keys for better security."
-            await self.broadcast({"type": "pty.error", "pty_id": self.pty_id, "error": "sshpass_missing", "message": msg})
+            await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "error": "sshpass_missing", "message": msg})
 
         # Step 1: Open ControlMaster socket
         m_cmd = self._get_ssh_base(use_socket=False)
@@ -49,7 +49,7 @@ class RemotePTY(BasePTY):
                 await asyncio.sleep(0.2)
             else: raise Exception("ControlMaster socket failed to initialize")
         except Exception as e:
-            await self.broadcast({"type": "pty.error", "pty_id": self.pty_id, "error": "connection_failed", "message": str(e)})
+            await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "error": "connection_failed", "message": str(e)})
             raise
 
         # Step 2: Open persistent shell
@@ -94,7 +94,7 @@ class RemotePTY(BasePTY):
                     if chunk:
                         await self.broadcast({
                             "type": "output", "block_id": block_id,
-                            "data": chunk.decode(errors="replace"), "pty_id": self.pty_id
+                            "data": chunk.decode(errors="replace"), "pty_uid": self.pty_uid
                         })
                 except asyncio.TimeoutError: pass
                 await asyncio.sleep(0.1)
@@ -106,7 +106,7 @@ class RemotePTY(BasePTY):
                     if not chunk: break
                     await self.broadcast({
                         "type": "output", "block_id": block_id,
-                        "data": chunk.decode(errors="replace"), "pty_id": self.pty_id
+                        "data": chunk.decode(errors="replace"), "pty_uid": self.pty_uid
                     })
                 except: break
 
@@ -114,7 +114,7 @@ class RemotePTY(BasePTY):
             await self._update_cwd()
 
             await self.broadcast({"type": "update_block", "block": {
-                "id": block_id, "status": "done", "pty_id": self.pty_id, "cwd": self._cwd
+                "id": block_id, "status": "done", "pty_uid": self.pty_uid, "cwd": self._cwd
             }})
         finally:
             self.current_block_id = None
@@ -131,7 +131,7 @@ class RemotePTY(BasePTY):
 
     async def is_running(self) -> bool:
         if not os.path.exists(self.socket_path):
-            await self.broadcast({"type": "pty.error", "pty_id": self.pty_id, "error": "connection_lost", "message": "ControlMaster socket missing"})
+            await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "error": "connection_lost", "message": "ControlMaster socket missing"})
             return False
         cmd = self._get_ssh_base(use_socket=True)
         cmd.append(f"ps -t {self.remote_tty} -o pgid= | head -1")

@@ -6,8 +6,8 @@ from common import HISTORY_FILE, get_shell
 TUI_CMDS = {"vim", "vi", "nano", "htop", "top", "less", "more", "man", "tmux", "neptune"}
 
 class LocalPTY(BasePTY):
-    def __init__(self, pty_id: str, broadcast: Callable[[dict], Awaitable[None]], hist_exp: bool = False):
-        super().__init__(pty_id)
+    def __init__(self, pty_uid: int, pty_id: str, broadcast: Callable[[dict], Awaitable[None]], hist_exp: bool = False):
+        super().__init__(pty_uid, pty_id)
         self.broadcast, self.hist_exp = broadcast, hist_exp
         self.master_fd: Optional[int] = None
         self.master_proc: Optional[asyncio.subprocess.Process] = None
@@ -54,14 +54,14 @@ class LocalPTY(BasePTY):
                         while True:
                             match = re.search(rf'\x1e{re.escape(self.current_sentinel)}_(-?\d+)_([^\x1f]*?)\x1f', buf)
                             if not match: break
-                            if buf[:match.start()]: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf[:match.start()],"pty_id":self.pty_id})
+                            if buf[:match.start()]: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf[:match.start()],"pty_uid":self.pty_uid})
                             self.shell_cwd = match.group(2).strip()
-                            await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok" if int(match.group(1))==0 else f"error({match.group(1)})","cwd":self.shell_cwd,"pty_id":self.pty_id}})
+                            await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok" if int(match.group(1))==0 else f"error({match.group(1)})","cwd":self.shell_cwd,"pty_uid":self.pty_uid}})
                             buf, _ = buf[match.end():], self.finished.set()
                         idx = buf.find('\x1e')
-                        if idx > 0: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf[:idx],"pty_id":self.pty_id}); buf = buf[idx:]
-                        elif idx == -1 and buf: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf,"pty_id":self.pty_id}); buf = ""
-                    else: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf,"pty_id":self.pty_id}); buf = ""
+                        if idx > 0: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf[:idx],"pty_uid":self.pty_uid}); buf = buf[idx:]
+                        elif idx == -1 and buf: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf,"pty_uid":self.pty_uid}); buf = ""
+                    else: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf,"pty_uid":self.pty_uid}); buf = ""
         except: pass
         finally: self.finished.set()
 
@@ -82,8 +82,7 @@ class LocalPTY(BasePTY):
                         if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
                     except: pass
                     await asyncio.sleep(0.05)
-                while self.is_running(): await asyncio.sleep(0.1)
-                await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok","pty_id":self.pty_id}})
+                await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok","pty_uid":self.pty_uid}})
             else:
                 self.mode, self.current_sentinel = "sentinel", f"NS_{os.urandom(4).hex()}"
                 e_cmd = cmd.replace('\\', '\\\\').replace('\"', '\\\"').replace('$','\\$').replace('`','\\`')
