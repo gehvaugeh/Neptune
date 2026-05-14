@@ -429,7 +429,8 @@ class CommandBlock(BaseBlock):
         self.stream = pyte.Stream(self.terminal_screen)
         self._style_cache = {}
         self._color_error = False
-        self._last_status_text = "Ready"
+        self._last_status_text = "[grey44]Ready[/]"
+        self._last_full_status_text = "[grey44]Ready[/]"
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -444,7 +445,7 @@ class CommandBlock(BaseBlock):
             yield Label(f"{header_text}\n[white]{escape(self.content)}[/]", id="cmd_label", classes=label_classes)
             yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
-        yield Label("[grey44]Ready[/]", id="info", classes="block-info")
+        yield Label(self._last_full_status_text, id="info", classes="block-info")
 
     def on_resize(self, event: events.Resize) -> None:
         # Fixed size TTY, no automatic resizing to match widget size
@@ -608,16 +609,15 @@ class CommandBlock(BaseBlock):
         return style
 
     def update_status(self, status):
-        if not self.is_mounted: return
-        info = self.query_one("#info")
-
         icon = ""
         if status == "running":
             self._last_status_text = "[yellow]Running...[/]"
             self.add_class("running")
             icon = " ⟳"
         elif "queued" in status:
-            num = status.split("(")[1].split(")")[0]
+            try:
+                num = status.split("(")[1].split(")")[0]
+            except: num = "?"
             self._last_status_text = f"[blue]⏳ In Queue (#{num})[/]"
             self.remove_class("running")
             icon = " ⏳"
@@ -625,22 +625,30 @@ class CommandBlock(BaseBlock):
             self._last_status_text = "[green]✅ OK[/]"
             self.remove_class("running")
             icon = " ✓"
+        elif status == "ready":
+            self._last_status_text = "[grey44]Ready[/]"
+            self.remove_class("running")
+            icon = ""
         elif "error" in status:
             self._last_status_text = f"[red]❌ {status.upper()}[/]"
             self.remove_class("running")
             icon = " ✗"
         else:
             self._last_status_text = f"[grey44]{status.capitalize()}[/]"
+            self.remove_class("running")
 
         if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
             icon += " [interactive] TUI"
 
         display_text = f"{self._last_status_text}{icon}"
+        self._last_full_status_text = display_text
 
-        if self._color_error:
-            info.update(f"{display_text} [dim]⚠ color error[/]")
-        else:
-            info.update(display_text)
+        if self.is_mounted:
+            info = self.query_one("#info")
+            if self._color_error:
+                info.update(f"{display_text} [dim]⚠ color error[/]")
+            else:
+                info.update(display_text)
 
     async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:

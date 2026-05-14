@@ -60,6 +60,7 @@ class PTYManager:
 
                 self.running_blocks.add(block.get("id"))
                 try:
+                    block["status"] = "running"
                     await self.broadcast({
                         "type": "update_block",
                         "block": {"id": block.get("id"), "status": "running", "pty_id": pty.pty_id}
@@ -117,6 +118,19 @@ class PTYManager:
                 "status": "running" if (pty.is_running() or pty.current_block_id) else "idle",
                 "active_block_id": pty.current_block_id
             })
+            # Also notify individual blocks about their queue position
+            # pty.queue._queue is a collections.deque in asyncio.Queue
+            try:
+                for idx, block in enumerate(list(pty.queue._queue)):
+                    b_id = block.get("id")
+                    if b_id:
+                        status = f"queued({idx+1})"
+                        block["status"] = status
+                        await self.broadcast({
+                            "type": "update_block",
+                            "block": {"id": b_id, "status": status, "pty_id": p_id}
+                        })
+            except: pass
 
         msg = {
             "type": "queue_status",
