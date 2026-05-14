@@ -168,10 +168,15 @@ class Server:
                         pty = self.pty_manager.ptys[uid]
                         if isinstance(pty, LocalPTY): await pty.set_echo(msg.get("enabled", False))
                 elif msg_type == "pty.create.local":
-                    await self.pty_manager.create_local(msg.get("name")); await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
+                    pty = await self.pty_manager.create_local(msg.get("name"))
+                    self.pty_manager.set_default(pty.pty_uid)
+                    await self.session_manager.broadcast({"type":"pty.default_changed", "pty_uid":pty.pty_uid})
+                    await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                 elif msg_type == "pty.create.remote":
                     try:
-                        await self.pty_manager.create_remote(msg.get("ssh_config"), msg.get("name"))
+                        pty = await self.pty_manager.create_remote(msg.get("ssh_config"), msg.get("name"))
+                        self.pty_manager.set_default(pty.pty_uid)
+                        await self.session_manager.broadcast({"type":"pty.default_changed", "pty_uid":pty.pty_uid})
                         await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                     except Exception as e:
                         await self.session_manager.send_to_client(writer, json.dumps({"type":"pty.error", "error":"create_failed", "message":str(e)}).encode()+b"\n", user_id)

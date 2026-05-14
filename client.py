@@ -315,15 +315,14 @@ class CommandBlock(BaseBlock):
         edit_classes = "" if self.is_editing else "hidden"
 
         header_text = f"[bold blue]{escape(self.cwd)}[/]"
-        if self.pty_uid != 0 or self.pty_name != "local-0":
-            header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
+        header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
 
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
             yield Label(f"{header_text}\n[white]{escape(self.content)}[/]", id="cmd_label", classes=label_classes)
             yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
-        yield Label("[grey44]Ready[/]", id="info", classes="block-info")
+        yield Label(f"[grey44]Ready[/] [cyan][{self.pty_name} (ID:{self.pty_uid})][/]", id="info", classes="block-info")
 
     def on_resize(self, event: events.Resize) -> None:
         # Fixed size TTY, no automatic resizing to match widget size
@@ -514,11 +513,8 @@ class CommandBlock(BaseBlock):
         if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
             icon += " [interactive] TUI"
 
-        # Show PTY Name in info bar too if it's not the default
-        pty_info = ""
-        if self.pty_uid != 0 or self.pty_name != "local-0":
-            pty_info = f" [cyan][{self.pty_name}][/]"
-
+        # Show PTY Name and UID in info bar
+        pty_info = f" [cyan][{self.pty_name} (ID:{self.pty_uid})][/]"
         display_text = f"{self._last_status_text}{icon}{pty_info}"
 
         if self._color_error:
@@ -831,6 +827,9 @@ class ClientApp(App):
                     if "pty_name" in data:
                         block.pty_name = data.get("pty_name")
 
+                    if "pty_uid" in data or "pty_name" in data:
+                         block.update_status(getattr(block, "_last_status", "ready"))
+
                     # Auto-exit CONTROL mode if block finishes
                     if self.input_mode == "CONTROL" and self.focused == block:
                         if old_status == "running" and data.get("status") != "running":
@@ -848,8 +847,7 @@ class ClientApp(App):
                        block.query_one("#block_text_edit").text = block.content
                    else:
                        header_text = f"[bold blue]{escape(block.cwd)}[/]"
-                       if block.pty_uid != 0 or block.pty_name != "local-0":
-                           header_text = f"[bold cyan][{escape(block.pty_name)}][/] {header_text}"
+                       header_text = f"[bold cyan][{escape(block.pty_name)}][/] {header_text}"
                        block.query_one("#cmd_label").update(f"{header_text}\n[white]{escape(block.content)}[/]")
                        block.query_one("#block_text_edit").text = block.content
 
@@ -912,7 +910,10 @@ class ClientApp(App):
                 self.default_pty_uid = 0
 
         elif msg_type == "pty.default_changed":
-            self.default_pty_uid = msg.get("pty_uid", 0)
+            new_default = msg.get("pty_uid", 0)
+            if self.input_mode in ("BASH", "CMD", "NOTE") and getattr(self, "current_pty_uid", None) == self.default_pty_uid:
+                self.current_pty_uid = new_default
+            self.default_pty_uid = new_default
             name = self.ptys.get(self.default_pty_uid, {}).get("name", "unknown")
             self.notify(f"Default PTY: {name}")
 
