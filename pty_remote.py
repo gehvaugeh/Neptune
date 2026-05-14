@@ -88,41 +88,50 @@ class RemotePTY(BasePTY):
     async def run_command(self, block: dict):
         self.current_block_id = block.get("id")
         cmd = block.get("content").strip()
-        self.shell_proc.stdin.write(f"{cmd}\n".encode())
-        await self.shell_proc.stdin.drain()
-        await self._monitor_command(block.get("id"))
 
-    async def _monitor_command(self, block_id: str):
+        sentinel = f"NS_{os.urandom(4).hex()}"
+        # Use same sentinel logic as LocalPTY for RemotePTY
+        wrapper = f"{cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
+
+        self.shell_proc.stdin.write(wrapper.encode())
+        await self.shell_proc.stdin.drain()
+        await self._monitor_command(block.get("id"), sentinel)
+
+    async def _monitor_command(self, block_id: str, sentinel: str):
+        buf = ""
         try:
-            await asyncio.sleep(0.2)
-            while await self.is_running():
+            while True:
                 try:
                     chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
-                    if chunk:
-                        await self.broadcast({
-                            "type": "output", "block_id": block_id,
-                            "data": chunk.decode(errors="replace"), "pty_uid": self.pty_uid
-                        })
-                except asyncio.TimeoutError: pass
-                await asyncio.sleep(0.1)
-
-            # Drain remaining output
-            for _ in range(10):
-                try:
-                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.05)
                     if not chunk: break
-                    await self.broadcast({
-                        "type": "output", "block_id": block_id,
-                        "data": chunk.decode(errors="replace"), "pty_uid": self.pty_uid
-                    })
-                except: break
+                    buf += chunk.decode(errors="replace")
 
-            # Update CWD after command
-            await self._update_cwd()
+                    # Search for sentinel
+                    match = re.search(rf'\x1e{re.escape(sentinel)}_(-?\d+)_([^\x1f]*?)\x1f', buf)
+                    if match:
+                        out_data = buf[:match.start()]
+                        if out_data:
+                            await self.broadcast({"type": "output", "block_id": block_id, "data": out_data, "pty_uid": self.pty_uid})
 
-            await self.broadcast({"type": "update_block", "block": {
-                "id": block_id, "status": "done", "pty_uid": self.pty_uid, "cwd": self._cwd
-            }})
+                        exit_code = int(match.group(1))
+                        self._cwd = match.group(2).strip()
+
+                        await self.broadcast({"type": "update_block", "block": {
+                            "id": block_id, "status": "ok" if exit_code == 0 else f"error({exit_code})", "pty_uid": self.pty_uid, "cwd": self._cwd
+                        }})
+                        break
+
+                    # Broadcast intermediate output (excluding partial sentinels)
+                    idx = buf.find('\x1e')
+                    if idx > 0:
+                        await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:idx], "pty_uid": self.pty_uid})
+                        buf = buf[idx:]
+                    elif idx == -1 and buf:
+                        await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
+                        buf = ""
+
+                except asyncio.TimeoutError:
+                    continue
         finally:
             self.current_block_id = None
 

@@ -77,6 +77,11 @@ class PTYManager:
 
                 self.running_blocks.add(block.get("id"))
                 try:
+                    # Mark block as running
+                    await self.broadcast({
+                        "type": "update_block",
+                        "block": {"id": block.get("id"), "status": "running", "pty_uid": uid, "pty_name": self.names.get(uid)}
+                    })
                     await self.broadcast_queues_status()
                     await pty.run_command(block)
                 finally:
@@ -125,21 +130,40 @@ class PTYManager:
                 "uid": uid,
                 "name": self.names.get(uid, f"pty-{uid}"),
                 "type": "local" if isinstance(pty, LocalPTY) else "remote",
-                "status": "running" if pty.is_running() else "idle",
+                "status": "running" if pty.current_block_id else "idle",
                 "block_count": pty.queue.qsize(),
                 "default": uid == self.default_pty_uid
             }
             for uid, pty in self.ptys.items()
         ]
 
+    async def update_all_block_statuses(self):
+        for uid, pty in self.ptys.items():
+            # Copy items from queue to see their order safely without awaiting
+            temp_list = []
+            while True:
+                try:
+                    temp_list.append(pty.queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+
+            # Put them back and broadcast status
+            for i, block in enumerate(temp_list):
+                pty.queue.put_nowait(block)
+                await self.broadcast({
+                    "type": "update_block",
+                    "block": {"id": block.get("id"), "status": f"queued({i+1})", "pty_uid": uid, "pty_name": self.names.get(uid)}
+                })
+
     async def broadcast_queues_status(self):
+        await self.update_all_block_statuses()
         queues_data = []
         for uid, pty in self.ptys.items():
             queues_data.append({
                 "uid": uid,
                 "name": self.names.get(uid),
                 "block_count": pty.queue.qsize(),
-                "status": "running" if pty.is_running() else "idle",
+                "status": "running" if pty.current_block_id else "idle",
                 "active_block_id": pty.current_block_id
             })
 

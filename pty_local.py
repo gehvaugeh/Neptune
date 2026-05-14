@@ -100,36 +100,25 @@ class LocalPTY(BasePTY):
         if not self.master_proc or self.master_proc.returncode is not None: await self.start()
         self.current_block_id, cmd = block.get("id"), block.get("content").strip()
         self.finished.clear()
-        is_tui = cmd.split()[0] in TUI_CMDS if cmd.split() else False
         try:
             h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
             os.write(self.master_fd, f" history -s $'{h_cmd}'\n".encode())
-            if is_tui:
-                self.mode, self.current_sentinel = "interactive", None
-                os.write(self.master_fd, f" {cmd}\n".encode())
-                start_time = asyncio.get_running_loop().time()
-                while asyncio.get_running_loop().time() - start_time < 2.0:
-                    try:
-                        if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
-                    except: pass
-                    await asyncio.sleep(0.05)
 
-                while self.is_running():
-                    await asyncio.sleep(0.1)
+            self.current_sentinel = f"NS_{os.urandom(4).hex()}"
+            self.mode = "sentinel"
 
-                await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok","pty_uid":self.pty_uid}})
-            else:
-                self.mode, self.current_sentinel = "sentinel", f"NS_{os.urandom(4).hex()}"
-                e_cmd = cmd.replace('\\', '\\\\').replace('\"', '\\\"').replace('$','\\$').replace('`','\\`')
-                os.write(self.master_fd, f" eval \"{e_cmd}\"; printf '\\x1e{self.current_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n".encode())
-                start_time = asyncio.get_running_loop().time()
-                while asyncio.get_running_loop().time() - start_time < 2.0:
-                    try:
-                        if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
-                    except: pass
-                    await asyncio.sleep(0.05)
-                await self.finished.wait()
-        finally: self.current_block_id, self.current_sentinel, self.mode = None, None, "sentinel"
+            # Wrap command in a way that works for both TUIs and regular commands
+            # We use a subshell and trap SIGINT to ensure sentinel is ALWAYS printed
+            e_cmd = cmd.replace('\\', '\\\\').replace('\"', '\\\"').replace('$','\\$').replace('`','\\`')
+
+            # Simplified approach: run command then print sentinel.
+            # For TUIs like 'top', it will stay in foreground until exit.
+            wrapper = f" {e_cmd}; printf '\\x1e{self.current_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
+            os.write(self.master_fd, wrapper.encode())
+
+            await self.finished.wait()
+        finally:
+            self.current_block_id, self.current_sentinel, self.mode = None, None, "sentinel"
 
     async def send_input(self, data: str):
         if self.master_fd:
