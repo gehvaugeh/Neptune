@@ -98,7 +98,7 @@ class LocalPTY(BasePTY):
 
     async def run_command(self, block: dict):
         if not self.master_proc or self.master_proc.returncode is not None: await self.start()
-        self.current_block_id, cmd = block.get("id"), block.get("content").strip()
+        cmd = block.get("content").strip()
         self.finished.clear()
         try:
             h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
@@ -118,7 +118,7 @@ class LocalPTY(BasePTY):
 
             await self.finished.wait()
         finally:
-            self.current_block_id, self.current_sentinel, self.mode = None, None, "sentinel"
+            self.current_sentinel, self.mode = None, "sentinel"
 
     async def send_input(self, data: str):
         if self.master_fd:

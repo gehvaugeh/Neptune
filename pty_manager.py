@@ -76,6 +76,7 @@ class PTYManager:
                     continue
 
                 self.running_blocks.add(block.get("id"))
+                pty.current_block_id = block.get("id")
                 try:
                     # Mark block as running
                     await self.broadcast({
@@ -85,6 +86,7 @@ class PTYManager:
                     await self.broadcast_queues_status()
                     await pty.run_command(block)
                 finally:
+                    pty.current_block_id = None
                     self.running_blocks.remove(block.get("id"))
                     pty.queue.task_done()
                     await self.broadcast_queues_status()

@@ -86,7 +86,6 @@ class RemotePTY(BasePTY):
         if "password" in self.ssh_config: del self.ssh_config["password"]
 
     async def run_command(self, block: dict):
-        self.current_block_id = block.get("id")
         cmd = block.get("content").strip()
 
         sentinel = f"NS_{os.urandom(4).hex()}"
@@ -133,7 +132,7 @@ class RemotePTY(BasePTY):
                 except asyncio.TimeoutError:
                     continue
         finally:
-            self.current_block_id = None
+            pass
 
     async def _update_cwd(self):
         cmd = self._get_ssh_base(use_socket=True)

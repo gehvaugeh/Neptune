@@ -81,7 +81,7 @@ class NeptuneCommandProvider(Provider):
                 yield Hit(
                     score,
                     matcher.highlight(name),
-                    lambda action=action: self.app.post_message(events.Action(action)),
+                    lambda action=action: getattr(self.app, f"action_{action}")(),
                     help=desc
                 )
 
