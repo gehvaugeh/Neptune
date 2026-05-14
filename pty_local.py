@@ -37,33 +37,64 @@ class LocalPTY(BasePTY):
             stdin=s, stdout=s, stderr=s, preexec_fn=os.setsid, env=env)
         os.close(s)
         h_exp = "set -H" if self.hist_exp else "set +H"
-        os.write(m, f" stty -echo\n set -m\n {h_exp}\n set -o history\n history -r\n".encode())
-        await asyncio.sleep(0.1)
+        init_sentinel = f"INIT_{os.urandom(4).hex()}"
+        os.write(m, f" stty -echo\n set -m\n {h_exp}\n set -o history\n history -r\n printf '\\x1e{init_sentinel}\\x1f'\n".encode())
+
         self.master_pgid = os.getpgid(self.master_proc.pid)
         self.reader_task = asyncio.create_task(self.reader())
 
+        # Wait for initialization sentinel
+        start_wait = asyncio.get_running_loop().time()
+        self._init_done = asyncio.Event()
+        self._init_sentinel = init_sentinel
+        try:
+            await asyncio.wait_for(self._init_done.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logging.warning(f"[{self.pty_id}] Shell initialization timed out")
+        finally:
+            self._init_sentinel = None
+
     async def reader(self):
-        buf, loop = "", asyncio.get_running_loop()
+        self._reader_buf = ""
+        loop = asyncio.get_running_loop()
         try:
             while True:
                 data = await loop.run_in_executor(None, os.read, self.master_fd, 4096)
                 if not data: break
-                buf += data.decode(errors="replace")
+                self._reader_buf += data.decode(errors="replace")
+
+                if getattr(self, "_init_sentinel", None):
+                    if f"\x1e{self._init_sentinel}\x1f" in self._reader_buf:
+                        parts = self._reader_buf.split(f"\x1e{self._init_sentinel}\x1f", 1)
+                        self._reader_buf = parts[1]
+                        self._init_done.set()
+
                 if self.current_block_id:
                     if self.current_sentinel:
                         while True:
-                            match = re.search(rf'\x1e{re.escape(self.current_sentinel)}_(-?\d+)_([^\x1f]*?)\x1f', buf)
+                            match = re.search(rf'\x1e{re.escape(self.current_sentinel)}_(-?\d+)_([^\x1f]*?)\x1f', self._reader_buf)
                             if not match: break
-                            if buf[:match.start()]: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf[:match.start()],"pty_uid":self.pty_uid})
+                            out_data = self._reader_buf[:match.start()]
+                            if out_data: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":out_data,"pty_uid":self.pty_uid})
                             self.shell_cwd = match.group(2).strip()
                             await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok" if int(match.group(1))==0 else f"error({match.group(1)})","cwd":self.shell_cwd,"pty_uid":self.pty_uid}})
-                            buf, _ = buf[match.end():], self.finished.set()
-                        idx = buf.find('\x1e')
-                        if idx > 0: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf[:idx],"pty_uid":self.pty_uid}); buf = buf[idx:]
-                        elif idx == -1 and buf: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf,"pty_uid":self.pty_uid}); buf = ""
-                    else: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":buf,"pty_uid":self.pty_uid}); buf = ""
-        except: pass
-        finally: self.finished.set()
+                            self._reader_buf = self._reader_buf[match.end():]
+                            self.finished.set()
+
+                        idx = self._reader_buf.find('\x1e')
+                        if idx > 0:
+                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:idx],"pty_uid":self.pty_uid})
+                            self._reader_buf = self._reader_buf[idx:]
+                        elif idx == -1 and self._reader_buf:
+                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
+                            self._reader_buf = ""
+                    else:
+                        await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
+                        self._reader_buf = ""
+        except Exception as e:
+            logging.error(f"Reader error in {self.pty_id}: {e}")
+        finally:
+            self.finished.set()
 
     async def run_command(self, block: dict):
         if not self.master_proc or self.master_proc.returncode is not None: await self.start()
@@ -77,18 +108,22 @@ class LocalPTY(BasePTY):
                 self.mode, self.current_sentinel = "interactive", None
                 os.write(self.master_fd, f" {cmd}\n".encode())
                 start_time = asyncio.get_running_loop().time()
-                while asyncio.get_running_loop().time() - start_time < 0.5:
+                while asyncio.get_running_loop().time() - start_time < 2.0:
                     try:
                         if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
                     except: pass
                     await asyncio.sleep(0.05)
+
+                while self.is_running():
+                    await asyncio.sleep(0.1)
+
                 await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok","pty_uid":self.pty_uid}})
             else:
                 self.mode, self.current_sentinel = "sentinel", f"NS_{os.urandom(4).hex()}"
                 e_cmd = cmd.replace('\\', '\\\\').replace('\"', '\\\"').replace('$','\\$').replace('`','\\`')
                 os.write(self.master_fd, f" eval \"{e_cmd}\"; printf '\\x1e{self.current_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n".encode())
                 start_time = asyncio.get_running_loop().time()
-                while asyncio.get_running_loop().time() - start_time < 0.5:
+                while asyncio.get_running_loop().time() - start_time < 2.0:
                     try:
                         if os.tcgetpgrp(self.master_fd) != self.master_pgid: break
                     except: pass

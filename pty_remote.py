@@ -60,20 +60,27 @@ class RemotePTY(BasePTY):
         )
 
         # Step 3, 4, 5: Get TTY, PGID, CWD and set prompt
-        await asyncio.sleep(0.5)
-        self.shell_proc.stdin.write(b"stty -echo\ntty\necho $$\npwd\nexport PS1='NEPTUNE> '\n")
+        init_sentinel = f"INIT_{os.urandom(4).hex()}"
+        self.shell_proc.stdin.write(f"stty -echo\ntty\necho $$\npwd\nexport PS1='NEPTUNE> '\necho '{init_sentinel}'\n".encode())
         await self.shell_proc.stdin.drain()
 
         start = time.time()
-        while (not (self.remote_tty and self.shell_pgid and self._cwd)) and (time.time() - start < 5.0):
+        init_done = False
+        while time.time() - start < 10.0:
             try:
                 line = (await asyncio.wait_for(self.shell_proc.stdout.readline(), 1.0)).decode(errors="replace").strip()
                 if not line or "NEPTUNE>" in line: continue
+                if init_sentinel in line:
+                    init_done = True
+                    break
                 if "/dev/" in line and not self.remote_tty: self.remote_tty = line
                 elif line.isdigit() and not self.shell_pgid: self.shell_pgid = int(line)
                 elif line.startswith("/") and not self._cwd: self._cwd = line
-            except asyncio.TimeoutError: break
+            except asyncio.TimeoutError: continue
             except Exception: break
+
+        if not init_done:
+            logging.warning(f"[{self.pty_id}] Remote initialization signal not received")
 
         if password: self.ssh_config["password"] = "x" * len(password)
         if "password" in self.ssh_config: del self.ssh_config["password"]
