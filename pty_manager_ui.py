@@ -209,7 +209,7 @@ class PTYManagerModal(ModalScreen):
                     else:
                         info = self.ptys[uid]
                         if info.get("block_count", 0) > 0 or info.get("status") == "running":
-                            self.push_screen(ConfirmKillModal(info.get("name")),
+                            self.app.push_screen(ConfirmKillModal(info.get("name")),
                                 lambda res, u=uid: self._do_delete(u) if res else None)
                         else:
                             self._do_delete(uid)
@@ -220,7 +220,7 @@ class PTYManagerModal(ModalScreen):
                 uid_str = ol.get_option_at_index(ol.highlighted).id
                 if uid_str:
                     uid = int(uid_str)
-                    self.push_screen(RenamePTYModal(self.ptys[uid].get("name")),
+                    self.app.push_screen(RenamePTYModal(self.ptys[uid].get("name")),
                         lambda res, u=uid: self._do_rename(u, res) if res else None)
             event.stop()
         elif event.key == "n":
@@ -240,5 +240,5 @@ class PTYManagerModal(ModalScreen):
         self.app.run_worker(self.app.send_message({"type": "pty.create.local"}))
 
     def _do_new_remote(self):
-        self.push_screen(RemotePTYAuthModal("", ""),
+        self.app.push_screen(RemotePTYAuthModal("", ""),
             lambda res: self.app.run_worker(self.app._finish_remote_pty_create("", "", res)) if res else None)
