@@ -890,7 +890,7 @@ class ClientApp(App):
                     self.enter_normal_mode()
 
         elif msg_type == "pty.created":
-            uid = msg.get("uid")
+            uid = int(msg.get("uid"))
             pty_type = msg.get("pty_type")
             is_default = msg.get("default", False)
             self.ptys[uid] = {"type": pty_type, "status": "idle", "block_count": 0, "name": msg.get("name")}
@@ -901,7 +901,7 @@ class ClientApp(App):
             self.notify(f"PTY created: {msg.get('name')} (UID:{uid})")
 
         elif msg_type == "pty.destroyed":
-            uid = msg.get("uid")
+            uid = int(msg.get("uid"))
             if uid in self.ptys:
                 name = self.ptys[uid].get("name")
                 del self.ptys[uid]
@@ -910,7 +910,7 @@ class ClientApp(App):
                 self.default_pty_uid = 0
 
         elif msg_type == "pty.default_changed":
-            new_default = msg.get("pty_uid", 0)
+            new_default = int(msg.get("pty_uid", 0))
             if self.input_mode in ("BASH", "CMD", "NOTE") and getattr(self, "current_pty_uid", None) == self.default_pty_uid:
                 self.current_pty_uid = new_default
             self.default_pty_uid = new_default
@@ -926,7 +926,7 @@ class ClientApp(App):
             # Update local state from server list
             active_uids = []
             for p in server_ptys:
-                uid = p.get("uid")
+                uid = int(p.get("uid"))
                 active_uids.append(uid)
                 self.ptys[uid] = {
                     "type": p.get("type", "local"),
@@ -942,16 +942,28 @@ class ClientApp(App):
                 if uid not in active_uids:
                     del self.ptys[uid]
 
+            # Update PTY Manager if open
+            for screen in self.screen_stack:
+                if isinstance(screen, PTYManagerModal):
+                    screen.ptys = self.ptys
+                    screen.default_pty_uid = self.default_pty_uid
+                    screen.update_list()
+
         elif msg_type == "queue_status":
             queues = msg.get("queues", [])
             for q in queues:
-                uid = q.get("uid")
+                uid = int(q.get("uid"))
                 if uid in self.ptys:
                     self.ptys[uid]["block_count"] = q.get("block_count", 0)
                     if "status" in q:
                         self.ptys[uid]["status"] = q.get("status")
                     if "active_block_id" in q:
                         self.ptys[uid]["active_block_id"] = q.get("active_block_id")
+
+            # Update PTY Manager if open
+            for screen in self.screen_stack:
+                if isinstance(screen, PTYManagerModal):
+                    screen.update_list()
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data.get("id")
@@ -1238,15 +1250,6 @@ class ClientApp(App):
             uid = res.get("uid")
             self.run_worker(self.send_message({"type": "pty.set_default", "pty_uid": uid}))
             self.enter_input_mode(prefix="!", pty_uid=uid)
-        elif action == "delete":
-            self.run_worker(self.send_message({"type": "pty.destroy", "pty_uid": res.get("uid")}))
-        elif action == "rename":
-            self.run_worker(self.send_message({"type": "pty.rename", "pty_uid": res.get("uid"), "name": res.get("name")}))
-        elif action == "new_local":
-            self.run_worker(self.send_message({"type": "pty.create.local"}))
-        elif action == "new_remote":
-             self.push_screen(RemotePTYAuthModal("", ""),
-                        self._finish_remote_pty_create_callback)
 
     def _finish_remote_pty_create_callback(self, res):
         self.run_worker(self._finish_remote_pty_create("", "", res))

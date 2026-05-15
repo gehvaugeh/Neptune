@@ -209,7 +209,7 @@ class PTYManagerModal(ModalScreen):
                     else:
                         info = self.ptys[uid]
                         if info.get("block_count", 0) > 0 or info.get("status") == "running":
-                            self.app.push_screen(ConfirmKillModal(info.get("name")),
+                            self.push_screen(ConfirmKillModal(info.get("name")),
                                 lambda res, u=uid: self._do_delete(u) if res else None)
                         else:
                             self._do_delete(uid)
@@ -220,20 +220,25 @@ class PTYManagerModal(ModalScreen):
                 uid_str = ol.get_option_at_index(ol.highlighted).id
                 if uid_str:
                     uid = int(uid_str)
-                    self.app.push_screen(RenamePTYModal(self.ptys[uid].get("name")),
+                    self.push_screen(RenamePTYModal(self.ptys[uid].get("name")),
                         lambda res, u=uid: self._do_rename(u, res) if res else None)
             event.stop()
         elif event.key == "n":
-            self.dismiss({"action": "new_local"})
+            self._do_new_local()
             event.stop()
         elif event.key == "N":
-            self.dismiss({"action": "new_remote"})
+            self._do_new_remote()
             event.stop()
 
     def _do_delete(self, uid):
-        # We can't directly communicate with server from here easily without app ref
-        # but we can dismiss with the action
-        self.dismiss({"action": "delete", "uid": uid})
+        self.app.run_worker(self.app.send_message({"type": "pty.destroy", "pty_uid": int(uid)}))
 
     def _do_rename(self, uid, new_name):
-        self.dismiss({"action": "rename", "uid": uid, "name": new_name})
+        self.app.run_worker(self.app.send_message({"type": "pty.rename", "pty_uid": int(uid), "name": new_name}))
+
+    def _do_new_local(self):
+        self.app.run_worker(self.app.send_message({"type": "pty.create.local"}))
+
+    def _do_new_remote(self):
+        self.push_screen(RemotePTYAuthModal("", ""),
+            lambda res: self.app.run_worker(self.app._finish_remote_pty_create("", "", res)) if res else None)

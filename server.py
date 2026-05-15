@@ -55,7 +55,12 @@ class Server:
                     if msg.get("insert_after"):
                         t_idx = next((i for i, b in enumerate(self.blocks) if b.get("id") == msg.get("insert_after")), -1)
                         if t_idx != -1: idx = t_idx + 1
-                    block = self.add_block(msg.get("mode"), msg.get("content"), index=idx, pty_uid=msg.get("pty_uid"))
+
+                    p_uid = msg.get("pty_uid")
+                    try: p_uid = int(p_uid) if p_uid is not None else None
+                    except: pass
+
+                    block = self.add_block(msg.get("mode"), msg.get("content"), index=idx, pty_uid=p_uid)
                     if idx is not None: await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
                     else: await self.session_manager.broadcast({"type":"new_block", "block":block})
                     b_type = block.get("type")
@@ -115,7 +120,10 @@ class Server:
                     block = self.get_block(msg.get("block_id"))
                     if block and block.get("type") == "CMD":
                         if msg.get("pty_uid") is not None:
-                            block["pty_uid"] = msg.get("pty_uid")
+                            p_uid = msg.get("pty_uid")
+                            try: p_uid = int(p_uid)
+                            except: pass
+                            block["pty_uid"] = p_uid
                             block["pty_name"] = self.pty_manager.names.get(block["pty_uid"], "unknown")
                         block["output"] = ""
                         b_pty_uid = block["pty_uid"]
@@ -183,7 +191,12 @@ class Server:
                 elif msg_type == "pty.destroy":
                     try: uid = int(msg.get("pty_uid"))
                     except: uid = msg.get("pty_uid")
-                    await self.pty_manager.destroy(uid); await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
+                    await self.pty_manager.destroy(uid)
+                    # After destroying, ensure we broadcast the updated list and potential default change
+                    if self.pty_manager.default_pty_uid == uid:
+                         self.pty_manager.default_pty_uid = 0
+                         await self.session_manager.broadcast({"type":"pty.default_changed", "pty_uid": 0})
+                    await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                 elif msg_type == "pty.set_default":
                     try: uid = int(msg.get("pty_uid"))
                     except: uid = msg.get("pty_uid")
