@@ -21,12 +21,14 @@ class RemotePTY(BasePTY):
     def _get_ssh_base(self, use_socket: bool = True) -> List[str]:
         host, user = self.ssh_config.get("host"), self.ssh_config.get("user")
         key, password = self.ssh_config.get("key"), self.ssh_config.get("password")
+        port = self.ssh_config.get("port")
         cmd = []
         if password and password != "x" * len(password):
             cmd.extend(["sshpass", "-p", password])
         cmd.append("ssh")
         if use_socket: cmd.extend(["-S", self.socket_path])
         if key: cmd.extend(["-i", key])
+        if port: cmd.extend(["-p", str(port)])
         cmd.extend(["-o", "BatchMode=no", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"])
         cmd.append(f"{user}@{host}" if user else host)
         return cmd

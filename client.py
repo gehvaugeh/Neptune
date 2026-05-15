@@ -914,6 +914,7 @@ class ClientApp(App):
             if self.input_mode in ("BASH", "CMD", "NOTE") and getattr(self, "current_pty_uid", None) == self.default_pty_uid:
                 self.current_pty_uid = new_default
             self.default_pty_uid = new_default
+            self.update_mode_label()
             name = self.ptys.get(self.default_pty_uid, {}).get("name", "unknown")
             self.notify(f"Default PTY: {name}")
 
@@ -1144,7 +1145,15 @@ class ClientApp(App):
             "CONTROL": "#f44336"
         }
         c = colors.get(self.input_mode, "#7c4dff")
-        self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
+        text = f"[bold {c}]MODE: {self.input_mode}[/]"
+
+        if self.input_mode in ("BASH", "CMD", "NOTE"):
+            uid = getattr(self, "current_pty_uid", self.default_pty_uid)
+            info = self.ptys.get(uid, {})
+            name = info.get("name", f"pty-{uid}")
+            text += f" [cyan]➔ {name} (ID:{uid})[/]"
+
+        self.mode_label.update(text)
 
     def enter_control_mode(self, block):
         if not isinstance(block, CommandBlock):
@@ -1407,25 +1416,37 @@ class ClientApp(App):
             self.enter_input_mode(prefix="!")
             return
 
-        # 4. user@host[:key] -> remote
+        # 4. user@host[:port][:key] -> remote
         if "@" in target:
-            host_part = target
+            parts = target.split(":")
+            user_host = parts[0]
+            user, host = user_host.split("@", 1)
+            port = "22"
             key_path = "~/.ssh/id_rsa"
-            if ":" in target:
-                host_part, key_path = target.split(":", 1)
 
-            user, host = host_part.split("@", 1)
+            if len(parts) > 1:
+                # Check if second part is a port or key path
+                if parts[1].isdigit():
+                    port = parts[1]
+                    if len(parts) > 2:
+                        key_path = parts[2]
+                else:
+                    key_path = parts[1]
 
-            if ":" in target: # user@host:key was provided, skip modal
-                 await self.send_message({
-                     "type": "pty.create.remote",
-                     "name": host,
-                     "ssh_config": {"host": host, "user": user, "key": key_path}
-                 })
-                 self.enter_input_mode(prefix="!")
-            else:
-                self.push_screen(RemotePTYAuthModal(host, user, key_path),
-                    lambda res: asyncio.create_task(self._finish_remote_pty_create(host, user, res)))
+            if len(parts) > 1: # Some extra info provided, maybe skip modal
+                 # If only port was provided, we might still want the modal for key/password
+                 # Unless it's user@host:port:key
+                 if len(parts) > 2:
+                     await self.send_message({
+                         "type": "pty.create.remote",
+                         "name": host,
+                         "ssh_config": {"host": host, "user": user, "port": port, "key": key_path}
+                     })
+                     self.enter_input_mode(prefix="!")
+                     return
+
+            self.push_screen(RemotePTYAuthModal(host, user, port, key_path),
+                lambda res: self.run_worker(self._finish_remote_pty_create(host, user, res)))
             return
 
         self.notify(f"Unknown PTY target: {target}", severity="error")
@@ -1442,7 +1463,7 @@ class ClientApp(App):
         msg = {
             "type": "pty.create.remote",
             "name": h,
-            "ssh_config": {"host": h, "user": u}
+            "ssh_config": {"host": h, "user": u, "port": res.get("port", "22")}
         }
         if res.get("method") == "key":
             msg.get("ssh_config", {})["key"] = res.get("value")

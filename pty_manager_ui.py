@@ -9,10 +9,11 @@ from textual import on, events, message
 from common import fuzzy_match
 
 class RemotePTYAuthModal(ModalScreen):
-    def __init__(self, host: str = "", user: str = "", key_path: str = "~/.ssh/id_rsa"):
+    def __init__(self, host: str = "", user: str = "", port: str = "22", key_path: str = "~/.ssh/id_rsa"):
         super().__init__()
         self.host = host
         self.user = user
+        self.port = port
         self.key_path = key_path
 
     def on_mount(self):
@@ -30,6 +31,11 @@ class RemotePTYAuthModal(ModalScreen):
                 yield Label(f"Host: [white]{self.user}@{self.host}[/]")
             else:
                 yield Input(placeholder="user@host", id="auth_host_user")
+
+            with Horizontal(classes="modal-row"):
+                yield Label("Port: ")
+                yield Input(value=self.port, placeholder="22", id="auth_port")
+
             with Horizontal(id="auth_type_row", classes="modal-row"):
                 yield Label("Auth: ")
                 yield Button("Key", id="toggle_auth", variant="primary")
@@ -62,6 +68,7 @@ class RemotePTYAuthModal(ModalScreen):
     def ok(self):
         is_key = self.query_one("#toggle_auth").label == "Key"
         val = self.query_one("#auth_key").value if is_key else self.query_one("#auth_pass").value
+        port = self.query_one("#auth_port").value or "22"
 
         host_user = {}
         if not self.host or not self.user:
@@ -75,9 +82,10 @@ class RemotePTYAuthModal(ModalScreen):
         else:
             host_user = {"user": self.user, "host": self.host}
 
-        self.dismiss({"method": "key" if is_key else "password", "value": val, **host_user})
+        self.dismiss({"method": "key" if is_key else "password", "value": val, "port": port, **host_user})
 
     @on(Input.Submitted, "#auth_host_user")
+    @on(Input.Submitted, "#auth_port")
     @on(Input.Submitted, "#auth_key")
     @on(Input.Submitted, "#auth_pass")
     def on_submit(self): self.ok()
