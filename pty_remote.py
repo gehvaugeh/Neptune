@@ -63,7 +63,14 @@ class RemotePTY(BasePTY):
 
         # Step 3, 4, 5: Get TTY, PGID, CWD and set prompt
         init_sentinel = f"INIT_{os.urandom(4).hex()}"
-        self.shell_proc.stdin.write(f"stty -echo\ntty\necho $$\npwd\nexport PS1=''; export PS2=''\necho '{init_sentinel}'\n".encode())
+        init_script = (
+            f"stty -echo opost onlcr\n"
+            f"export TERM=xterm-256color\n"
+            f"export PS1=''; export PS2=''\n"
+            f"tty\necho $$\npwd\n"
+            f"echo '{init_sentinel}'\n"
+        )
+        self.shell_proc.stdin.write(init_script.encode())
         await self.shell_proc.stdin.drain()
 
         start = time.time()

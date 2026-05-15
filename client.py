@@ -279,7 +279,7 @@ class NotebookInput(TextArea):
                 # as separate flags in the key string itself, but we check the specific key name.
                 event.stop(); event.prevent_default()
                 asyncio.create_task(self.app.action_submit())
-        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m", "shift+enter"):
+        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m", "shift+enter", "shift+return"):
             # Allow multiline for BASH and NOTE
             if self.app.input_mode in ("BASH", "NOTE"):
                 event.stop(); event.prevent_default()

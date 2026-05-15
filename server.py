@@ -170,7 +170,10 @@ class Server:
                     uid = msg.get("pty_uid") if msg.get("pty_uid") is not None else (b["pty_uid"] if b else self.pty_manager.default_pty_uid)
                     try: uid = int(uid)
                     except: pass
-                    if uid in self.pty_manager.ptys: await self.pty_manager.ptys[uid].resize(msg.get("rows"), msg.get("cols"))
+
+                    rows, cols = msg.get("rows"), msg.get("cols")
+                    self.pty_manager.terminal_size = (rows, cols)
+                    if uid in self.pty_manager.ptys: await self.pty_manager.ptys[uid].resize(rows, cols)
                 elif msg_type == "terminal_set_echo":
                     uid = msg.get("pty_uid") if msg.get("pty_uid") is not None else self.pty_manager.default_pty_uid
                     try: uid = int(uid)

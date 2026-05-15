@@ -15,6 +15,7 @@ class PTYManager:
         self.enable_hist_expansion = enable_hist_expansion
         self.running_blocks: Set[str] = set()
         self.uid_counter = 0
+        self.terminal_size = (24, 80)
 
     async def create_local(self, name: Optional[str] = None) -> LocalPTY:
         uid = self.uid_counter
@@ -26,6 +27,7 @@ class PTYManager:
         pty_id = name # Use name as pty_id for internal BasePTY compatibility if needed, but we rely on UID
         pty = LocalPTY(uid, pty_id, self.broadcast, self.enable_hist_expansion)
         await pty.start()
+        await pty.resize(*self.terminal_size)
 
         self.ptys[uid] = pty
         self.names[uid] = name
@@ -51,6 +53,7 @@ class PTYManager:
         pty_id = name
         pty = RemotePTY(uid, pty_id, self.broadcast)
         await pty.connect(ssh_config)
+        await pty.resize(*self.terminal_size)
 
         self.ptys[uid] = pty
         self.names[uid] = name
