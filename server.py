@@ -85,7 +85,9 @@ class Server:
                         b_type = block.get("type")
                         b_pty_uid = block["pty_uid"]
                         if b_type == "CMD" and b_pty_uid in self.pty_manager.ptys:
-                            block["output"] = ""; await self.pty_manager.ptys[b_pty_uid].queue.put(block); await self.pty_manager.broadcast_queues_status()
+                            block["output"] = ""
+                            await self.session_manager.broadcast({"type": "update_block", "block": block})
+                            await self.pty_manager.ptys[b_pty_uid].queue.put(block); await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "edit_cancel":
                     block = self.get_block(msg.get("block_id"))
                     if block and block["locked_by"] == user_id:
@@ -126,6 +128,7 @@ class Server:
                             block["pty_uid"] = p_uid
                             block["pty_name"] = self.pty_manager.names.get(block["pty_uid"], "unknown")
                         block["output"] = ""
+                        await self.session_manager.broadcast({"type": "update_block", "block": block})
                         b_pty_uid = block["pty_uid"]
                         if b_pty_uid in self.pty_manager.ptys:
                             await self.pty_manager.ptys[b_pty_uid].queue.put(block); await self.pty_manager.broadcast_queues_status()

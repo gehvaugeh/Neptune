@@ -38,7 +38,7 @@ class LocalPTY(BasePTY):
         os.close(s)
         h_exp = "set -H" if self.hist_exp else "set +H"
         init_sentinel = f"INIT_{os.urandom(4).hex()}"
-        os.write(m, f" stty -echo\n set -m\n {h_exp}\n set -o history\n history -r\n printf '\\x1e{init_sentinel}\\x1f'\n".encode())
+        os.write(m, f" stty -echo\n PS1=''; PS2=''; set -m\n {h_exp}\n set -o history\n history -r\n printf '\\x1e{init_sentinel}\\x1f'\n".encode())
 
         self.master_pgid = os.getpgid(self.master_proc.pid)
         self.reader_task = asyncio.create_task(self.reader())

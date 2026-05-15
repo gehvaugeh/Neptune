@@ -78,10 +78,10 @@ class PTYManager:
                 self.running_blocks.add(block.get("id"))
                 pty.current_block_id = block.get("id")
                 try:
-                    # Mark block as running
+                    # Mark block as running and clear output
                     await self.broadcast({
                         "type": "update_block",
-                        "block": {"id": block.get("id"), "status": "running", "pty_uid": uid, "pty_name": self.names.get(uid)}
+                        "block": {"id": block.get("id"), "status": "running", "pty_uid": uid, "pty_name": self.names.get(uid), "output": ""}
                     })
                     await self.broadcast_queues_status()
                     await pty.run_command(block)

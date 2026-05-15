@@ -63,7 +63,7 @@ class RemotePTY(BasePTY):
 
         # Step 3, 4, 5: Get TTY, PGID, CWD and set prompt
         init_sentinel = f"INIT_{os.urandom(4).hex()}"
-        self.shell_proc.stdin.write(f"stty -echo\ntty\necho $$\npwd\nexport PS1='NEPTUNE> '\necho '{init_sentinel}'\n".encode())
+        self.shell_proc.stdin.write(f"stty -echo\ntty\necho $$\npwd\nexport PS1=''; export PS2=''\necho '{init_sentinel}'\n".encode())
         await self.shell_proc.stdin.drain()
 
         start = time.time()
@@ -71,7 +71,7 @@ class RemotePTY(BasePTY):
         while time.time() - start < 10.0:
             try:
                 line = (await asyncio.wait_for(self.shell_proc.stdout.readline(), 1.0)).decode(errors="replace").strip()
-                if not line or "NEPTUNE>" in line: continue
+                if not line: continue
                 if init_sentinel in line:
                     init_done = True
                     break

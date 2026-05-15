@@ -1159,7 +1159,7 @@ class ClientApp(App):
         c = colors.get(self.input_mode, "#7c4dff")
         text = f"[bold {c}]MODE: {self.input_mode}[/]"
 
-        if self.input_mode in ("BASH", "CMD", "NOTE"):
+        if self.input_mode == "BASH":
             uid = getattr(self, "current_pty_uid", self.default_pty_uid)
             info = self.ptys.get(uid, {})
             name = info.get("name", f"pty-{uid}")
