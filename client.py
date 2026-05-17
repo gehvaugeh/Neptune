@@ -892,10 +892,7 @@ class ClientApp(App):
         elif msg_type == "pty.created":
             uid = int(msg.get("uid"))
             pty_type = msg.get("pty_type")
-            is_default = msg.get("default", False)
             self.ptys[uid] = {"type": pty_type, "status": "idle", "block_count": 0, "name": msg.get("name")}
-            if is_default:
-                self.default_pty_uid = uid
             if pty_type == "remote":
                 self.last_remote_pty_uid = uid
             self.notify(f"PTY created: {msg.get('name')} (UID:{uid})")
@@ -908,15 +905,13 @@ class ClientApp(App):
                 self.notify(f"PTY destroyed: {name} (UID:{uid})")
             if self.default_pty_uid == uid:
                 self.default_pty_uid = 0
+                self.notify(f"Default PTY destroyed. Resetting to ID:0", severity="warning")
+            if getattr(self, "current_pty_uid", None) == uid:
+                self.current_pty_uid = 0
 
         elif msg_type == "pty.default_changed":
-            new_default = int(msg.get("pty_uid", 0))
-            if self.input_mode in ("BASH", "CMD", "NOTE") and getattr(self, "current_pty_uid", None) == self.default_pty_uid:
-                self.current_pty_uid = new_default
-            self.default_pty_uid = new_default
-            self.update_mode_label()
-            name = self.ptys.get(self.default_pty_uid, {}).get("name", "unknown")
-            self.notify(f"Default PTY: {name}")
+            # Handled client-side now
+            pass
 
         elif msg_type == "pty.error":
             self.notify(f"PTY Error: {msg.get('message')}", severity="error")
@@ -935,8 +930,6 @@ class ClientApp(App):
                     "active_block_id": p.get("active_block_id"),
                     "name": p.get("name")
                 }
-                if p.get("default"):
-                    self.default_pty_uid = uid
             # Remove ptys no longer on server
             for uid in list(self.ptys.keys()):
                 if uid not in active_uids:
@@ -1197,6 +1190,14 @@ class ClientApp(App):
         if self.input_mode == "BASH":
             content = text.strip()
             self.history.add(content)
+
+            if target_pty_uid not in self.ptys:
+                self.notify(f"Selected PTY (ID:{target_pty_uid}) no longer exists. Resetting to default.", severity="error")
+                self.default_pty_uid = 0
+                self.current_pty_uid = 0
+                self.action_spawn_pty_manager()
+                return
+
             # No longer intercepting 'cd' here; it will be handled by the server's master shell.
             await self.send_message({
                 "type": "submit",
@@ -1248,7 +1249,7 @@ class ClientApp(App):
         action = res.get("action")
         if action == "select":
             uid = res.get("uid")
-            self.run_worker(self.send_message({"type": "pty.set_default", "pty_uid": uid}))
+            self.default_pty_uid = uid
             self.enter_input_mode(prefix="!", pty_uid=uid)
 
     def _finish_remote_pty_create_callback(self, res):
@@ -1266,6 +1267,23 @@ class ClientApp(App):
 
     def action_clear_session(self):
         asyncio.create_task(self.send_message({"type": "clear_session"}))
+
+    async def _rerun_block(self, block):
+        if not isinstance(block, CommandBlock): return
+
+        uid = block.pty_uid
+        if uid is None or uid not in self.ptys:
+            self.notify(f"Assigned PTY (ID:{uid}) no longer exists. Please select a new PTY.", severity="warning")
+            def _handle_reassign(res):
+                if res and res.get("action") == "select":
+                    block.pty_uid = res.get("uid")
+                    block.pty_name = self.ptys.get(block.pty_uid, {}).get("name", "unknown")
+                    asyncio.create_task(self.send_message({"type": "run_block", "block_id": block.block_id, "pty_uid": block.pty_uid}))
+
+            self.push_screen(PTYManagerModal(self.ptys, self.default_pty_uid), _handle_reassign)
+            return
+
+        await self.send_message({"type": "run_block", "block_id": block.block_id, "pty_uid": uid})
 
     def export_notebook(self, filename: str):
         if not filename: return
@@ -1531,7 +1549,8 @@ class ClientApp(App):
                 if not hasattr(self, "_bang_uid_buffer"): self._bang_uid_buffer = ""
                 self._bang_uid_buffer += event.character
                 # Restart delay for potentially more digits
-                self.bang_time = time.time()
+                t_now = time.time()
+                self.bang_time = t_now
 
                 async def delayed_uid_finish(t):
                     await asyncio.sleep(0.4) # Slightly longer for multi-digit
@@ -1540,10 +1559,11 @@ class ClientApp(App):
                         self._bang_uid_buffer = ""
                         self.bang_time = 0
                         if uid in self.ptys:
+                            # Enter input mode for this UID without changing default
                             self.enter_input_mode(prefix="!", pty_uid=uid)
                         else:
                             self.notify(f"No PTY with UID {uid}", severity="error")
-                asyncio.create_task(delayed_uid_finish(self.bang_time))
+                asyncio.create_task(delayed_uid_finish(t_now))
                 event.stop(); event.prevent_default(); return
 
         if self.input_mode == "NORMAL":
@@ -1589,7 +1609,7 @@ class ClientApp(App):
                  blocks[new_idx].focus(); blocks[new_idx].scroll_visible()
                  self.last_selected_block_id = blocks[new_idx].block_id
             elif event.key == "x": asyncio.create_task(self.action_delete_block())
-            elif event.key == "r": asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id, "pty_uid": focused.pty_uid if isinstance(focused, CommandBlock) else self.default_pty_uid}))
+            elif event.key == "r": self.run_worker(self._rerun_block(focused))
             elif event.key == "y":
                  if isinstance(focused, NoteBlock): self.yank_buffer = ("NOTE", focused.content); self.notify("Note yanked")
                  elif isinstance(focused, CommandBlock): self.yank_buffer = ("CMD", focused.content, focused.cwd); self.notify("Command yanked")
@@ -1600,7 +1620,7 @@ class ClientApp(App):
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
             elif event.key == "ctrl+s" and isinstance(focused, CommandBlock): self.action_save_workflow(focused.content)
             elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
-            elif event.key in ("j", "enter", "ctrl+j") and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id, "pty_uid": focused.pty_uid}))
+            elif event.key in ("j", "enter", "ctrl+j") and isinstance(focused, CommandBlock): self.run_worker(self._rerun_block(focused))
             elif event.key in ("ctrl+up", "alt+up"): asyncio.create_task(self.action_move_up())
             elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":

@@ -17,7 +17,7 @@ class Server:
         self.blocks, self.control_block_id = [], None
 
     def add_block(self, block_type, content, cwd=None, index=None, pty_uid=None):
-        uid = pty_uid if pty_uid is not None else self.pty_manager.default_pty_uid
+        uid = pty_uid if pty_uid is not None else 0
         if not cwd:
             pty = self.pty_manager.ptys.get(uid)
             if pty: cwd = pty.cwd
@@ -103,10 +103,13 @@ class Server:
                     block = self.get_block(msg.get("block_id"))
                     if block:
                         b_id = block.get("id")
+                        # First terminate if running
+                        for pty in self.pty_manager.ptys.values():
+                            if pty.current_block_id == b_id:
+                                await pty.stop()
+
                         self.blocks = [b for b in self.blocks if b["id"] != b_id]
                         await self.session_manager.broadcast({"type":"remove_block", "block_id":b_id})
-                        for pty in self.pty_manager.ptys.values():
-                            if pty.current_block_id == b_id: await pty.stop()
                         await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "stop_process":
                     for pty in self.pty_manager.ptys.values():
@@ -133,9 +136,11 @@ class Server:
                         if b_pty_uid in self.pty_manager.ptys:
                             await self.pty_manager.ptys[b_pty_uid].queue.put(block); await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "clear_session":
-                    for pty in self.pty_manager.ptys.values(): await pty.stop()
+                    for pty in self.pty_manager.ptys.values():
+                        await pty.stop()
                     self.blocks, self.control_block_id = [], None
-                    await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks}); await self.pty_manager.broadcast_queues_status()
+                    await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
+                    await self.pty_manager.broadcast_queues_status()
                 elif msg_type == "import_blocks":
                     self.blocks = []
                     for b_data in msg.get("blocks", []):
@@ -167,7 +172,7 @@ class Server:
                 elif msg_type == "terminal_resize":
                     bid = self.control_block_id
                     b = self.get_block(bid) if bid else None
-                    uid = msg.get("pty_uid") if msg.get("pty_uid") is not None else (b["pty_uid"] if b else self.pty_manager.default_pty_uid)
+                    uid = msg.get("pty_uid") if msg.get("pty_uid") is not None else (b["pty_uid"] if b else 0)
                     try: uid = int(uid)
                     except: pass
 
@@ -175,7 +180,7 @@ class Server:
                     self.pty_manager.terminal_size = (rows, cols)
                     if uid in self.pty_manager.ptys: await self.pty_manager.ptys[uid].resize(rows, cols)
                 elif msg_type == "terminal_set_echo":
-                    uid = msg.get("pty_uid") if msg.get("pty_uid") is not None else self.pty_manager.default_pty_uid
+                    uid = msg.get("pty_uid") if msg.get("pty_uid") is not None else 0
                     try: uid = int(uid)
                     except: pass
                     if uid in self.pty_manager.ptys:
@@ -183,14 +188,10 @@ class Server:
                         if isinstance(pty, LocalPTY): await pty.set_echo(msg.get("enabled", False))
                 elif msg_type == "pty.create.local":
                     pty = await self.pty_manager.create_local(msg.get("name"))
-                    self.pty_manager.set_default(pty.pty_uid)
-                    await self.session_manager.broadcast({"type":"pty.default_changed", "pty_uid":pty.pty_uid})
                     await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                 elif msg_type == "pty.create.remote":
                     try:
                         pty = await self.pty_manager.create_remote(msg.get("ssh_config"), msg.get("name"))
-                        self.pty_manager.set_default(pty.pty_uid)
-                        await self.session_manager.broadcast({"type":"pty.default_changed", "pty_uid":pty.pty_uid})
                         await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                     except Exception as e:
                         await self.session_manager.send_to_client(writer, json.dumps({"type":"pty.error", "error":"create_failed", "message":str(e)}).encode()+b"\n", user_id)
@@ -198,17 +199,19 @@ class Server:
                     try: uid = int(msg.get("pty_uid"))
                     except: uid = msg.get("pty_uid")
                     await self.pty_manager.destroy(uid)
-                    # After destroying, ensure we broadcast the updated list and potential default change
-                    if self.pty_manager.default_pty_uid == uid:
-                         self.pty_manager.default_pty_uid = 0
-                         await self.session_manager.broadcast({"type":"pty.default_changed", "pty_uid": 0})
+                    # Update block references on the server
+                    for b in self.blocks:
+                        if b.get("pty_uid") == uid:
+                            b["pty_uid"] = None
+                            b["pty_name"] = "deleted"
+                            if b.get("status") == "running":
+                                b["status"] = "killed"
+                            await self.session_manager.broadcast({"type": "update_block", "block": b})
                     await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                 elif msg_type == "pty.set_default":
-                    try: uid = int(msg.get("pty_uid"))
-                    except: uid = msg.get("pty_uid")
-                    if self.pty_manager.set_default(uid):
-                        await self.session_manager.broadcast({"type":"pty.default_changed", "pty_uid":uid})
-                        await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
+                    # Server no longer tracks global default, but we can still broadcast a nudge if needed.
+                    # Actually, we'll just ignore this and let the client manage it.
+                    pass
                 elif msg_type == "pty.rename":
                     try: uid = int(msg.get("pty_uid"))
                     except: uid = msg.get("pty_uid")

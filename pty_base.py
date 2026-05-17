@@ -25,10 +25,12 @@ class BasePTY(ABC):
 
     @abstractmethod
     async def stop(self) -> None:
+        """Terminate the current foreground process group."""
         pass
 
     @abstractmethod
     async def kill(self) -> None:
+        """Destroy the PTY and all associated processes."""
         pass
 
     @abstractmethod

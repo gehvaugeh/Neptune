@@ -11,7 +11,8 @@ class LocalPTY(BasePTY):
         self.broadcast, self.hist_exp = broadcast, hist_exp
         self.master_fd: Optional[int] = None
         self.master_proc: Optional[asyncio.subprocess.Process] = None
-        self.master_pgid: Optional[int] = None
+        self.shell_pgid: Optional[int] = None
+        self.tty_name: Optional[str] = None
         self.reader_task: Optional[asyncio.Task] = None
         self.current_sentinel: Optional[str] = None
         self.finished = asyncio.Event()
@@ -20,10 +21,18 @@ class LocalPTY(BasePTY):
     @property
     def cwd(self) -> str: return self.shell_cwd
 
+    async def _run_control_command(self, cmd: list) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        out, _ = await proc.communicate()
+        return out.decode().strip()
+
     async def start(self):
         if self.master_proc and self.master_proc.returncode is None: return
         if self.reader_task: self.reader_task.cancel()
         m, s = pty.openpty()
+        self.tty_name = os.ttyname(s)
         try:
             a = termios.tcgetattr(s); a[3] &= ~termios.ECHO
             termios.tcsetattr(s, termios.TCSANOW, a)
@@ -40,11 +49,10 @@ class LocalPTY(BasePTY):
         init_sentinel = f"INIT_{os.urandom(4).hex()}"
         os.write(m, f" stty -echo\n PS1=''; PS2=''; set -m\n {h_exp}\n set -o history\n history -r\n printf '\\x1e{init_sentinel}\\x1f'\n".encode())
 
-        self.master_pgid = os.getpgid(self.master_proc.pid)
+        self.shell_pgid = os.getpgid(self.master_proc.pid)
         self.reader_task = asyncio.create_task(self.reader())
 
         # Wait for initialization sentinel
-        start_wait = asyncio.get_running_loop().time()
         self._init_done = asyncio.Event()
         self._init_sentinel = init_sentinel
         try:
@@ -98,44 +106,78 @@ class LocalPTY(BasePTY):
 
     async def run_command(self, block: dict):
         if not self.master_proc or self.master_proc.returncode is not None: await self.start()
+        block_id = block.get("id")
         cmd = block.get("content").strip()
         self.finished.clear()
         try:
             h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
             os.write(self.master_fd, f" history -s $'{h_cmd}'\n".encode())
 
-            self.current_sentinel = f"NS_{os.urandom(4).hex()}"
-            self.mode = "sentinel"
+            sentinel = f"NS_{os.urandom(4).hex()}"
+            self.current_sentinel = sentinel
 
-            # Wrap command in a way that works for both TUIs and regular commands
-            # We use a subshell and trap SIGINT to ensure sentinel is ALWAYS printed
             e_cmd = cmd.replace('\\', '\\\\').replace('\"', '\\\"').replace('$','\\$').replace('`','\\`')
-
-            # Simplified approach: run command then print sentinel.
-            # For TUIs like 'top', it will stay in foreground until exit.
-            wrapper = f" {e_cmd}; printf '\\x1e{self.current_sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
+            wrapper = f" {e_cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
             os.write(self.master_fd, wrapper.encode())
 
-            await self.finished.wait()
+            # Shared monitoring loop for both local and remote
+            await self._monitor_command(block_id, sentinel)
         finally:
-            self.current_sentinel, self.mode = None, "sentinel"
+            self.current_sentinel = None
+
+    async def _monitor_command(self, block_id: str, sentinel: str):
+        # Poll PGID until it returns to shell_pgid OR sentinel is received
+        start_time = asyncio.get_running_loop().time()
+        while not self.finished.is_set():
+            # Check PGID via ps
+            pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
+            if pgid_str:
+                try:
+                    # ps might return multiple lines if something is weird, take first
+                    fg_pgid = int(pgid_str.splitlines()[0].strip())
+                    if fg_pgid == self.shell_pgid:
+                        # Process group returned to shell, but wait a bit for sentinel
+                        if asyncio.get_running_loop().time() - start_time > 0.5:
+                             # Give some time for the printf to be read by the reader() task
+                             await asyncio.sleep(0.2)
+                             if self.finished.is_set(): break
+                             # If still not set, command might have been killed or failed before printf
+                             await self.broadcast({"type": "update_block", "block": {
+                                 "id": block_id, "status": "done", "pty_uid": self.pty_uid, "cwd": self.shell_cwd
+                             }})
+                             break
+                except (ValueError, IndexError): pass
+
+            await asyncio.sleep(0.2)
 
     async def send_input(self, data: str):
         if self.master_fd:
             if data == "\x03" and self.master_proc:
                 try:
-                    fg = os.tcgetpgrp(self.master_fd)
-                    os.killpg(fg if fg > 0 and fg != self.master_pgid else os.getpgid(self.master_proc.pid), signal.SIGINT)
+                    pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
+                    if pgid_str:
+                        fg_pgid = int(pgid_str.splitlines()[0].strip())
+                        if fg_pgid != self.shell_pgid:
+                            os.killpg(fg_pgid, signal.SIGINT)
+                            return
                 except: pass
             os.write(self.master_fd, data.encode())
 
     async def stop(self):
         if not self.master_fd: return
         try:
-            fg = os.tcgetpgrp(self.master_fd)
-            if fg > 0 and fg != self.master_pgid:
-                os.killpg(fg, signal.SIGTERM); await asyncio.sleep(0.5)
-                if os.tcgetpgrp(self.master_fd) != self.master_pgid: os.killpg(fg, signal.SIGKILL)
+            pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
+            if pgid_str:
+                fg_pgid = int(pgid_str.splitlines()[0].strip())
+                if fg_pgid != self.shell_pgid:
+                    os.killpg(fg_pgid, signal.SIGTERM)
+                    await asyncio.sleep(1.0)
+                    # Check if still running
+                    pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
+                    if pgid_str:
+                        fg_pgid = int(pgid_str.splitlines()[0].strip())
+                        if fg_pgid != self.shell_pgid:
+                            os.killpg(fg_pgid, signal.SIGKILL)
         except: pass
 
     async def kill(self):
@@ -146,11 +188,7 @@ class LocalPTY(BasePTY):
         self.master_proc, self.master_fd = None, None
 
     def is_running(self) -> bool:
-        if not self.master_fd or not self.master_pgid: return False
-        try:
-            fg = os.tcgetpgrp(self.master_fd)
-            return fg > 0 and fg != self.master_pgid
-        except: return False
+        return self.current_block_id is not None
 
     async def resize(self, r: int, c: int):
         if self.master_fd: fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", r, c, 0, 0))

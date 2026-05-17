@@ -10,7 +10,6 @@ class PTYManager:
         self.ptys: Dict[int, BasePTY] = {} # Keyed by UID
         self.names: Dict[int, str] = {}
         self._tasks: Dict[int, asyncio.Task] = {}
-        self.default_pty_uid: int = 0
         self.broadcast = broadcast_func
         self.enable_hist_expansion = enable_hist_expansion
         self.running_blocks: Set[str] = set()
@@ -37,8 +36,7 @@ class PTYManager:
             "type": "pty.created",
             "uid": uid,
             "name": name,
-            "pty_type": "local",
-            "default": uid == self.default_pty_uid
+            "pty_type": "local"
         })
         return pty
 
@@ -63,8 +61,7 @@ class PTYManager:
             "type": "pty.created",
             "uid": uid,
             "name": name,
-            "pty_type": "remote",
-            "default": uid == self.default_pty_uid
+            "pty_type": "remote"
         })
         return pty
 
@@ -98,6 +95,10 @@ class PTYManager:
         except Exception as e:
             logging.error(f"[UID:{uid}] Queue worker error: {e}")
 
+    async def stop_pty(self, uid: int):
+        if uid in self.ptys:
+            await self.ptys[uid].stop()
+
     async def destroy(self, uid: int):
         if uid not in self.ptys:
             return
@@ -110,15 +111,21 @@ class PTYManager:
         self.names.pop(uid, None)
         task = self._tasks.pop(uid)
         task.cancel()
+
+        # Signal associated blocks
+        # We need to tell the server to update all blocks that were tied to this PTY
+        # but we don't have direct access to the Server's blocks list here.
+        # We'll broadcast a general PTY destroyed message, and the server/clients
+        # should handle updating their block metadata.
+
+        if pty.current_block_id:
+             await self.broadcast({
+                 "type": "update_block",
+                 "block": {"id": pty.current_block_id, "status": "killed", "pty_uid": None}
+             })
+
         await pty.kill()
-
         await self.broadcast({"type": "pty.destroyed", "uid": uid})
-
-    def set_default(self, uid: int):
-        if uid in self.ptys:
-            self.default_pty_uid = uid
-            return True
-        return False
 
     def rename_pty(self, uid: int, new_name: str):
         if uid in self.names:
@@ -136,8 +143,7 @@ class PTYManager:
                 "name": self.names.get(uid, f"pty-{uid}"),
                 "type": "local" if isinstance(pty, LocalPTY) else "remote",
                 "status": "running" if pty.current_block_id else "idle",
-                "block_count": pty.queue.qsize(),
-                "default": uid == self.default_pty_uid
+                "block_count": pty.queue.qsize()
             }
             for uid, pty in self.ptys.items()
         ]
@@ -176,15 +182,4 @@ class PTYManager:
             "type": "queue_status",
             "queues": queues_data
         }
-
-        # Add info for the default pty for backward compatibility if needed,
-        # but using UID now.
-        default_pty = self.ptys.get(self.default_pty_uid)
-        if default_pty:
-            msg["uid"] = self.default_pty_uid
-            msg["name"] = self.names.get(self.default_pty_uid)
-            msg["block_count"] = default_pty.queue.qsize()
-            msg["status"] = "running" if default_pty.is_running() else "idle"
-            msg["active_block_id"] = default_pty.current_block_id
-
         await self.broadcast(msg)

@@ -95,6 +95,7 @@ class RemotePTY(BasePTY):
         if "password" in self.ssh_config: del self.ssh_config["password"]
 
     async def run_command(self, block: dict):
+        block_id = block.get("id")
         cmd = block.get("content").strip()
 
         sentinel = f"NS_{os.urandom(4).hex()}"
@@ -103,12 +104,30 @@ class RemotePTY(BasePTY):
 
         self.shell_proc.stdin.write(wrapper.encode())
         await self.shell_proc.stdin.drain()
-        await self._monitor_command(block.get("id"), sentinel)
+        await self._monitor_command(block_id, sentinel)
 
     async def _monitor_command(self, block_id: str, sentinel: str):
         buf = ""
+        start_time = asyncio.get_running_loop().time()
         try:
             while True:
+                # Check PGID periodically via control channel
+                cmd = self._get_ssh_base(use_socket=True)
+                cmd.append(f"ps -t {self.remote_tty} -o pgid= | head -1")
+                try:
+                    p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                    out, _ = await p.communicate()
+                    pgid_str = out.decode().strip()
+                    if pgid_str:
+                        fg_pgid = int(pgid_str)
+                        if fg_pgid == self.shell_pgid:
+                            # Command finished or killed
+                            if asyncio.get_running_loop().time() - start_time > 0.5:
+                                # Wait a bit for remaining output/sentinel
+                                await asyncio.sleep(0.5)
+                                break
+                except: pass
+
                 try:
                     chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
                     if not chunk: break
@@ -127,9 +146,9 @@ class RemotePTY(BasePTY):
                         await self.broadcast({"type": "update_block", "block": {
                             "id": block_id, "status": "ok" if exit_code == 0 else f"error({exit_code})", "pty_uid": self.pty_uid, "cwd": self._cwd
                         }})
-                        break
+                        return # Done
 
-                    # Broadcast intermediate output (excluding partial sentinels)
+                    # Broadcast intermediate output
                     idx = buf.find('\x1e')
                     if idx > 0:
                         await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:idx], "pty_uid": self.pty_uid})
@@ -137,9 +156,13 @@ class RemotePTY(BasePTY):
                     elif idx == -1 and buf:
                         await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
                         buf = ""
-
                 except asyncio.TimeoutError:
                     continue
+
+            # If loop exited via PGID check, broadcast final status if sentinel wasn't found
+            await self.broadcast({"type": "update_block", "block": {
+                "id": block_id, "status": "done", "pty_uid": self.pty_uid, "cwd": self._cwd
+            }})
         finally:
             pass
 
