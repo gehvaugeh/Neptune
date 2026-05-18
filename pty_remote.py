@@ -99,6 +99,7 @@ class RemotePTY(BasePTY):
     async def run_command(self, block: dict):
         block_id = block.get("id")
         cmd = block.get("content").strip()
+        self.interrupted.clear()
 
         sentinel = f"NS_{os.urandom(4).hex()}"
         # Use same sentinel logic as LocalPTY for RemotePTY
@@ -164,8 +165,9 @@ class RemotePTY(BasePTY):
                     continue
 
             # If loop exited via PGID check, broadcast final status if sentinel wasn't found
+            status = "killed" if self.interrupted.is_set() else "done"
             await self.broadcast({"type": "update_block", "block": {
-                "id": block_id, "status": "done", "pty_uid": self.pty_uid, "cwd": self._cwd
+                "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self._cwd
             }})
         finally:
             pass
@@ -189,21 +191,35 @@ class RemotePTY(BasePTY):
             await self.shell_proc.stdin.drain()
 
     async def stop(self):
+        self.interrupted.set()
+        # Identify all PGIDs on the TTY
         cmd = self._get_ssh_base(use_socket=True)
-        cmd.append(f"ps -t {self.remote_tty} -o pgid= | head -1")
+        cmd.append(f"ps -t {self.remote_tty} -o pgid=")
         try:
             p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
             out, _ = await p.communicate()
-            pgid = out.decode().strip()
-            if not pgid or int(pgid) == self.shell_pgid: return
+            pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
 
-            k1 = self._get_ssh_base(use_socket=True); k1.append(f"kill -TERM -{pgid}")
-            await (await asyncio.create_subprocess_exec(*k1)).wait()
-            await asyncio.sleep(2)
-            if await self.is_running():
+            targets = [pgid for pgid in pgids if pgid != self.shell_pgid]
+            if not targets: return
+
+            for pgid in targets:
+                k1 = self._get_ssh_base(use_socket=True); k1.append(f"kill -TERM -{pgid}")
+                await (await asyncio.create_subprocess_exec(*k1)).wait()
+
+            await asyncio.sleep(1.0)
+
+            # Check if still running
+            p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
+            out, _ = await p.communicate()
+            pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
+            targets = [pgid for pgid in pgids if pgid != self.shell_pgid]
+
+            for pgid in targets:
                 k2 = self._get_ssh_base(use_socket=True); k2.append(f"kill -KILL -{pgid}")
                 await (await asyncio.create_subprocess_exec(*k2)).wait()
-        except: pass
+        except Exception as e:
+            logging.error(f"Error in RemotePTY.stop for {self.pty_id}: {e}")
 
     async def kill(self):
         try:

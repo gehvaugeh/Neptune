@@ -108,6 +108,7 @@ class LocalPTY(BasePTY):
         if not self.master_proc or self.master_proc.returncode is not None: await self.start()
         block_id = block.get("id")
         cmd = block.get("content").strip()
+        self.interrupted.clear()
         self.finished.clear()
         try:
             h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
@@ -143,8 +144,9 @@ class LocalPTY(BasePTY):
                              await asyncio.sleep(0.5)
                              if self.finished.is_set(): break
                              # If still not set, command might have been killed or failed before printf
+                             status = "killed" if self.interrupted.is_set() else "done"
                              await self.broadcast({"type": "update_block", "block": {
-                                 "id": block_id, "status": "done", "pty_uid": self.pty_uid, "cwd": self.shell_cwd
+                                 "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self.shell_cwd
                              }})
                              break
                 except Exception: pass
@@ -166,6 +168,7 @@ class LocalPTY(BasePTY):
             os.write(self.master_fd, data.encode())
 
     async def stop(self):
+        self.interrupted.set()
         if not self.master_fd: return
         try:
             pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
