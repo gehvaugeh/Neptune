@@ -100,10 +100,11 @@ class RemotePTY(BasePTY):
         block_id = block.get("id")
         cmd = block.get("content").strip()
         self.interrupted.clear()
+        self.current_pgid = None
 
         sentinel = f"NS_{os.urandom(4).hex()}"
         # Use same sentinel logic as LocalPTY for RemotePTY
-        wrapper = f"{cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
+        wrapper = f"(printf 'PGID:'; ps -o pgid= -p $$; {cmd}); printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
 
         self.shell_proc.stdin.write(wrapper.encode())
         await self.shell_proc.stdin.drain()
@@ -114,7 +115,32 @@ class RemotePTY(BasePTY):
         start_time = asyncio.get_running_loop().time()
         try:
             while True:
-                # Check ALL PGIDs on the TTY
+                # Catch PGID if not yet known
+                if self.current_pgid is None and "PGID:" in buf and "\n" in buf:
+                    match = re.search(r'PGID:(\d+)\n', buf)
+                    if match:
+                        self.current_pgid = int(match.group(1).strip())
+                        buf = buf[match.end():]
+
+                # Check explicitly captured PGID first
+                if self.current_pgid:
+                    c_cmd = self._get_ssh_base(use_socket=True)
+                    c_cmd.append(f"ps -o pgid= -g {self.current_pgid}")
+                    try:
+                        cp = await asyncio.create_subprocess_exec(*c_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                        cout, _ = await cp.communicate()
+                        if not cout.decode().strip():
+                            # PGID is gone
+                            await asyncio.sleep(0.5)
+                            # Give a chance for last read
+                            try:
+                                chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
+                                if chunk: buf += chunk.decode(errors="replace")
+                            except: pass
+                            break
+                    except: pass
+
+                # Fallback/Safety: Check ALL PGIDs on the TTY
                 cmd = self._get_ssh_base(use_socket=True)
                 cmd.append(f"ps -t {self.remote_tty} -o pgid=")
                 try:
@@ -170,7 +196,7 @@ class RemotePTY(BasePTY):
                 "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self._cwd
             }})
         finally:
-            pass
+            self.current_pgid = None
 
     async def _update_cwd(self):
         cmd = self._get_ssh_base(use_socket=True)
@@ -192,17 +218,24 @@ class RemotePTY(BasePTY):
 
     async def stop(self):
         self.interrupted.set()
-        # Identify all PGIDs on the TTY
-        cmd = self._get_ssh_base(use_socket=True)
-        cmd.append(f"ps -t {self.remote_tty} -o pgid=")
+
+        pgids = []
+        if self.current_pgid:
+            pgids = [self.current_pgid]
+        else:
+            # Identify all PGIDs on the TTY
+            cmd = self._get_ssh_base(use_socket=True)
+            cmd.append(f"ps -t {self.remote_tty} -o pgid=")
+            try:
+                p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
+                out, _ = await p.communicate()
+                pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
+            except: pass
+
+        targets = [pgid for pgid in pgids if pgid != self.shell_pgid]
+        if not targets: return
+
         try:
-            p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
-            out, _ = await p.communicate()
-            pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
-
-            targets = [pgid for pgid in pgids if pgid != self.shell_pgid]
-            if not targets: return
-
             for pgid in targets:
                 k1 = self._get_ssh_base(use_socket=True); k1.append(f"kill -TERM -{pgid}")
                 await (await asyncio.create_subprocess_exec(*k1)).wait()
@@ -210,10 +243,15 @@ class RemotePTY(BasePTY):
             await asyncio.sleep(1.0)
 
             # Check if still running
-            p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
-            out, _ = await p.communicate()
-            pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
-            targets = [pgid for pgid in pgids if pgid != self.shell_pgid]
+            if self.current_pgid:
+                targets = [self.current_pgid]
+            else:
+                cmd = self._get_ssh_base(use_socket=True)
+                cmd.append(f"ps -t {self.remote_tty} -o pgid=")
+                p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
+                out, _ = await p.communicate()
+                pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
+                targets = [pgid for pgid in pgids if pgid != self.shell_pgid]
 
             for pgid in targets:
                 k2 = self._get_ssh_base(use_socket=True); k2.append(f"kill -KILL -{pgid}")
@@ -236,6 +274,14 @@ class RemotePTY(BasePTY):
         if os.path.exists(self.socket_path):
             try: os.remove(self.socket_path)
             except: pass
+
+    async def drain_output(self):
+        # Read from shell_proc until it would block
+        while True:
+            try:
+                chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.05)
+                if not chunk: break
+            except: break
 
     async def resize(self, r: int, c: int):
         await self.send_input(f"stty rows {r} cols {c}\n")

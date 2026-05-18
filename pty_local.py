@@ -78,6 +78,13 @@ class LocalPTY(BasePTY):
                         self._init_done.set()
 
                 if self.current_block_id:
+                    # Catch PGID if not yet known
+                    if self.current_pgid is None and "PGID:" in self._reader_buf and "\n" in self._reader_buf:
+                        match = re.search(r'PGID:(\d+)\n', self._reader_buf)
+                        if match:
+                            self.current_pgid = int(match.group(1))
+                            self._reader_buf = self._reader_buf[match.end():]
+
                     if self.current_sentinel:
                         while True:
                             match = re.search(rf'\x1e{re.escape(self.current_sentinel)}_(-?\d+)_([^\x1f]*?)\x1f', self._reader_buf)
@@ -94,8 +101,10 @@ class LocalPTY(BasePTY):
                             await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:idx],"pty_uid":self.pty_uid})
                             self._reader_buf = self._reader_buf[idx:]
                         elif idx == -1 and self._reader_buf:
-                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
-                            self._reader_buf = ""
+                            # Avoid broadcasting partial PGID markers
+                            if "PGID:" not in self._reader_buf or "\n" in self._reader_buf:
+                                await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
+                                self._reader_buf = ""
                     else:
                         await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
                         self._reader_buf = ""
@@ -110,6 +119,7 @@ class LocalPTY(BasePTY):
         cmd = block.get("content").strip()
         self.interrupted.clear()
         self.finished.clear()
+        self.current_pgid = None
         try:
             h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
             os.write(self.master_fd, f" history -s $'{h_cmd}'\n".encode())
@@ -118,19 +128,34 @@ class LocalPTY(BasePTY):
             self.current_sentinel = sentinel
 
             e_cmd = cmd.replace('\\', '\\\\').replace('\"', '\\\"').replace('$','\\$').replace('`','\\`')
-            wrapper = f" {e_cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
+            # Wrapper prints PGID first
+            wrapper = f" (printf 'PGID:'; ps -o pgid= -p $$; {e_cmd}); printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
             os.write(self.master_fd, wrapper.encode())
 
             # Shared monitoring loop for both local and remote
             await self._monitor_command(block_id, sentinel)
         finally:
             self.current_sentinel = None
+            self.current_pgid = None
 
     async def _monitor_command(self, block_id: str, sentinel: str):
         # Poll PGID until it returns to shell_pgid OR sentinel is received
         start_time = asyncio.get_running_loop().time()
         while not self.finished.is_set():
-            # Check ALL PGIDs on the TTY
+            # Check for explicitly captured PGID existence first
+            if self.current_pgid:
+                out = await self._run_control_command(["ps", "-o", "pgid=", "-g", str(self.current_pgid)])
+                if not out:
+                    # Process group is gone
+                    await asyncio.sleep(0.5)
+                    if self.finished.is_set(): break
+                    status = "killed" if self.interrupted.is_set() else "done"
+                    await self.broadcast({"type": "update_block", "block": {
+                        "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self.shell_cwd
+                    }})
+                    break
+
+            # Fallback/Safety: Check ALL PGIDs on the TTY
             pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
             if pgid_str:
                 try:
@@ -171,22 +196,33 @@ class LocalPTY(BasePTY):
         self.interrupted.set()
         if not self.master_fd: return
         try:
-            pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
-            if pgid_str:
-                pgids = [int(line.strip()) for line in pgid_str.splitlines() if line.strip().isdigit()]
-                for pgid in pgids:
-                    if pgid != self.shell_pgid:
-                        os.killpg(pgid, signal.SIGTERM)
+            pgids = []
+            if self.current_pgid:
+                pgids = [self.current_pgid]
+            else:
+                pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
+                if pgid_str:
+                    pgids = [int(line.strip()) for line in pgid_str.splitlines() if line.strip().isdigit()]
 
-                await asyncio.sleep(1.0)
+            for pgid in pgids:
+                if pgid != self.shell_pgid:
+                    try: os.killpg(pgid, signal.SIGTERM)
+                    except: pass
 
-                # Check if still running
+            await asyncio.sleep(1.0)
+
+            # Final check and kill
+            if self.current_pgid:
+                try: os.killpg(self.current_pgid, signal.SIGKILL)
+                except: pass
+            else:
                 pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
                 if pgid_str:
                     pgids = [int(line.strip()) for line in pgid_str.splitlines() if line.strip().isdigit()]
                     for pgid in pgids:
                         if pgid != self.shell_pgid:
-                            os.killpg(pgid, signal.SIGKILL)
+                            try: os.killpg(pgid, signal.SIGKILL)
+                            except: pass
         except: pass
 
     async def kill(self):
@@ -198,6 +234,10 @@ class LocalPTY(BasePTY):
 
     def is_running(self) -> bool:
         return self.current_block_id is not None
+
+    async def drain_output(self):
+        # Local PTY reader runs in background, so we just clear its buffer
+        self._reader_buf = ""
 
     async def resize(self, r: int, c: int):
         if self.master_fd: fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", r, c, 0, 0))

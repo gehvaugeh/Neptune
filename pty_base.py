@@ -9,6 +9,7 @@ class BasePTY(ABC):
         self.queue: asyncio.Queue = asyncio.Queue()
         self.mode: Literal["sentinel", "interactive"] = "sentinel"
         self.current_block_id: Optional[str] = None
+        self.current_pgid: Optional[int] = None
         self.interrupted = asyncio.Event()
 
     @property
@@ -36,6 +37,11 @@ class BasePTY(ABC):
 
     @abstractmethod
     def is_running(self) -> bool:
+        pass
+
+    @abstractmethod
+    async def drain_output(self) -> None:
+        """Clear pending output from the PTY."""
         pass
 
     @abstractmethod

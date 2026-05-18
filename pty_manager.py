@@ -78,6 +78,7 @@ class PTYManager:
                 self.running_blocks.add(block.get("id"))
                 pty.current_block_id = block.get("id")
                 try:
+                    await pty.drain_output()
                     # Mark block as running and clear output
                     await self.broadcast({
                         "type": "update_block",
