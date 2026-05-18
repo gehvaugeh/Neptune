@@ -119,20 +119,28 @@ class LocalPTY(BasePTY):
                         self._reader_buf = self._reader_buf[pgid_match.end():]
 
                     # 3. Broadcast remaining output, but stay clear of potential partial markers
-                    # Find first index of \x1e or 'PGID:'
+                    # Hold back maximum 100 bytes of potential marker prefix
                     m1 = self._reader_buf.find('\x1e')
                     m2 = self._reader_buf.find('PGID:')
 
-                    # split_idx is the first occurrence of either
                     split_idx = -1
                     if m1 != -1 and m2 != -1: split_idx = min(m1, m2)
                     elif m1 != -1: split_idx = m1
                     elif m2 != -1: split_idx = m2
 
-                    if split_idx > 0:
-                        await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:split_idx],"pty_uid":self.pty_uid})
-                        self._reader_buf = self._reader_buf[split_idx:]
-                    elif split_idx == -1 and self._reader_buf:
+                    if split_idx != -1:
+                        if split_idx > 0:
+                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:split_idx],"pty_uid":self.pty_uid})
+                            self._reader_buf = self._reader_buf[split_idx:]
+
+                        # Now self._reader_buf starts with \x1e or PGID:
+                        is_likely_marker = self._reader_buf.startswith('\x1eNS_') or self._reader_buf.startswith('PGID:')
+
+                        # If it's not a known marker prefix or it's too long, broadcast it
+                        if not is_likely_marker or len(self._reader_buf) > 256:
+                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
+                            self._reader_buf = ""
+                    elif self._reader_buf:
                         await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
                         self._reader_buf = ""
         except Exception as e:

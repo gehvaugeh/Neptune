@@ -114,7 +114,7 @@ class RemotePTY(BasePTY):
         buf = ""
         start_time = asyncio.get_running_loop().time()
         last_poll_time = 0.0
-        poll_interval = 1.0 # Throttle out-of-band checks to 1s to reduce lag
+        poll_interval = 2.0 # Throttle out-of-band checks to 2s to reduce lag
 
         try:
             while True:
@@ -124,6 +124,17 @@ class RemotePTY(BasePTY):
                     if match:
                         self.current_pgid = int(match.group(1).strip())
                         buf = buf[match.end():]
+
+                # 1. Prioritize reading output
+                try:
+                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
+                    if not chunk:
+                         # EOF on stdout usually means session lost or shell died
+                         break
+                    buf += chunk.decode(errors="replace")
+                except asyncio.TimeoutError:
+                    # Only poll PGID if we aren't busy reading output
+                    pass
 
                 now = asyncio.get_running_loop().time()
                 if now - last_poll_time >= poll_interval:
@@ -166,10 +177,6 @@ class RemotePTY(BasePTY):
                     except: pass
 
                 try:
-                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
-                    if not chunk: break
-                    buf += chunk.decode(errors="replace")
-
                     # 1. Identify and handle ANY sentinel (\x1eNS_... \x1f)
                     while True:
                         sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', buf)
@@ -206,7 +213,6 @@ class RemotePTY(BasePTY):
                         buf = buf[pgid_match.end():]
 
                     # 3. Broadcast remaining output, but stay clear of potential partial markers
-                    # Find first index of \x1e or 'PGID:'
                     m1 = buf.find('\x1e')
                     m2 = buf.find('PGID:')
 
@@ -215,16 +221,28 @@ class RemotePTY(BasePTY):
                     elif m1 != -1: split_idx = m1
                     elif m2 != -1: split_idx = m2
 
-                    if split_idx > 0:
-                        await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:split_idx], "pty_uid": self.pty_uid})
-                        buf = buf[split_idx:]
-                    elif split_idx == -1 and buf:
+                    if split_idx != -1:
+                        if split_idx > 0:
+                            await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:split_idx], "pty_uid": self.pty_uid})
+                            buf = buf[split_idx:]
+
+                        # Now buf starts with \x1e or PGID:
+                        is_likely_marker = buf.startswith('\x1eNS_') or buf.startswith('PGID:')
+
+                        # If it's not a known marker prefix or it's too long, broadcast it
+                        if not is_likely_marker or len(buf) > 256:
+                            await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
+                            buf = ""
+                    elif buf:
                         await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
                         buf = ""
                 except asyncio.TimeoutError:
                     continue
 
-            # If loop exited via PGID check, broadcast final status if sentinel wasn't found
+            # If loop exited via PGID check, broadcast remaining data and final status
+            if buf:
+                await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
+
             status = "killed" if self.interrupted.is_set() else "done"
             await self.broadcast({"type": "update_block", "block": {
                 "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self._cwd
