@@ -129,24 +129,25 @@ class LocalPTY(BasePTY):
         # Poll PGID until it returns to shell_pgid OR sentinel is received
         start_time = asyncio.get_running_loop().time()
         while not self.finished.is_set():
-            # Check PGID via ps
+            # Check ALL PGIDs on the TTY
             pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
             if pgid_str:
                 try:
-                    # ps might return multiple lines if something is weird, take first
-                    fg_pgid = int(pgid_str.splitlines()[0].strip())
-                    if fg_pgid == self.shell_pgid:
+                    pgids = [int(line.strip()) for line in pgid_str.splitlines() if line.strip().isdigit()]
+                    is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
+
+                    if not is_user_cmd_running:
                         # Process group returned to shell, but wait a bit for sentinel
-                        if asyncio.get_running_loop().time() - start_time > 0.5:
+                        if asyncio.get_running_loop().time() - start_time > 1.0:
                              # Give some time for the printf to be read by the reader() task
-                             await asyncio.sleep(0.2)
+                             await asyncio.sleep(0.5)
                              if self.finished.is_set(): break
                              # If still not set, command might have been killed or failed before printf
                              await self.broadcast({"type": "update_block", "block": {
                                  "id": block_id, "status": "done", "pty_uid": self.pty_uid, "cwd": self.shell_cwd
                              }})
                              break
-                except (ValueError, IndexError): pass
+                except Exception: pass
 
             await asyncio.sleep(0.2)
 
@@ -156,10 +157,11 @@ class LocalPTY(BasePTY):
                 try:
                     pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
                     if pgid_str:
-                        fg_pgid = int(pgid_str.splitlines()[0].strip())
-                        if fg_pgid != self.shell_pgid:
-                            os.killpg(fg_pgid, signal.SIGINT)
-                            return
+                        pgids = [int(line.strip()) for line in pgid_str.splitlines() if line.strip().isdigit()]
+                        for pgid in pgids:
+                            if pgid != self.shell_pgid:
+                                os.killpg(pgid, signal.SIGINT)
+                        return
                 except: pass
             os.write(self.master_fd, data.encode())
 
@@ -168,16 +170,20 @@ class LocalPTY(BasePTY):
         try:
             pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
             if pgid_str:
-                fg_pgid = int(pgid_str.splitlines()[0].strip())
-                if fg_pgid != self.shell_pgid:
-                    os.killpg(fg_pgid, signal.SIGTERM)
-                    await asyncio.sleep(1.0)
-                    # Check if still running
-                    pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
-                    if pgid_str:
-                        fg_pgid = int(pgid_str.splitlines()[0].strip())
-                        if fg_pgid != self.shell_pgid:
-                            os.killpg(fg_pgid, signal.SIGKILL)
+                pgids = [int(line.strip()) for line in pgid_str.splitlines() if line.strip().isdigit()]
+                for pgid in pgids:
+                    if pgid != self.shell_pgid:
+                        os.killpg(pgid, signal.SIGTERM)
+
+                await asyncio.sleep(1.0)
+
+                # Check if still running
+                pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
+                if pgid_str:
+                    pgids = [int(line.strip()) for line in pgid_str.splitlines() if line.strip().isdigit()]
+                    for pgid in pgids:
+                        if pgid != self.shell_pgid:
+                            os.killpg(pgid, signal.SIGKILL)
         except: pass
 
     async def kill(self):

@@ -67,7 +67,9 @@ class RemotePTY(BasePTY):
             f"stty -echo opost onlcr\n"
             f"export TERM=xterm-256color\n"
             f"export PS1=''; export PS2=''\n"
-            f"tty\necho $$\npwd\n"
+            f"tty\n"
+            f"ps -o pgid= -p $$\n"
+            f"pwd\n"
             f"echo '{init_sentinel}'\n"
         )
         self.shell_proc.stdin.write(init_script.encode())
@@ -111,21 +113,23 @@ class RemotePTY(BasePTY):
         start_time = asyncio.get_running_loop().time()
         try:
             while True:
-                # Check PGID periodically via control channel
+                # Check ALL PGIDs on the TTY
                 cmd = self._get_ssh_base(use_socket=True)
-                cmd.append(f"ps -t {self.remote_tty} -o pgid= | head -1")
+                cmd.append(f"ps -t {self.remote_tty} -o pgid=")
                 try:
                     p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
                     out, _ = await p.communicate()
-                    pgid_str = out.decode().strip()
-                    if pgid_str:
-                        fg_pgid = int(pgid_str)
-                        if fg_pgid == self.shell_pgid:
-                            # Command finished or killed
-                            if asyncio.get_running_loop().time() - start_time > 0.5:
-                                # Wait a bit for remaining output/sentinel
-                                await asyncio.sleep(0.5)
-                                break
+                    pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
+
+                    # If all PGIDs match shell_pgid, then no user command is running
+                    is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
+
+                    if not is_user_cmd_running:
+                        # Command finished or killed
+                        if asyncio.get_running_loop().time() - start_time > 1.0:
+                            # Wait a bit more for remaining output/sentinel
+                            await asyncio.sleep(0.5)
+                            break
                 except: pass
 
                 try:
@@ -177,28 +181,7 @@ class RemotePTY(BasePTY):
         except: pass
 
     async def is_running(self) -> bool:
-        if not os.path.exists(self.socket_path):
-            await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "error": "connection_lost", "message": "ControlMaster socket missing"})
-            return False
-        cmd = self._get_ssh_base(use_socket=True)
-        cmd.append(f"ps -t {self.remote_tty} -o pgid= | head -1")
-        try:
-            p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-            out, _ = await p.communicate()
-            res = out.decode().strip()
-            return int(res) != self.shell_pgid if res else False
-        except: return False
-
-    async def is_tui_running(self) -> bool:
-        if not os.path.exists(self.socket_path): return False
-        cmd = self._get_ssh_base(use_socket=True)
-        cmd.append(f"ps -t {self.remote_tty} -o pgid=,comm= | head -1")
-        try:
-            p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-            out, _ = await p.communicate()
-            parts = out.decode().strip().split()
-            return parts[1] in TUI_COMMANDS if len(parts) >= 2 else False
-        except: return False
+        return self.current_block_id is not None
 
     async def send_input(self, data: str):
         if self.shell_proc and self.shell_proc.stdin:
