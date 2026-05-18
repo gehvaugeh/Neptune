@@ -164,27 +164,55 @@ class RemotePTY(BasePTY):
                     if not chunk: break
                     buf += chunk.decode(errors="replace")
 
-                    # Search for sentinel
-                    match = re.search(rf'\x1e{re.escape(sentinel)}_(-?\d+)_([^\x1f]*?)\x1f', buf)
-                    if match:
-                        out_data = buf[:match.start()]
-                        if out_data:
-                            await self.broadcast({"type": "output", "block_id": block_id, "data": out_data, "pty_uid": self.pty_uid})
+                    # 1. Identify and handle ANY sentinel (\x1eNS_... \x1f)
+                    while True:
+                        sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', buf)
+                        if not sent_match: break
 
-                        exit_code = int(match.group(1))
-                        self._cwd = match.group(2).strip()
+                        # Data before sentinel is real output
+                        pre_data = buf[:sent_match.start()]
+                        if pre_data:
+                            await self.broadcast({"type": "output", "block_id": block_id, "data": pre_data, "pty_uid": self.pty_uid})
 
-                        await self.broadcast({"type": "update_block", "block": {
-                            "id": block_id, "status": "ok" if exit_code == 0 else f"error({exit_code})", "pty_uid": self.pty_uid, "cwd": self._cwd
-                        }})
-                        return # Done
+                        # Is this OUR sentinel?
+                        if f"\x1e{sentinel}_" in sent_match.group(0):
+                            exit_code = int(sent_match.group(1))
+                            self._cwd = sent_match.group(2).strip()
+                            await self.broadcast({"type": "update_block", "block": {
+                                "id": block_id, "status": "ok" if exit_code == 0 else f"error({exit_code})", "pty_uid": self.pty_uid, "cwd": self._cwd
+                            }})
+                            return # Done
+                        else:
+                            # Stale sentinel from previous command, just discard it
+                            logging.debug(f"[{self.pty_id}] Discarded stale sentinel: {sent_match.group(0)}")
 
-                    # Broadcast intermediate output
-                    idx = buf.find('\x1e')
-                    if idx > 0:
-                        await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:idx], "pty_uid": self.pty_uid})
-                        buf = buf[idx:]
-                    elif idx == -1 and buf:
+                        buf = buf[sent_match.end():]
+
+                    # 2. Identify and handle ANY PGID marker
+                    while True:
+                        pgid_match = re.search(r'PGID:(\d+)\n', buf)
+                        if not pgid_match: break
+
+                        # If we already have a current_pgid, this is either a rerun or stale
+                        if self.current_pgid is None:
+                             self.current_pgid = int(pgid_match.group(1))
+
+                        buf = buf[pgid_match.end():]
+
+                    # 3. Broadcast remaining output, but stay clear of potential partial markers
+                    # Find first index of \x1e or 'PGID:'
+                    m1 = buf.find('\x1e')
+                    m2 = buf.find('PGID:')
+
+                    split_idx = -1
+                    if m1 != -1 and m2 != -1: split_idx = min(m1, m2)
+                    elif m1 != -1: split_idx = m1
+                    elif m2 != -1: split_idx = m2
+
+                    if split_idx > 0:
+                        await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:split_idx], "pty_uid": self.pty_uid})
+                        buf = buf[split_idx:]
+                    elif split_idx == -1 and buf:
                         await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
                         buf = ""
                 except asyncio.TimeoutError:
@@ -276,12 +304,14 @@ class RemotePTY(BasePTY):
             except: pass
 
     async def drain_output(self):
-        # Read from shell_proc until it would block
-        while True:
-            try:
-                chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.05)
-                if not chunk: break
-            except: break
+        # Read from shell_proc until it would block, with a slight persistence
+        for _ in range(5):
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
+                    if not chunk: break
+                except: break
+            await asyncio.sleep(0.05)
 
     async def resize(self, r: int, c: int):
         await self.send_input(f"stty rows {r} cols {c}\n")

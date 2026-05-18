@@ -85,27 +85,54 @@ class LocalPTY(BasePTY):
                             self.current_pgid = int(match.group(1))
                             self._reader_buf = self._reader_buf[match.end():]
 
-                    if self.current_sentinel:
-                        while True:
-                            match = re.search(rf'\x1e{re.escape(self.current_sentinel)}_(-?\d+)_([^\x1f]*?)\x1f', self._reader_buf)
-                            if not match: break
-                            out_data = self._reader_buf[:match.start()]
-                            if out_data: await self.broadcast({"type":"output","block_id":self.current_block_id,"data":out_data,"pty_uid":self.pty_uid})
-                            self.shell_cwd = match.group(2).strip()
-                            await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok" if int(match.group(1))==0 else f"error({match.group(1)})","cwd":self.shell_cwd,"pty_uid":self.pty_uid}})
-                            self._reader_buf = self._reader_buf[match.end():]
-                            self.finished.set()
+                    # 1. Identify and handle ANY sentinel (\x1eNS_... \x1f)
+                    while True:
+                        sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', self._reader_buf)
+                        if not sent_match: break
 
-                        idx = self._reader_buf.find('\x1e')
-                        if idx > 0:
-                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:idx],"pty_uid":self.pty_uid})
-                            self._reader_buf = self._reader_buf[idx:]
-                        elif idx == -1 and self._reader_buf:
-                            # Avoid broadcasting partial PGID markers
-                            if "PGID:" not in self._reader_buf or "\n" in self._reader_buf:
-                                await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
-                                self._reader_buf = ""
-                    else:
+                        # Data before sentinel is real output
+                        pre_data = self._reader_buf[:sent_match.start()]
+                        if pre_data:
+                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":pre_data,"pty_uid":self.pty_uid})
+
+                        # Is this OUR sentinel?
+                        if self.current_sentinel and f"\x1e{self.current_sentinel}_" in sent_match.group(0):
+                            self.shell_cwd = sent_match.group(2).strip()
+                            await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok" if int(sent_match.group(1))==0 else f"error({sent_match.group(1)})","cwd":self.shell_cwd,"pty_uid":self.pty_uid}})
+                            self.finished.set()
+                        else:
+                            # Stale sentinel from previous command, just discard it
+                            logging.debug(f"[{self.pty_id}] Discarded stale sentinel: {sent_match.group(0)}")
+
+                        self._reader_buf = self._reader_buf[sent_match.end():]
+
+                    # 2. Identify and handle ANY PGID marker
+                    while True:
+                        pgid_match = re.search(r'PGID:(\d+)\n', self._reader_buf)
+                        if not pgid_match: break
+
+                        # If we already have a current_pgid, this is either a rerun or stale
+                        # If we don't have one, this is the start of our command
+                        if self.current_pgid is None:
+                             self.current_pgid = int(pgid_match.group(1))
+
+                        self._reader_buf = self._reader_buf[pgid_match.end():]
+
+                    # 3. Broadcast remaining output, but stay clear of potential partial markers
+                    # Find first index of \x1e or 'PGID:'
+                    m1 = self._reader_buf.find('\x1e')
+                    m2 = self._reader_buf.find('PGID:')
+
+                    # split_idx is the first occurrence of either
+                    split_idx = -1
+                    if m1 != -1 and m2 != -1: split_idx = min(m1, m2)
+                    elif m1 != -1: split_idx = m1
+                    elif m2 != -1: split_idx = m2
+
+                    if split_idx > 0:
+                        await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:split_idx],"pty_uid":self.pty_uid})
+                        self._reader_buf = self._reader_buf[split_idx:]
+                    elif split_idx == -1 and self._reader_buf:
                         await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
                         self._reader_buf = ""
         except Exception as e:
