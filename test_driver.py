@@ -53,25 +53,49 @@ class NeptuneOracle:
         if not isinstance(action, str):
             raise TypeError(f"action must be a string, got {type(action)}")
 
-        # Handle sequences like "ctrl+p, 'test', enter"
-        # We use a simple comma-based split but we must be careful with literal commas if they were allowed.
-        # For now, let's assume commas only separate keys in Action:
-        parts = [p.strip() for p in action.split(",")]
-        for part in parts:
-            if (part.startswith("'") and part.endswith("'")) or (part.startswith('"') and part.endswith('"')):
-                # Literal text
-                text = part[1:-1]
-                self.child.send(text)
-            else:
-                seq = self._map_key(part.lower())
-                if seq:
-                    self.child.send(seq)
-                else:
-                    # If not found in map, maybe it's a literal character
-                    self.child.send(part)
-            # Small delay between parts of a sequence to allow UI to react
+        # Handle comma-separated sequences first for backward compatibility
+        # e.g., "ctrl+p, 'test', enter"
+        if "," in action:
+            parts = [p.strip() for p in action.split(",")]
+            for part in parts:
+                self._send_single_action(part)
+                time.sleep(0.1)
+                self.feed_stream()
+        else:
+            self._send_single_action(action)
             time.sleep(0.1)
             self.feed_stream()
+
+    def _send_single_action(self, action: str) -> None:
+        """Processes a single action part, which could be a known key, quoted text, or <key> sequence."""
+        # 1. Quoted literal
+        if (action.startswith("'") and action.endswith("'")) or (action.startswith('"') and action.endswith('"')):
+            self.child.send(action[1:-1])
+            return
+
+        # 2. Known single key (e.g., "esc", "enter", "ctrl+b")
+        seq = self._map_key(action.lower())
+        if seq:
+            self.child.send(seq)
+            return
+
+        # 3. Sequence with <key> tags or pure literal text
+        i = 0
+        while i < len(action):
+            if action[i] == '<':
+                end = action.find('>', i)
+                if end != -1:
+                    key = action[i+1:end].lower()
+                    seq = self._map_key(key)
+                    if seq:
+                        self.child.send(seq)
+                        i = end + 1
+                        time.sleep(0.1)
+                        continue
+
+            self.child.send(action[i])
+            i += 1
+            time.sleep(0.01)
 
     def _map_key(self, key: str) -> str:
         key_map = {

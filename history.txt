@@ -1,1 +1,2 @@
-ls -F
+echo "Sequence Test"
+echo "Sequence Test"
