@@ -222,10 +222,15 @@ class LocalPTY(BasePTY):
     async def stop(self):
         self.interrupted.set()
         if not self.master_fd: return
+
+        # Capture context to avoid race
+        target_block_id = self.current_block_id
+        target_pgid = self.current_pgid
+
         try:
             pgids = []
-            if self.current_pgid:
-                pgids = [self.current_pgid]
+            if target_pgid:
+                pgids = [target_pgid]
             else:
                 pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
                 if pgid_str:
@@ -238,9 +243,14 @@ class LocalPTY(BasePTY):
 
             await asyncio.sleep(1.0)
 
+            # Double check if we are still supposed to be stopping the same block
+            if self.current_block_id != target_block_id and target_block_id is not None:
+                 logging.info(f"[{self.pty_id}] Termination race detected. Next command already started. Aborting SIGKILL.")
+                 return
+
             # Final check and kill
-            if self.current_pgid:
-                try: os.killpg(self.current_pgid, signal.SIGKILL)
+            if target_pgid:
+                try: os.killpg(target_pgid, signal.SIGKILL)
                 except: pass
             else:
                 pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])

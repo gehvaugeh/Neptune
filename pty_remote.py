@@ -113,6 +113,9 @@ class RemotePTY(BasePTY):
     async def _monitor_command(self, block_id: str, sentinel: str):
         buf = ""
         start_time = asyncio.get_running_loop().time()
+        last_poll_time = 0.0
+        poll_interval = 1.0 # Throttle out-of-band checks to 1s to reduce lag
+
         try:
             while True:
                 # Catch PGID if not yet known
@@ -122,42 +125,45 @@ class RemotePTY(BasePTY):
                         self.current_pgid = int(match.group(1).strip())
                         buf = buf[match.end():]
 
-                # Check explicitly captured PGID first
-                if self.current_pgid:
-                    c_cmd = self._get_ssh_base(use_socket=True)
-                    c_cmd.append(f"ps -o pgid= -g {self.current_pgid}")
+                now = asyncio.get_running_loop().time()
+                if now - last_poll_time >= poll_interval:
+                    last_poll_time = now
+                    # Check explicitly captured PGID first
+                    if self.current_pgid:
+                        c_cmd = self._get_ssh_base(use_socket=True)
+                        c_cmd.append(f"ps -o pgid= -g {self.current_pgid}")
+                        try:
+                            cp = await asyncio.create_subprocess_exec(*c_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                            cout, _ = await cp.communicate()
+                            if not cout.decode().strip():
+                                # PGID is gone
+                                await asyncio.sleep(0.5)
+                                # Give a chance for last read
+                                try:
+                                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
+                                    if chunk: buf += chunk.decode(errors="replace")
+                                except: pass
+                                break
+                        except: pass
+
+                    # Fallback/Safety: Check ALL PGIDs on the TTY
+                    cmd = self._get_ssh_base(use_socket=True)
+                    cmd.append(f"ps -t {self.remote_tty} -o pgid=")
                     try:
-                        cp = await asyncio.create_subprocess_exec(*c_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                        cout, _ = await cp.communicate()
-                        if not cout.decode().strip():
-                            # PGID is gone
-                            await asyncio.sleep(0.5)
-                            # Give a chance for last read
-                            try:
-                                chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
-                                if chunk: buf += chunk.decode(errors="replace")
-                            except: pass
-                            break
+                        p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                        out, _ = await p.communicate()
+                        pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
+
+                        # If all PGIDs match shell_pgid, then no user command is running
+                        is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
+
+                        if not is_user_cmd_running:
+                            # Command finished or killed
+                            if now - start_time > 1.0:
+                                # Wait a bit more for remaining output/sentinel
+                                await asyncio.sleep(0.5)
+                                break
                     except: pass
-
-                # Fallback/Safety: Check ALL PGIDs on the TTY
-                cmd = self._get_ssh_base(use_socket=True)
-                cmd.append(f"ps -t {self.remote_tty} -o pgid=")
-                try:
-                    p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                    out, _ = await p.communicate()
-                    pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
-
-                    # If all PGIDs match shell_pgid, then no user command is running
-                    is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
-
-                    if not is_user_cmd_running:
-                        # Command finished or killed
-                        if asyncio.get_running_loop().time() - start_time > 1.0:
-                            # Wait a bit more for remaining output/sentinel
-                            await asyncio.sleep(0.5)
-                            break
-                except: pass
 
                 try:
                     chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
@@ -247,9 +253,13 @@ class RemotePTY(BasePTY):
     async def stop(self):
         self.interrupted.set()
 
+        # Capture context to avoid race with next command
+        target_block_id = self.current_block_id
+        target_pgid = self.current_pgid
+
         pgids = []
-        if self.current_pgid:
-            pgids = [self.current_pgid]
+        if target_pgid:
+            pgids = [target_pgid]
         else:
             # Identify all PGIDs on the TTY
             cmd = self._get_ssh_base(use_socket=True)
@@ -270,9 +280,14 @@ class RemotePTY(BasePTY):
 
             await asyncio.sleep(1.0)
 
-            # Check if still running
-            if self.current_pgid:
-                targets = [self.current_pgid]
+            # Double check if we are still supposed to be stopping the same block
+            if self.current_block_id != target_block_id and target_block_id is not None:
+                logging.info(f"[{self.pty_id}] Termination race detected. Next command already started. Aborting SIGKILL.")
+                return
+
+            # Check if target still exists
+            if target_pgid:
+                targets = [target_pgid]
             else:
                 cmd = self._get_ssh_base(use_socket=True)
                 cmd.append(f"ps -t {self.remote_tty} -o pgid=")
