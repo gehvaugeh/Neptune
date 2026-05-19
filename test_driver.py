@@ -242,17 +242,44 @@ class NeptuneOracle:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 test_driver.py <notebook.md> [command]")
+        print("Usage:")
+        print("  Run Notebook:    python3 test_driver.py <notebook.md> [command]")
+        print("  Interactive REPL: python3 test_driver.py --repl [command]")
         sys.exit(1)
 
-    notebook_path = sys.argv[1]
-    # Default command is 'python3 main.py all --clean-history'
+    arg1 = sys.argv[1]
     cmd = sys.argv[2] if len(sys.argv) > 2 else "python3 main.py all --clean-history"
 
-    oracle = NeptuneOracle(cmd)
-    try:
-        # Give Neptune some time to initialize
-        oracle.wait_for_idle(3.0)
-        oracle.run_notebook(notebook_path)
-    finally:
-        oracle.child.terminate(force=True)
+    if arg1 == "--repl":
+        print(f"--- Starting Interactive Oracle REPL (Target: {cmd}) ---")
+        oracle = NeptuneOracle(cmd)
+        try:
+            oracle.wait_for_idle(3.0)
+            while True:
+                print("\n" + "="*80)
+                print(oracle.get_screen_snapshot())
+                print("="*80)
+                try:
+                    user_input = input("\nOracle Action (or 'exit'): ").strip()
+                    if user_input.lower() == 'exit':
+                        break
+                    if not user_input:
+                        oracle.feed_stream()
+                        continue
+
+                    oracle.send_input(user_input)
+                    oracle.wait_for_idle(0.5)
+                except (EOFError, KeyboardInterrupt):
+                    break
+        finally:
+            oracle.child.terminate(force=True)
+            print("\nOracle session terminated.")
+    else:
+        notebook_path = arg1
+        oracle = NeptuneOracle(cmd)
+        try:
+            # Give Neptune some time to initialize
+            oracle.wait_for_idle(3.0)
+            oracle.run_notebook(notebook_path)
+        finally:
+            oracle.child.terminate(force=True)

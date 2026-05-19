@@ -1,2 +1,0 @@
-echo "Sequence Test"
-echo "Sequence Test"
