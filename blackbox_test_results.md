@@ -1,11 +1,17 @@
-# Blackbox Test Results
+# Neptune Blackbox Test Results
 
-This report was generated using the `neptune-oracle` testing framework.
+**Automated Run Date:** Wed May 20 15:21:26 2026
 
-| Test Description | Result |
-|------------------|--------|
-| Verify Neptune header on startup | ✅ PASS |
-| Execute echo command in BASH mode | ✅ PASS |
-| Switch to SELECTION mode | ✅ PASS |
-| Return to NORMAL mode via ESC | ✅ PASS |
-| Execute help command in CMD mode | ✅ PASS |
+| Feature Test | Result | Details |
+|--------------|--------|---------|
+| Verify Startup Header | ✅ PASS |  |
+| Execute BASH Echo | ✅ PASS |  |
+| Internal Help Command | ✅ PASS |  |
+| Create Markdown Note | ✅ PASS |  |
+| Enter Selection Mode | ✅ PASS |  |
+| Selection Navigation (Up) | ✅ PASS |  |
+| Reorder block (Move Up) | ✅ PASS |  |
+| Execute clear command | ✅ PASS |  |
+| Path Autocomplete Visibility | ✅ PASS |  |
+| Setup block for yank | ✅ PASS |  |
+| Yank and Paste block | ✅ PASS |  |

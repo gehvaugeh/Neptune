@@ -1,1 +1,2 @@
-echo 'Blackbox Test'
+echo 'Oracle-Echo-Verified-12345'
+echo 'Yank-Me'
