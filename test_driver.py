@@ -93,9 +93,17 @@ class NeptuneOracle:
                         time.sleep(0.1)
                         continue
 
-            self.child.send(action[i])
+            char = action[i]
+            self.child.send(char)
             i += 1
-            time.sleep(0.01)
+
+            # If it's a mode trigger, wait a bit for Neptune to focus the input field
+            if char in ("!", ":", ";", "s"):
+                time.sleep(0.15)
+            elif char == "\x1b": # Escape
+                time.sleep(0.1)
+            else:
+                time.sleep(0.02) # Slightly slower typing for stability
 
     def _map_key(self, key: str) -> str:
         key_map = {
@@ -115,6 +123,11 @@ class NeptuneOracle:
             "pagedown": "\x1b[6~",
             "delete": "\x1b[3~",
             "space": " ",
+            # Enhanced navigation keys (matches common terminal expectations)
+            "ctrl+up": "\x1b[1;5A",
+            "ctrl+down": "\x1b[1;5B",
+            "alt+up": "\x1b[1;3A",
+            "alt+down": "\x1b[1;3B",
         }
 
         if key in key_map:

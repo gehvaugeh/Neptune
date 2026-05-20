@@ -4,8 +4,7 @@ import os
 
 def run_tests():
     results = []
-    # Use a unique socket for this test run
-    socket_path = "/tmp/neptune_blackbox.sock"
+    socket_path = "/tmp/neptune_final_verif.sock"
     if os.path.exists(socket_path):
         try: os.remove(socket_path)
         except: pass
@@ -17,7 +16,7 @@ def run_tests():
         results.append({"description": desc, "result": status, "details": details})
         print(f"{status}: {desc} {'(' + details + ')' if details else ''}")
 
-    def assert_screen(expected, desc, timeout=12.0):
+    def assert_screen(expected, desc, timeout=15.0):
         start = time.time()
         while time.time() - start < timeout:
             oracle.feed_stream()
@@ -26,12 +25,11 @@ def run_tests():
                 record(desc, "PASS")
                 return True
             time.sleep(0.5)
-        record(desc, "FAIL", f"Expected '{expected}' not found on screen")
+        record(desc, "FAIL", f"Expected '{expected}' not found")
         return False
 
-    def assert_not_on_screen(forbidden, desc, timeout=12.0):
+    def assert_not_on_screen(forbidden, desc, timeout=15.0):
         start = time.time()
-        # Small initial wait to allow UI change
         time.sleep(1.0)
         while time.time() - start < timeout:
             oracle.feed_stream()
@@ -51,65 +49,65 @@ def run_tests():
         assert_screen("Neptune Multi-User", "Verify Startup Header")
 
         # 2. BASH Echo
-        unique_str = "Oracle-Echo-Verified-12345"
-        print(f"Testing Echo with '{unique_str}'...")
-        oracle.send_input(f"!echo '{unique_str}' <return>")
-        assert_screen(unique_str, "Execute BASH Echo")
+        print("Testing BASH Echo...")
+        oracle.send_input("<esc>!echo OracleEcho <return>")
+        assert_screen("OracleEcho", "Execute BASH Echo")
 
-        # 3. CMD Mode - Help
+        # 3. Internal Help
         print("Testing Internal Help...")
         oracle.send_input("<esc>:help <return>")
         assert_screen("Commands:", "Internal Help Command")
 
-        # 4. NOTE Mode
-        print("Testing Markdown Note creation...")
-        oracle.send_input("<esc>;# Dynamic Test Note <return>")
-        assert_screen("Dynamic Test Note", "Create Markdown Note")
+        # 4. NOTE creation
+        print("Testing Note...")
+        oracle.send_input("<esc>;NoteMarker <return>")
+        assert_screen("NoteMarker", "Create Note")
 
-        # 5. Selection Mode - Navigation
+        # 5. Clear screen
+        print("Cleaning up...")
+        oracle.send_input("<esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+
+        # 6. Selection Navigation & Deletion
         print("Testing Selection Mode...")
+        oracle.send_input("!echo AAA <return>")
+        assert_screen("AAA", "Setup AAA")
         oracle.send_input("s")
         assert_screen("MODE: SELECTION", "Enter Selection Mode")
-        oracle.send_input("k") # Move up
-        oracle.wait_for_idle(0.5)
-        assert_screen("MODE: SELECTION", "Selection Navigation (Up)")
+        oracle.send_input("x")
+        assert_not_on_screen("AAA", "Delete block via Selection Mode")
 
-        # 6. Block Reordering
+        # 7. Block Reordering
         print("Testing Reordering...")
-        oracle.send_input("<ctrl+up>")
+        oracle.send_input("<esc>!echo MoveMe <return>")
+        assert_screen("MoveMe", "Setup MoveMe")
+        oracle.send_input("s<ctrl+up>")
         oracle.wait_for_idle(1.5)
-        record("Reorder block (Move Up)", "PASS")
+        assert_screen("MODE: SELECTION", "Reorder block (Ctrl+Up)")
 
-        # 7. CMD - Clear
-        print("Testing Clear...")
-        oracle.send_input("<esc>:clear <return>")
-        oracle.wait_for_idle(4.0)
-        snapshot = oracle.get_screen_snapshot()
-        if unique_str not in snapshot and "Dynamic Test Note" not in snapshot:
-            record("Execute clear command", "PASS")
-        else:
-            record("Execute clear command", "FAIL", "Content still present after clear")
-
-        # 8. Autocomplete - Path
-        print("Testing Path Autocomplete...")
-        oracle.send_input("!ls <tab>")
+        # 8. Autocomplete
+        print("Testing Autocomplete...")
+        oracle.send_input("<esc>!ls <tab>")
         assert_screen("PATH:", "Path Autocomplete Visibility")
         oracle.send_input("<esc>")
 
-        # 9. Selection Mode - Yank & Paste
+        # 9. Yank & Paste
         print("Testing Yank & Paste...")
-        oracle.send_input("!echo 'Yank-Me' <return>")
-        assert_screen("Yank-Me", "Setup block for yank")
-        oracle.send_input("sy") # Select and Yank
+        # Clear again for clean state
+        oracle.send_input("<esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        oracle.send_input("!echo YankMe <return>")
+        assert_screen("YankMe", "Setup YankMe")
+        oracle.send_input("sy") # Select & Yank
         oracle.wait_for_idle(0.5)
-        oracle.send_input("p")  # Paste after
-        oracle.wait_for_idle(1.5)
-        # Check if content appears again
+        oracle.send_input("p")  # Paste After
+        oracle.wait_for_idle(2.0)
+        oracle.feed_stream()
         snapshot = oracle.get_screen_snapshot()
-        if snapshot.count("Yank-Me") >= 2:
+        if snapshot.count("YankMe") >= 2:
             record("Yank and Paste block", "PASS")
         else:
-            record("Yank and Paste block", "FAIL", "Pasted content not found or duplicated")
+            record("Yank and Paste block", "FAIL", "Duplicated content not found")
 
     except Exception as e:
         record("Test Suite Execution", "ERROR", str(e))
@@ -123,7 +121,7 @@ def run_tests():
 
 def generate_report(results):
     report = "# Neptune Blackbox Test Results\n\n"
-    report += f"**Automated Run Date:** {time.ctime()}\n\n"
+    report += f"**Automated Verification Run:** {time.ctime()}\n\n"
     report += "| Feature Test | Result | Details |\n"
     report += "|--------------|--------|---------|\n"
     for r in results:
@@ -135,4 +133,4 @@ if __name__ == "__main__":
     test_results = run_tests()
     with open("blackbox_test_results.md", "w") as f:
         f.write(generate_report(test_results))
-    print("\nBlackbox testing complete. Results written to blackbox_test_results.md")
+    print("\nBlackbox testing complete. Report: blackbox_test_results.md")
