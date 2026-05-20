@@ -241,16 +241,17 @@ class NeptuneOracle:
         print(f"--- Notebook {filepath} completed successfully ---")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  Run Notebook:    python3 test_driver.py <notebook.md> [command]")
-        print("  Interactive REPL: python3 test_driver.py --repl [command]")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description="Neptune Oracle TUI Testing Framework")
+    parser.add_argument("target", nargs="?", help="Notebook path OR Command (if --repl is used)")
+    parser.add_argument("cmd", nargs="?", help="Command to start Neptune (if target is a notebook)")
+    parser.add_argument("--repl", action="store_true", help="Start in interactive REPL mode")
 
-    arg1 = sys.argv[1]
-    cmd = sys.argv[2] if len(sys.argv) > 2 else "python3 main.py all --clean-history"
+    args = parser.parse_args()
 
-    if arg1 == "--repl":
+    if args.repl:
+        # In REPL mode, 'target' is the command if provided, else use default
+        cmd = args.target if args.target else "python3 main.py all --clean-history"
         print(f"--- Starting Interactive Oracle REPL (Target: {cmd}) ---")
         oracle = NeptuneOracle(cmd)
         try:
@@ -274,8 +275,9 @@ if __name__ == "__main__":
         finally:
             oracle.child.terminate(force=True)
             print("\nOracle session terminated.")
-    else:
-        notebook_path = arg1
+    elif args.target:
+        notebook_path = args.target
+        cmd = args.cmd if args.cmd else "python3 main.py all --clean-history"
         oracle = NeptuneOracle(cmd)
         try:
             # Give Neptune some time to initialize
@@ -283,3 +285,6 @@ if __name__ == "__main__":
             oracle.run_notebook(notebook_path)
         finally:
             oracle.child.terminate(force=True)
+    else:
+        parser.print_help()
+        sys.exit(1)
