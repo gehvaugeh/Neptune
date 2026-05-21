@@ -1,15 +1,22 @@
-from test_driver import NeptuneOracle
-import time
+import sys
 import os
+import time
+
+# Ensure we can import NeptuneOracle from the sibling directory
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "oracle"))
+from test_driver import NeptuneOracle
 
 def run_tests():
     results = []
-    socket_path = "/tmp/neptune_final_verif.sock"
+    socket_path = "test.sock"
     if os.path.exists(socket_path):
         try: os.remove(socket_path)
         except: pass
 
-    cmd = f"python3 main.py all --clean-history -s {socket_path}"
+    # main.py is in the root directory
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    main_path = os.path.join(root_dir, "main.py")
+    cmd = f"python3 {main_path} all --clean-history -s {socket_path}"
     oracle = NeptuneOracle(cmd)
 
     def record(desc, status, details=""):
@@ -131,6 +138,7 @@ def generate_report(results):
 
 if __name__ == "__main__":
     test_results = run_tests()
-    with open("blackbox_test_results.md", "w") as f:
+    report_path = os.path.join(os.path.dirname(__file__), "blackbox_test_results.md")
+    with open(report_path, "w") as f:
         f.write(generate_report(test_results))
-    print("\nBlackbox testing complete. Report: blackbox_test_results.md")
+    print(f"\nBlackbox testing complete. Report: {report_path}")

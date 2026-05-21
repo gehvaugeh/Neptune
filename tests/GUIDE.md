@@ -43,7 +43,7 @@ Expect: [No longer contains the note content]
 ### Running the Notebook
 
 ```bash
-python3 test_driver.py my_feature.md
+python3 tests/oracle/test_driver.py tests/notebooks/my_feature.md
 ```
 
 ---
@@ -55,6 +55,9 @@ For complex features (like block reordering or multi-step logic), it is recommen
 ### Basic Setup
 
 ```python
+import sys
+import os
+sys.path.append("tests/oracle")
 from test_driver import NeptuneOracle
 import time
 
@@ -117,6 +120,6 @@ If a test fails, the Oracle will provide:
 
 You can also use the **Interactive REPL** to develop tests:
 ```bash
-python3 test_driver.py --repl
+python3 tests/oracle/test_driver.py --repl
 ```
 In the REPL, you can type actions and see the screen update in real-time, helping you find the exact sequence of keys needed for your test case.
