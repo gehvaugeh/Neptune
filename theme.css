@@ -223,3 +223,33 @@ NoteBlock {
     height: 3;
     align: right middle;
 }
+
+.modal-row {
+    height: 3;
+    align: left middle;
+}
+
+.modal-footer {
+    margin-top: 1;
+    text-align: center;
+}
+
+.pty-picker #picker_list {
+    height: 10;
+    border: solid $border;
+    background: $bg-input;
+}
+
+#pty_target_bar {
+    height: 3;
+    background: #0a1020;
+    border-bottom: solid $border;
+    padding: 0 1;
+    align: left middle;
+}
+
+#pty_target_input {
+    width: 1fr;
+    border: none;
+    background: $bg-block;
+}
