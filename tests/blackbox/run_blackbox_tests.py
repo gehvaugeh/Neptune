@@ -8,7 +8,9 @@ from test_driver import NeptuneOracle
 
 def run_tests():
     results = []
-    socket_path = "test.sock"
+    # Use absolute path for the socket to avoid relative path mismatches
+    # between the test runner and the Neptune process.
+    socket_path = os.path.abspath("test.sock")
     if os.path.exists(socket_path):
         try: os.remove(socket_path)
         except: pass
@@ -17,7 +19,7 @@ def run_tests():
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     main_path = os.path.join(root_dir, "main.py")
     cmd = f"python3 {main_path} all --clean-history -s {socket_path}"
-    oracle = NeptuneOracle(cmd)
+    oracle = NeptuneOracle(cmd, cwd=root_dir)
 
     def record(desc, status, details=""):
         results.append({"description": desc, "result": status, "details": details})
@@ -57,27 +59,28 @@ def run_tests():
 
         # 2. BASH Echo
         print("Testing BASH Echo...")
-        oracle.send_input("<esc>!echo OracleEcho <return>")
+        # Use multiple escapes to ensure we are in NORMAL mode
+        oracle.send_input("<esc><esc>!echo OracleEcho <return>")
         assert_screen("OracleEcho", "Execute BASH Echo")
 
         # 3. Internal Help
         print("Testing Internal Help...")
-        oracle.send_input("<esc>:help <return>")
+        oracle.send_input("<esc><esc>:help <return>")
         assert_screen("Commands:", "Internal Help Command")
 
         # 4. NOTE creation
         print("Testing Note...")
-        oracle.send_input("<esc>;NoteMarker <return>")
+        oracle.send_input("<esc><esc>;NoteMarker <return>")
         assert_screen("NoteMarker", "Create Note")
 
         # 5. Clear screen
         print("Cleaning up...")
-        oracle.send_input("<esc>:clear <return>")
-        oracle.wait_for_idle(3.0)
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(4.0)
 
         # 6. Selection Navigation & Deletion
         print("Testing Selection Mode...")
-        oracle.send_input("!echo AAA <return>")
+        oracle.send_input("<esc><esc>!echo AAA <return>")
         assert_screen("AAA", "Setup AAA")
         oracle.send_input("s")
         assert_screen("MODE: SELECTION", "Enter Selection Mode")
@@ -86,24 +89,26 @@ def run_tests():
 
         # 7. Block Reordering
         print("Testing Reordering...")
-        oracle.send_input("<esc>!echo MoveMe <return>")
+        oracle.send_input("<esc><esc>!echo MoveMe <return>")
         assert_screen("MoveMe", "Setup MoveMe")
-        oracle.send_input("s<ctrl+up>")
-        oracle.wait_for_idle(1.5)
+        oracle.send_input("s")
+        oracle.wait_for_idle(0.5)
+        oracle.send_input("<ctrl+up>")
+        oracle.wait_for_idle(2.0)
         assert_screen("MODE: SELECTION", "Reorder block (Ctrl+Up)")
 
         # 8. Autocomplete
         print("Testing Autocomplete...")
-        oracle.send_input("<esc>!ls <tab>")
+        oracle.send_input("<esc><esc>!ls <tab>")
         assert_screen("PATH:", "Path Autocomplete Visibility")
-        oracle.send_input("<esc>")
+        oracle.send_input("<esc><esc>")
 
         # 9. Yank & Paste
         print("Testing Yank & Paste...")
         # Clear again for clean state
-        oracle.send_input("<esc>:clear <return>")
-        oracle.wait_for_idle(3.0)
-        oracle.send_input("!echo YankMe <return>")
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(4.0)
+        oracle.send_input("<esc><esc>!echo YankMe <return>")
         assert_screen("YankMe", "Setup YankMe")
         oracle.send_input("sy") # Select & Yank
         oracle.wait_for_idle(0.5)

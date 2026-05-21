@@ -8,7 +8,7 @@ import difflib
 from typing import List, Optional, Union
 
 class NeptuneOracle:
-    def __init__(self, command: str, rows: int = 24, cols: int = 80):
+    def __init__(self, command: str, rows: int = 24, cols: int = 80, cwd: Optional[str] = None):
         self.rows = rows
         self.cols = cols
         self.screen = pyte.Screen(cols, rows)
@@ -17,7 +17,11 @@ class NeptuneOracle:
         # We also need to set the TERM environment variable to something standard
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
-        self.child = pexpect.spawn(command, dimensions=(rows, cols), encoding='utf-8', timeout=10, env=env)
+        # Force a reasonable PYTHONPATH if we are running from a subdir
+        if cwd:
+            env["PYTHONPATH"] = cwd + (":" + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
+
+        self.child = pexpect.spawn(command, dimensions=(rows, cols), encoding='utf-8', timeout=15, env=env, cwd=cwd)
 
     def feed_stream(self):
         """Reads all available output from the process and feeds it to pyte."""
@@ -99,11 +103,11 @@ class NeptuneOracle:
 
             # If it's a mode trigger, wait a bit for Neptune to focus the input field
             if char in ("!", ":", ";", "s"):
-                time.sleep(0.15)
+                time.sleep(0.5) # Increased for Termux stability
             elif char == "\x1b": # Escape
-                time.sleep(0.1)
+                time.sleep(0.2)
             else:
-                time.sleep(0.02) # Slightly slower typing for stability
+                time.sleep(0.05) # Slower typing for stability
 
     def _map_key(self, key: str) -> str:
         key_map = {
