@@ -133,6 +133,14 @@ class RenamePTYModal(ModalScreen):
     def on_submit(self): self.rename()
 
 class PTYManagerModal(ModalScreen):
+    BINDINGS = [
+        ("x", "delete_pty", "Delete PTY"),
+        ("r", "rename_pty", "Rename PTY"),
+        ("n", "new_local", "New Local"),
+        ("N", "new_remote", "New Remote"),
+        ("/", "focus_search", "Search"),
+    ]
+
     def __init__(self, ptys: Dict[int, Dict], default_pty_uid: int):
         super().__init__()
         self.ptys = ptys
@@ -142,13 +150,13 @@ class PTYManagerModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog", classes="pty-manager-modal"):
             yield Label("[bold cyan]PTY Manager[/]")
-            yield Input(placeholder="Search PTYs...", id="manager_search")
+            yield Input(placeholder="Search PTYs (Press '/' to focus)...", id="manager_search")
             yield OptionList(id="pty_list")
-            yield Label("[dim]Enter: Select | x: Delete | r: Rename | n: New Local | N: New Remote | Esc: Close[/]", classes="modal-footer")
+            yield Label("[dim]Enter: Select | x: Delete | r: Rename | n: New Local | N: New Remote | /: Search | Esc: Close[/]", classes="modal-footer")
 
     def on_mount(self):
         self.update_list()
-        self.query_one("#manager_search").focus()
+        self.query_one("#pty_list").focus()
 
     def update_list(self):
         ol = self.query_one("#pty_list")
@@ -188,46 +196,52 @@ class PTYManagerModal(ModalScreen):
         self.search_query = event.value
         self.update_list()
 
+    def action_focus_search(self):
+        self.query_one("#manager_search").focus()
+
+    def action_new_local(self):
+        self._do_new_local()
+
+    def action_new_remote(self):
+        self._do_new_remote()
+
+    def action_delete_pty(self):
+        ol = self.query_one("#pty_list")
+        if ol.highlighted is not None:
+            uid_str = ol.get_option_at_index(ol.highlighted).id
+            if uid_str:
+                uid = int(uid_str)
+                if uid == 0:
+                    self.app.notify("This is the default pty and cannot be deleted", severity="warning")
+                else:
+                    info = self.ptys[uid]
+                    if info.get("block_count", 0) > 0 or info.get("status") == "running":
+                        self.app.push_screen(ConfirmKillModal(info.get("name")),
+                            lambda res, u=uid: self._do_delete(u) if res else None)
+                    else:
+                        self._do_delete(uid)
+
+    def action_rename_pty(self):
+        ol = self.query_one("#pty_list")
+        if ol.highlighted is not None:
+            uid_str = ol.get_option_at_index(ol.highlighted).id
+            if uid_str:
+                uid = int(uid_str)
+                self.app.push_screen(RenamePTYModal(self.ptys[uid].get("name")),
+                    lambda res, u=uid: self._do_rename(u, res) if res else None)
+
     def on_key(self, event: events.Key):
         if event.key == "escape":
-            self.dismiss(None)
+            if self.query_one("#manager_search").has_focus:
+                self.query_one("#pty_list").focus()
+            else:
+                self.dismiss(None)
         elif event.key == "enter":
             ol = self.query_one("#pty_list")
             if ol.highlighted is not None:
                 uid_str = ol.get_option_at_index(ol.highlighted).id
                 if uid_str:
                     self.dismiss({"action": "select", "uid": int(uid_str)})
-            event.stop()
-        elif event.key == "x":
-            ol = self.query_one("#pty_list")
-            if ol.highlighted is not None:
-                uid_str = ol.get_option_at_index(ol.highlighted).id
-                if uid_str:
-                    uid = int(uid_str)
-                    if uid == 0:
-                        self.app.notify("This is the default pty and cannot be deleted", severity="warning")
-                    else:
-                        info = self.ptys[uid]
-                        if info.get("block_count", 0) > 0 or info.get("status") == "running":
-                            self.app.push_screen(ConfirmKillModal(info.get("name")),
-                                lambda res, u=uid: self._do_delete(u) if res else None)
-                        else:
-                            self._do_delete(uid)
-            event.stop()
-        elif event.key == "r":
-            ol = self.query_one("#pty_list")
-            if ol.highlighted is not None:
-                uid_str = ol.get_option_at_index(ol.highlighted).id
-                if uid_str:
-                    uid = int(uid_str)
-                    self.app.push_screen(RenamePTYModal(self.ptys[uid].get("name")),
-                        lambda res, u=uid: self._do_rename(u, res) if res else None)
-            event.stop()
-        elif event.key == "n":
-            self._do_new_local()
-            event.stop()
-        elif event.key == "N":
-            self._do_new_remote()
             event.stop()
 
     def _do_delete(self, uid):
