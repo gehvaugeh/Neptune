@@ -103,8 +103,8 @@ class RemotePTY(BasePTY):
         self.current_pgid = None
 
         sentinel = f"NS_{os.urandom(4).hex()}"
-        # Use same sentinel logic as LocalPTY for RemotePTY
-        wrapper = f"(printf 'PGID:'; ps -o pgid= -p $$; {cmd}); printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
+        # Run command directly to preserve state
+        wrapper = f" {cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
 
         self.shell_proc.stdin.write(wrapper.encode())
         await self.shell_proc.stdin.drain()
@@ -114,70 +114,43 @@ class RemotePTY(BasePTY):
         buf = ""
         start_time = asyncio.get_running_loop().time()
         last_poll_time = 0.0
-        poll_interval = 2.0 # Throttle out-of-band checks to 2s to reduce lag
+        poll_interval = 0.5 # More frequent polling for better responsiveness
 
         try:
             while True:
-                # Catch PGID if not yet known
-                if self.current_pgid is None and "PGID:" in buf and "\n" in buf:
-                    match = re.search(r'PGID:(\d+)\n', buf)
-                    if match:
-                        self.current_pgid = int(match.group(1).strip())
-                        buf = buf[match.end():]
-
                 # 1. Prioritize reading output
                 try:
                     chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
-                    if not chunk:
-                         # EOF on stdout usually means session lost or shell died
-                         break
+                    if not chunk: break
                     buf += chunk.decode(errors="replace")
                 except asyncio.TimeoutError:
-                    # Only poll PGID if we aren't busy reading output
                     pass
 
                 now = asyncio.get_running_loop().time()
                 if now - last_poll_time >= poll_interval:
                     last_poll_time = now
-                    # Check explicitly captured PGID first
-                    if self.current_pgid:
-                        c_cmd = self._get_ssh_base(use_socket=True)
-                        c_cmd.append(f"ps -o pgid= -g {self.current_pgid}")
-                        try:
-                            cp = await asyncio.create_subprocess_exec(*c_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                            cout, _ = await cp.communicate()
-                            if not cout.decode().strip():
-                                # PGID is gone
-                                await asyncio.sleep(0.5)
-                                # Give a chance for last read
-                                try:
-                                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
-                                    if chunk: buf += chunk.decode(errors="replace")
-                                except: pass
-                                break
-                        except: pass
-
-                    # Fallback/Safety: Check ALL PGIDs on the TTY
+                    # Check ALL PGIDs on the TTY to see if user command is running
                     cmd = self._get_ssh_base(use_socket=True)
                     cmd.append(f"ps -t {self.remote_tty} -o pgid=")
                     try:
                         p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
                         out, _ = await p.communicate()
                         pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
-
-                        # If all PGIDs match shell_pgid, then no user command is running
                         is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
 
                         if not is_user_cmd_running:
-                            # Command finished or killed
-                            if now - start_time > 1.0:
-                                # Wait a bit more for remaining output/sentinel
-                                await asyncio.sleep(0.5)
-                                break
+                            # Command finished or killed, give a moment for sentinel to arrive
+                            await asyncio.sleep(0.5)
+                            # One last read attempt
+                            try:
+                                chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
+                                if chunk: buf += chunk.decode(errors="replace")
+                            except: pass
+                            break
                     except: pass
 
                 try:
-                    # 1. Identify and handle ANY sentinel (\x1eNS_... \x1f)
+                    # 2. Identify and handle ANY sentinel (\x1eNS_... \x1f)
                     while True:
                         sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', buf)
                         if not sent_match: break
@@ -201,36 +174,16 @@ class RemotePTY(BasePTY):
 
                         buf = buf[sent_match.end():]
 
-                    # 2. Identify and handle ANY PGID marker
-                    while True:
-                        pgid_match = re.search(r'PGID:(\d+)\n', buf)
-                        if not pgid_match: break
-
-                        # If we already have a current_pgid, this is either a rerun or stale
-                        if self.current_pgid is None:
-                             self.current_pgid = int(pgid_match.group(1))
-
-                        buf = buf[pgid_match.end():]
-
-                    # 3. Broadcast remaining output, but stay clear of potential partial markers
-                    m1 = buf.find('\x1e')
-                    m2 = buf.find('PGID:')
-
-                    split_idx = -1
-                    if m1 != -1 and m2 != -1: split_idx = min(m1, m2)
-                    elif m1 != -1: split_idx = m1
-                    elif m2 != -1: split_idx = m2
+                    # 2. Broadcast remaining output, but stay clear of potential partial sentinel
+                    split_idx = buf.find('\x1e')
 
                     if split_idx != -1:
                         if split_idx > 0:
                             await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:split_idx], "pty_uid": self.pty_uid})
                             buf = buf[split_idx:]
 
-                        # Now buf starts with \x1e or PGID:
-                        is_likely_marker = buf.startswith('\x1eNS_') or buf.startswith('PGID:')
-
-                        # If it's not a known marker prefix or it's too long, broadcast it
-                        if not is_likely_marker or len(buf) > 256:
+                        # If it's not a sentinel prefix or it's too long, broadcast it
+                        if not buf.startswith('\x1eNS_') or len(buf) > 256:
                             await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
                             buf = ""
                     elif buf:

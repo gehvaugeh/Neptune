@@ -1,4 +1,12 @@
+mkdir -p /tmp/neptune_test
+cd /tmp/neptune_test
+pwd
+MY_VAR=neptune_val
+echo $MY_VAR
+ls -d /tmp
+1mkdir -p /tmp/remote_test
+1cd /tmp/remote_test
+1pwd
+1REMOTE_VAR=remote_val
+1echo $REMOTE_VAR
 top
-sleep 5
-echo QueuedCmd
-sleep 100

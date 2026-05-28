@@ -78,13 +78,6 @@ class LocalPTY(BasePTY):
                         self._init_done.set()
 
                 if self.current_block_id:
-                    # Catch PGID if not yet known
-                    if self.current_pgid is None and "PGID:" in self._reader_buf and "\n" in self._reader_buf:
-                        match = re.search(r'PGID:(\d+)\n', self._reader_buf)
-                        if match:
-                            self.current_pgid = int(match.group(1))
-                            self._reader_buf = self._reader_buf[match.end():]
-
                     # 1. Identify and handle ANY sentinel (\x1eNS_... \x1f)
                     while True:
                         sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', self._reader_buf)
@@ -106,38 +99,16 @@ class LocalPTY(BasePTY):
 
                         self._reader_buf = self._reader_buf[sent_match.end():]
 
-                    # 2. Identify and handle ANY PGID marker
-                    while True:
-                        pgid_match = re.search(r'PGID:(\d+)\n', self._reader_buf)
-                        if not pgid_match: break
-
-                        # If we already have a current_pgid, this is either a rerun or stale
-                        # If we don't have one, this is the start of our command
-                        if self.current_pgid is None:
-                             self.current_pgid = int(pgid_match.group(1))
-
-                        self._reader_buf = self._reader_buf[pgid_match.end():]
-
-                    # 3. Broadcast remaining output, but stay clear of potential partial markers
-                    # Hold back maximum 100 bytes of potential marker prefix
-                    m1 = self._reader_buf.find('\x1e')
-                    m2 = self._reader_buf.find('PGID:')
-
-                    split_idx = -1
-                    if m1 != -1 and m2 != -1: split_idx = min(m1, m2)
-                    elif m1 != -1: split_idx = m1
-                    elif m2 != -1: split_idx = m2
+                    # 2. Broadcast remaining output, but stay clear of potential partial sentinel
+                    split_idx = self._reader_buf.find('\x1e')
 
                     if split_idx != -1:
                         if split_idx > 0:
                             await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:split_idx],"pty_uid":self.pty_uid})
                             self._reader_buf = self._reader_buf[split_idx:]
 
-                        # Now self._reader_buf starts with \x1e or PGID:
-                        is_likely_marker = self._reader_buf.startswith('\x1eNS_') or self._reader_buf.startswith('PGID:')
-
-                        # If it's not a known marker prefix or it's too long, broadcast it
-                        if not is_likely_marker or len(self._reader_buf) > 256:
+                        # If it's not a sentinel prefix or it's too long, broadcast it
+                        if not self._reader_buf.startswith('\x1eNS_') or len(self._reader_buf) > 256:
                             await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
                             self._reader_buf = ""
                     elif self._reader_buf:
@@ -162,9 +133,8 @@ class LocalPTY(BasePTY):
             sentinel = f"NS_{os.urandom(4).hex()}"
             self.current_sentinel = sentinel
 
-            e_cmd = cmd.replace('\\', '\\\\').replace('\"', '\\\"').replace('$','\\$').replace('`','\\`')
-            # Wrapper prints PGID first
-            wrapper = f" (printf 'PGID:'; ps -o pgid= -p $$; {e_cmd}); printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
+            # Run command directly to preserve state (cd, variables)
+            wrapper = f" {cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
             os.write(self.master_fd, wrapper.encode())
 
             # Shared monitoring loop for both local and remote
