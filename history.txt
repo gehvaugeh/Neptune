@@ -2,7 +2,3 @@ mkdir -p /tmp/neptune_test
 cd /tmp/neptune_test
 pwd
 bash -c "trap 'echo CAUGHT_INT; exit 130' SIGINT; sleep 100"
-1mkdir -p /tmp/remote_test
-1cd /tmp/remote_test
-1pwd
-1sleep 100

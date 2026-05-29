@@ -1495,6 +1495,10 @@ class ClientApp(App):
         self.enter_input_mode(prefix="!")
 
     def on_key(self, event: events.Key):
+        # Allow Modals to handle their own keys (Tab, Esc, etc.) without interference
+        if isinstance(self.screen, ModalScreen):
+            return
+
         # Global exit hatch for CONTROL mode (failsafe)
         if self.input_mode == "CONTROL":
             # 1. Double Escape within 0.5s

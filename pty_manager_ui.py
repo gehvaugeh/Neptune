@@ -90,6 +90,16 @@ class RemotePTYAuthModal(ModalScreen):
     @on(Input.Submitted, "#auth_pass")
     def on_submit(self): self.ok()
 
+    def on_key(self, event: events.Key):
+        if event.key == "escape":
+            self.dismiss(None)
+        elif event.key == "tab":
+            self.focus_next()
+            event.stop(); event.prevent_default()
+        elif event.key == "shift+tab":
+            self.focus_previous()
+            event.stop(); event.prevent_default()
+
 class ConfirmKillModal(ModalScreen):
     def __init__(self, pty_name: str):
         super().__init__()
@@ -107,6 +117,16 @@ class ConfirmKillModal(ModalScreen):
     def cancel(self): self.dismiss(False)
     @on(Button.Pressed, "#kill")
     def kill(self): self.dismiss(True)
+
+    def on_key(self, event: events.Key):
+        if event.key == "escape":
+            self.dismiss(False)
+        elif event.key == "tab":
+            self.focus_next()
+            event.stop(); event.prevent_default()
+        elif event.key == "shift+tab":
+            self.focus_previous()
+            event.stop(); event.prevent_default()
 
 class RenamePTYModal(ModalScreen):
     def __init__(self, old_name: str):
@@ -131,6 +151,16 @@ class RenamePTYModal(ModalScreen):
 
     @on(Input.Submitted, "#new_name")
     def on_submit(self): self.rename()
+
+    def on_key(self, event: events.Key):
+        if event.key == "escape":
+            self.dismiss(None)
+        elif event.key == "tab":
+            self.focus_next()
+            event.stop(); event.prevent_default()
+        elif event.key == "shift+tab":
+            self.focus_previous()
+            event.stop(); event.prevent_default()
 
 class PTYManagerModal(ModalScreen):
     BINDINGS = [
@@ -234,6 +264,7 @@ class PTYManagerModal(ModalScreen):
         if event.key == "escape":
             if self.query_one("#manager_search").has_focus:
                 self.query_one("#pty_list").focus()
+                event.stop(); event.prevent_default()
             else:
                 self.dismiss(None)
         elif event.key == "enter":
