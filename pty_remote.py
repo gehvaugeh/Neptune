@@ -218,6 +218,13 @@ class RemotePTY(BasePTY):
 
     async def send_input(self, data: str):
         if self.shell_proc and self.shell_proc.stdin:
+            if data == "\x03":
+                 # Explicitly send SIGINT to the remote foreground process group for better reliability
+                 cmd = self._get_ssh_base(use_socket=True)
+                 cmd.append(f"kill -INT -$(ps -o pgid= -p $(ps -o pid= -t {self.remote_tty} | tail -1))")
+                 try: await (await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)).wait()
+                 except: pass
+
             self.shell_proc.stdin.write(data.encode())
             await self.shell_proc.stdin.drain()
 

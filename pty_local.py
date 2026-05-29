@@ -185,16 +185,8 @@ class LocalPTY(BasePTY):
 
     async def send_input(self, data: str):
         if self.master_fd:
-            if data == "\x03" and self.master_proc:
-                try:
-                    pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
-                    if pgid_str:
-                        pgids = [int(line.strip()) for line in pgid_str.splitlines() if line.strip().isdigit()]
-                        for pgid in pgids:
-                            if pgid != self.shell_pgid:
-                                os.killpg(pgid, signal.SIGINT)
-                        return
-                except: pass
+            # For Ctrl+C (\x03), we rely on the TTY to generate SIGINT for the foreground process group.
+            # We write it directly to the master FD.
             os.write(self.master_fd, data.encode())
 
     async def stop(self):
