@@ -93,29 +93,40 @@ def run_tests():
         oracle.wait_for_idle(1.0)
         assert_screen("New Remote PTY", "Remote Auth Modal Opened")
 
-        # Type user@host then Tab to Port
         oracle.send_input("test@localhost<tab>")
         oracle.wait_for_idle(0.5)
-        oracle.send_input("2222") # Should go into port field
+        oracle.send_input("2222<tab>")
         oracle.wait_for_idle(0.5)
-        assert_screen("2222", "Tab navigation to Port field")
+        oracle.send_input("<return>") # OK
+        oracle.wait_for_idle(8.0)
+        assert_screen("ID:1", "Remote PTY Created")
+        oracle.send_input("<esc>")
+        oracle.wait_for_idle(1.0)
 
-        # Tab again to Auth Toggle
-        oracle.send_input("<tab>")
-        oracle.wait_for_idle(0.5)
+        # 5. Remote Statefulness and Sentinel Leakage
+        print("Testing Remote Statefulness and Sentinel Leakage...")
+        oracle.send_input("!1mkdir -p /tmp/remote_test <return>")
+        oracle.wait_for_idle(2.0)
+        oracle.send_input("!1cd /tmp/remote_test <return>")
+        oracle.wait_for_idle(2.0)
+        oracle.send_input("!1pwd <return>")
+        assert_screen("/tmp/remote_test", "Remote directory persistence")
+        assert_not_on_screen("NS_", "No sentinel leaked in Remote output")
 
-        # Return to finalize (will likely fail connection, which is fine for UI test)
-        oracle.send_input("<return>")
-        oracle.wait_for_idle(5.0)
-        # Check if we got back to manager or saw an error
-        oracle.feed_stream()
-        snap = oracle.get_screen_snapshot().lower()
-        if "id:1" in snap or "error" in snap or "pty manager" in snap:
-             record("Remote Modal interaction and Tab work", "PASS")
-        else:
-             record("Remote Modal interaction and Tab work", "FAIL", "Modal did not progress correctly")
+        # 6. Persistence and Reassignment
+        print("Testing PTY Manager Selection and Reassignment...")
+        oracle.send_input("<ctrl+t>")
+        oracle.wait_for_idle(1.0)
+        oracle.send_input("j<return>") # Select ID:1 (remote)
+        oracle.wait_for_idle(1.0)
+        oracle.send_input("!echo PTY_ONE_ACTIVE <return>")
+        assert_screen("pty_one_active", "Switched to Remote PTY default")
 
-        oracle.send_input("<esc>") # Ensure modal closed
+        oracle.send_input("<ctrl+t>jx<return>") # Delete ID:1 (was selected)
+        oracle.wait_for_idle(3.0)
+        oracle.send_input("<esc>")
+        oracle.wait_for_idle(1.0)
+        assert_screen("deleted", "Remote block marked as deleted")
 
     except Exception as e:
         record("Regression Test Suite", "ERROR", str(e))

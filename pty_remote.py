@@ -174,7 +174,7 @@ class RemotePTY(BasePTY):
 
                         buf = buf[sent_match.end():]
 
-                    # 2. Broadcast remaining output, but stay clear of potential partial sentinel
+                    # 3. Broadcast remaining output, but stay clear of potential partial sentinel
                     split_idx = buf.find('\x1e')
 
                     if split_idx != -1:
@@ -193,6 +193,23 @@ class RemotePTY(BasePTY):
                     continue
 
             # If loop exited via PGID check, broadcast remaining data and final status
+            # But process one last time for sentinel to avoid leakage
+            while True:
+                sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', buf)
+                if not sent_match: break
+                pre_data = buf[:sent_match.start()]
+                if pre_data:
+                    await self.broadcast({"type": "output", "block_id": block_id, "data": pre_data, "pty_uid": self.pty_uid})
+
+                if f"\x1e{sentinel}_" in sent_match.group(0):
+                    exit_code = int(sent_match.group(1))
+                    self._cwd = sent_match.group(2).strip()
+                    await self.broadcast({"type": "update_block", "block": {
+                        "id": block_id, "status": "ok" if exit_code == 0 else f"error({exit_code})", "pty_uid": self.pty_uid, "cwd": self._cwd
+                    }})
+                    return
+                buf = buf[sent_match.end():]
+
             if buf:
                 await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
 
