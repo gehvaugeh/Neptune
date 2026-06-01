@@ -138,8 +138,14 @@ class Server:
                             block["pty_name"] = self.pty_manager.names.get(block["pty_uid"], "unknown")
 
                         if msg.get("only_update"):
+                            # If block was running in another PTY, we must NOT just update metadata
+                            # because it might be stuck in that PTY's queue or execution.
+                            # But here we just want to update the target PTY for FUTURE runs.
                             await self.session_manager.broadcast({"type": "update_block", "block": block})
-                            return
+                            # We must ensure we don't return from the handle_client loop's if/elif block
+                            # if we are inside a loop.
+                            # Wait, 'return' here exits the handle_client function, closing the connection!
+                            continue
 
                         block["output"] = ""
                         await self.session_manager.broadcast({"type": "update_block", "block": block})
