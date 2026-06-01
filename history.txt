@@ -1,4 +1,0 @@
-mkdir -p /tmp/neptune_test
-cd /tmp/neptune_test
-pwd
-bash -c "trap 'echo CAUGHT_INT; exit 130' SIGINT; sleep 100"

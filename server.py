@@ -70,7 +70,7 @@ class Server:
                 elif msg_type == "edit_start":
                     block = self.get_block(msg.get("block_id"))
                     if block:
-                        b_locked_by = block["locked_by"]
+                        b_locked_by = block.get("locked_by")
                         if not b_locked_by or b_locked_by == user_id:
                             block["locked_by"] = user_id
                             await self.session_manager.broadcast({"type":"lock", "block_id":block.get("id"), "user_id":user_id, "user_color":self.session_manager.clients[writer]["color"], "user_name":self.session_manager.clients[writer]["name"]})
@@ -93,7 +93,7 @@ class Server:
                     if block and block["locked_by"] == user_id:
                         block["locked_by"] = None; await self.session_manager.broadcast({"type":"unlock", "block_id":block.get("id")})
                 elif msg_type == "move_block":
-                    idx = next((i for i, b in enumerate(self.blocks) if b["id"] == msg.get("block_id")), -1)
+                    idx = next((i for i, b in enumerate(self.blocks) if b.get("id") == msg.get("block_id")), -1)
                     if idx != -1:
                         new_idx = idx - 1 if msg.get("direction") == "up" else idx + 1
                         if 0 <= new_idx < len(self.blocks):
@@ -115,7 +115,7 @@ class Server:
                     for pty in self.pty_manager.ptys.values():
                         if pty.current_block_id == msg.get("block_id"): await pty.stop()
                 elif msg_type == "paste_block":
-                    idx = next((i for i, b in enumerate(self.blocks) if b["id"] == msg.get("target_id")), -1)
+                    idx = next((i for i, b in enumerate(self.blocks) if b.get("id") == msg.get("target_id")), -1)
                     if idx != -1:
                         y = msg.get("yank_data", [])
                         if len(y) >= 2:
@@ -150,7 +150,7 @@ class Server:
                 elif msg_type == "control_start":
                     block = self.get_block(msg.get("block_id"))
                     if block:
-                        b_locked_by = block["locked_by"]
+                        b_locked_by = block.get("locked_by")
                         if not b_locked_by or b_locked_by == user_id:
                             block["locked_by"], self.control_block_id = user_id, block.get("id")
                             await self.session_manager.broadcast({"type":"lock", "block_id":block.get("id"), "user_id":user_id, "user_color":self.session_manager.clients[writer]["color"], "user_name":self.session_manager.clients[writer]["name"]})

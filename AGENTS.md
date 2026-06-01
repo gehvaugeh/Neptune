@@ -1,18 +1,82 @@
-# Neptune Development Guidelines
+# Neptune Agent Onboarding & Development Guide
 
-## Testing and Quality Assurance
+Welcome to the Neptune project. This document serves as the primary technical guide for autonomous agents and developers working on this codebase.
 
-*   **Zero Regression Policy**: Every new feature, bug fix, or behavioral change MUST be accompanied by a corresponding test case in the blackbox test suite (`tests/blackbox/run_blackbox_tests.py`). This is mandatory to prevent regressions in the TUI environment.
-*   **Blackbox Verification**: Automated verification using the `NeptuneOracle` is the primary method for ensuring system integrity. If a change modifies the UI, focus behavior, or process lifecycle, it must be reflected in the oracle assertions.
-*   **Terminal Statefulness**: Ensure that changes to PTY management do not break the persistence of the shell environment (directory changes, environment variables) across command blocks.
-*   **Process Lifecycle**: Always verify that processes are correctly terminated on block deletion and PTY destruction. Use the SIGTERM-SIGKILL sequence for reliability.
+## 1. Project Philosophy
+- **No Vibe-Coding**: Always use explicit type hints and type checks.
+- **Robustness First**: Neptune operates in a multi-user, multi-process environment. Handle exceptions gracefully and use adaptive timing for UI interactions.
+- **Environment Isolation**: Always use specific socket paths (e.g., `test.sock`) for testing to avoid clashing with other instances.
 
-## PTY Management
+## 2. Testing Framework: Neptune Oracle
 
-*   **Numeric UIDs**: All PTYs must be managed using stable numeric UIDs starting from 0. `UID 0` is reserved for the permanent local master shell.
-*   **Encapsulation**: PTY UI logic (modals, pickers) should reside in `pty_manager_ui.py`.
-*   **Control Mode**: Interactive terminal input (CONTROL mode) must support standard ANSI sequences and signal generation (e.g., Ctrl+C for SIGINT).
+Neptune uses the **Neptune Oracle** system for automated TUI verification. It leverages `pyte` for virtual terminal emulation and `pexpect` for process control.
 
-## UI and Focus
+### Core Testing Workflow
+Whenever you implement a new feature or refactor existing logic, you **MUST** verify it using the blackbox suite.
 
-*   **Modal Behavior**: Modals should handle their own key events (like Escape for dismissal) and allow standard Textual focus navigation (Tab/Shift+Tab) without interference from the main App key handlers.
+#### Running Blackbox Tests
+Execute the autonomous verification suite from the root directory:
+```bash
+python3 tests/blackbox/run_blackbox_tests.py
+```
+This script validates core features (BASH, CMD, NOTE, SELECTION, etc.) and generates a report in `tests/blackbox/blackbox_test_results.md`.
+
+#### Adding New Test Cases
+Add your feature verification logic to `tests/blackbox/run_blackbox_tests.py` using the `NeptuneOracle` library.
+
+**Example Pattern:**
+```python
+import sys
+import os
+sys.path.append("tests/oracle")
+from test_driver import NeptuneOracle
+import time
+
+def test_new_feature():
+    # 1. Spawn Neptune with a clean state and local socket
+    oracle = NeptuneOracle("python3 main.py all --clean-history -s test.sock")
+    try:
+        oracle.wait_for_idle(5.0)
+
+        # 2. Simulate interaction
+        oracle.send_input("!echo 'Verifying Feature' <return>")
+
+        # 3. Assert screen state with a retry loop (Critical for TUI stability)
+        found = False
+        for _ in range(10):
+            oracle.feed_stream()
+            if "Verifying Feature" in oracle.get_screen_snapshot():
+                found = True
+                break
+            time.sleep(0.5)
+
+        assert found, "Feature verification failed!"
+    finally:
+        oracle.child.terminate(force=True)
+```
+
+### Interaction Best Practices
+- **Key Sequences**: Use `<key>` tags in `oracle.send_input()` (e.g., `!ls <tab>`, `s<ctrl+up>`, `<esc>:`).
+- **Escape often**: Prepend your sequences with `<esc><esc>` to ensure you start from a known state (NORMAL mode).
+- **Clear State**: Use the `:clear` command between complex test steps to keep the terminal buffer readable.
+
+### Debugging Tests
+If a test fails or you need to find the correct key sequence, use the **Interactive Oracle REPL**:
+```bash
+python3 tests/oracle/test_driver.py --repl
+```
+This allows you to type actions and see the exact terminal screen snapshots in real-time.
+
+---
+
+## 3. Directory Structure
+- `tests/oracle/`: The `NeptuneOracle` driver engine.
+- `tests/blackbox/`: Automated system-level verification scripts and reports.
+- `doc/`: Detailed architectural documentation for server, client, and protocol.
+
+## 4. Regression Prevention Checklist
+Before submitting any code change:
+1. [ ] Run `python3 tests/blackbox/run_blackbox_tests.py`.
+2. [ ] Verify that all 11+ test cases in the report are marked as `PASS`.
+3. [ ] If you added a feature, ensure it has a corresponding case in the suite.
+4. [ ] Ensure no temporary files (`test.sock`, `history.txt`, `.log` files) are left in the repository.

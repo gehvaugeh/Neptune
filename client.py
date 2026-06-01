@@ -1487,9 +1487,9 @@ class ClientApp(App):
             "ssh_config": {"host": h, "user": u, "port": res.get("port", "22")}
         }
         if res.get("method") == "key":
-            msg.get("ssh_config", {})["key"] = res.get("value")
+            msg["ssh_config"]["key"] = res.get("value")
         else:
-            msg.get("ssh_config", {})["password"] = res.get("value")
+            msg["ssh_config"]["password"] = res.get("value")
 
         await self.send_message(msg)
         self.enter_input_mode(prefix="!")

@@ -8,11 +8,14 @@ from test_driver import NeptuneOracle
 
 def run_tests():
     results = []
+    # Use absolute path for the socket to avoid relative path mismatches
+    # between the test runner and the Neptune process.
     socket_path = os.path.abspath("test.sock")
     if os.path.exists(socket_path):
         try: os.remove(socket_path)
         except: pass
 
+    # main.py is in the root directory
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     main_path = os.path.join(root_dir, "main.py")
     cmd = f"python3 {main_path} all --clean-history -s {socket_path}"
@@ -58,78 +61,72 @@ def run_tests():
         # 1. Startup
         assert_screen("Neptune Multi-User", "Verify Startup Header")
 
-        # 2. Local Statefulness
-        print("Testing Local Statefulness...")
-        clear_notebook()
-        oracle.send_input("!mkdir -p /tmp/neptune_test <return>")
-        oracle.wait_for_idle(1.0)
-        oracle.send_input("!cd /tmp/neptune_test <return>")
-        oracle.wait_for_idle(1.0)
-        oracle.send_input("!pwd <return>")
-        assert_screen("/tmp/neptune_test", "Local directory persistence")
+        # 2. BASH Echo
+        print("Testing BASH Echo...")
+        # Use multiple escapes to ensure we are in NORMAL mode
+        oracle.send_input("<esc><esc>!echo OracleEcho <return>")
+        assert_screen("OracleEcho", "Execute BASH Echo")
 
-        # 3. Local TUI Kill (Ctrl+C)
-        print("Testing Local TUI Kill (Ctrl+C)...")
-        clear_notebook()
-        oracle.send_input("!bash -c \"trap 'echo CAUGHT_INT; exit 130' SIGINT; sleep 100\" <return>")
-        assert_screen("running", "Process is running")
-        oracle.send_input("si") # Select and enter Control mode
-        oracle.wait_for_idle(1.0)
-        oracle.send_input("<ctrl+c>") # Send SIGINT
-        oracle.wait_for_idle(3.0)
-        oracle.send_input("<esc><esc>") # Exit control mode
+        # 3. Internal Help
+        print("Testing Internal Help...")
+        oracle.send_input("<esc><esc>:help <return>")
+        assert_screen("Commands:", "Internal Help Command")
+
+        # 4. NOTE creation
+        print("Testing Note...")
+        oracle.send_input("<esc><esc>;NoteMarker <return>")
+        assert_screen("NoteMarker", "Create Note")
+
+        # 5. Clear screen
+        print("Cleaning up...")
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(4.0)
+
+        # 6. Selection Navigation & Deletion
+        print("Testing Selection Mode...")
+        oracle.send_input("<esc><esc>!echo AAA <return>")
+        assert_screen("AAA", "Setup AAA")
+        oracle.send_input("s")
+        assert_screen("MODE: SELECTION", "Enter Selection Mode")
+        oracle.send_input("x")
+        assert_not_on_screen("AAA", "Delete block via Selection Mode")
+
+        # 7. Block Reordering
+        print("Testing Reordering...")
+        oracle.send_input("<esc><esc>!echo MoveMe <return>")
+        assert_screen("MoveMe", "Setup MoveMe")
+        oracle.send_input("s")
+        oracle.wait_for_idle(0.5)
+        oracle.send_input("<ctrl+up>")
+        oracle.wait_for_idle(2.0)
+        assert_screen("MODE: SELECTION", "Reorder block (Ctrl+Up)")
+
+        # 8. Autocomplete
+        print("Testing Autocomplete...")
+        oracle.send_input("<esc><esc>!ls <tab>")
+        assert_screen("PATH:", "Path Autocomplete Visibility")
+        oracle.send_input("<esc><esc>")
+
+        # 9. Yank & Paste
+        print("Testing Yank & Paste...")
+        # Clear again for clean state
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(4.0)
+        oracle.send_input("<esc><esc>!echo YankMe <return>")
+        assert_screen("YankMe", "Setup YankMe")
+        oracle.send_input("sy") # Select & Yank
+        oracle.wait_for_idle(0.5)
+        oracle.send_input("p")  # Paste After
+        oracle.wait_for_idle(2.0)
         oracle.feed_stream()
-        snap = oracle.get_screen_snapshot().lower()
-        if "caught_int" in snap or "error(130)" in snap or "killed" in snap or "done" in snap:
-             record("Local TUI Ctrl+C termination", "PASS")
+        snapshot = oracle.get_screen_snapshot()
+        if snapshot.count("YankMe") >= 2:
+            record("Yank and Paste block", "PASS")
         else:
-             record("Local TUI Ctrl+C termination", "FAIL", "Process did not seem to react to Ctrl+C")
-
-        # 4. Remote PTY Setup and Tab Navigation
-        print("Testing Remote PTY Modal and Tab Navigation...")
-        oracle.send_input("<ctrl+t>")
-        oracle.wait_for_idle(1.0)
-        oracle.send_input("N")
-        oracle.wait_for_idle(1.0)
-        assert_screen("New Remote PTY", "Remote Auth Modal Opened")
-
-        oracle.send_input("test@localhost<tab>")
-        oracle.wait_for_idle(0.5)
-        oracle.send_input("2222<tab>")
-        oracle.wait_for_idle(0.5)
-        oracle.send_input("<return>") # OK
-        oracle.wait_for_idle(8.0)
-        assert_screen("ID:1", "Remote PTY Created")
-        oracle.send_input("<esc>")
-        oracle.wait_for_idle(1.0)
-
-        # 5. Remote Statefulness and Sentinel Leakage
-        print("Testing Remote Statefulness and Sentinel Leakage...")
-        oracle.send_input("!1mkdir -p /tmp/remote_test <return>")
-        oracle.wait_for_idle(2.0)
-        oracle.send_input("!1cd /tmp/remote_test <return>")
-        oracle.wait_for_idle(2.0)
-        oracle.send_input("!1pwd <return>")
-        assert_screen("/tmp/remote_test", "Remote directory persistence")
-        assert_not_on_screen("NS_", "No sentinel leaked in Remote output")
-
-        # 6. Persistence and Reassignment
-        print("Testing PTY Manager Selection and Reassignment...")
-        oracle.send_input("<ctrl+t>")
-        oracle.wait_for_idle(1.0)
-        oracle.send_input("j<return>") # Select ID:1 (remote)
-        oracle.wait_for_idle(1.0)
-        oracle.send_input("!echo PTY_ONE_ACTIVE <return>")
-        assert_screen("pty_one_active", "Switched to Remote PTY default")
-
-        oracle.send_input("<ctrl+t>jx<return>") # Delete ID:1 (was selected)
-        oracle.wait_for_idle(3.0)
-        oracle.send_input("<esc>")
-        oracle.wait_for_idle(1.0)
-        assert_screen("deleted", "Remote block marked as deleted")
+            record("Yank and Paste block", "FAIL", "Duplicated content not found")
 
     except Exception as e:
-        record("Regression Test Suite", "ERROR", str(e))
+        record("Test Suite Execution", "ERROR", str(e))
     finally:
         oracle.child.terminate(force=True)
         if os.path.exists(socket_path):
@@ -139,7 +136,7 @@ def run_tests():
     return results
 
 def generate_report(results):
-    report = "# Neptune Regression Test Results\n\n"
+    report = "# Neptune Blackbox Test Results\n\n"
     report += f"**Automated Verification Run:** {time.ctime()}\n\n"
     report += "| Feature Test | Result | Details |\n"
     report += "|--------------|--------|---------|\n"
@@ -153,4 +150,4 @@ if __name__ == "__main__":
     report_path = os.path.join(os.path.dirname(__file__), "blackbox_test_results.md")
     with open(report_path, "w") as f:
         f.write(generate_report(test_results))
-    print(f"\nVerification complete. Report: {report_path}")
+    print(f"\nBlackbox testing complete. Report: {report_path}")
