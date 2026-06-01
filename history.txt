@@ -1,4 +1,0 @@
-echo OracleEcho
-echo AAA
-echo MoveMe
-echo YankMe

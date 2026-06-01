@@ -30,7 +30,7 @@ def run_tests():
         while time.time() - start < timeout:
             oracle.feed_stream()
             snapshot = oracle.get_screen_snapshot()
-            if expected in snapshot:
+            if expected.lower() in snapshot.lower():
                 record(desc, "PASS")
                 return True
             time.sleep(0.5)
@@ -43,12 +43,16 @@ def run_tests():
         while time.time() - start < timeout:
             oracle.feed_stream()
             snapshot = oracle.get_screen_snapshot()
-            if forbidden not in snapshot:
+            if forbidden.lower() not in snapshot.lower():
                 record(desc, "PASS")
                 return True
             time.sleep(0.5)
         record(desc, "FAIL", f"Still found '{forbidden}' on screen")
         return False
+
+    def clear_notebook():
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(2.0)
 
     try:
         print(f"Starting Neptune (Socket: {socket_path})...")

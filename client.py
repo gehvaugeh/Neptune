@@ -39,6 +39,7 @@ from rich.style import Style
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
+from textual.command import Provider, Hit
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.binding import Binding
@@ -47,6 +48,7 @@ from textual import work, on, events, message
 
 from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE
 from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider
+from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
 
 # Setup client logging
 logging.basicConfig(
@@ -62,7 +64,32 @@ class ServerMessage(message.Message):
 
 DEFAULT_SOCKET_PATH = "/tmp/neptune.sock"
 
+class NeptuneCommandProvider(Provider):
+    async def search(self, query: str) -> ComposeResult:
+        matcher = self.matcher(query)
+        commands = [
+            ("PTY Manager", "spawn_pty_manager", "Open PTY Manager overlay"),
+            ("Export Notebook", "save_notebook_dialog", "Save current session as Markdown"),
+            ("Import Notebook", "import_notebook_dialog", "Load blocks from Markdown"),
+            ("Clear Session", "clear_session", "Remove all blocks and reset server state"),
+            ("Exit", "quit", "Close Neptune"),
+            ("Save Workflow", "save_workflow_from_input", "Save current input as workflow"),
+        ]
+        for name, action, desc in commands:
+            score = matcher.match(name)
+            if score > 0:
+                yield Hit(
+                    score,
+                    matcher.highlight(name),
+                    lambda action=action: getattr(self.app, f"action_{action}")(),
+                    help=desc
+                )
+
 # --- MODALE DIALOGE ---
+
+# The following modals were moved to pty_manager_ui.py:
+# - RemotePTYAuthModal
+# - PTYPicker (replaced by PTYManagerModal)
 
 class SaveNotebookModal(ModalScreen):
     def compose(self) -> ComposeResult:
@@ -94,155 +121,6 @@ class ImportNotebookModal(ModalScreen):
     def import_nb(self):
         self.dismiss(self.query_one("#file_name").value)
 
-class RemotePTYAuthModal(ModalScreen):
-    def __init__(self, host: str, user: str, key_path: str = "~/.ssh/id_rsa"):
-        super().__init__()
-        self.host = host
-        self.user = user
-        self.key_path = key_path
-
-    def on_mount(self):
-        if not self.host or not self.user:
-            try: self.query_one("#auth_host_user").focus()
-            except: pass
-        else:
-            try: self.query_one("#auth_key").focus()
-            except: pass
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="modal_dialog"):
-            yield Label(f"[bold cyan]New Remote PTY[/]")
-            if self.host and self.user:
-                yield Label(f"Host: [white]{self.user}@{self.host}[/]")
-            else:
-                yield Input(placeholder="user@host", id="auth_host_user")
-            with Horizontal(id="auth_type_row", classes="modal-row"):
-                yield Label("Auth: ")
-                yield Button("Key", id="toggle_auth", variant="primary")
-            yield Input(value=self.key_path, placeholder="Key path...", id="auth_key")
-            yield Input(placeholder="Password...", password=True, id="auth_pass", classes="hidden")
-            with Horizontal(id="modal_buttons"):
-                yield Button("Cancel", variant="error", id="cancel")
-                yield Button("OK", variant="success", id="ok")
-
-    @on(Button.Pressed, "#toggle_auth")
-    def toggle_auth(self):
-        btn = self.query_one("#toggle_auth")
-        key_inp = self.query_one("#auth_key")
-        pass_inp = self.query_one("#auth_pass")
-        if btn.label == "Key":
-            btn.label = "Password"
-            key_inp.add_class("hidden")
-            pass_inp.remove_class("hidden")
-            pass_inp.focus()
-        else:
-            btn.label = "Key"
-            key_inp.remove_class("hidden")
-            pass_inp.add_class("hidden")
-            key_inp.focus()
-
-    @on(Button.Pressed, "#cancel")
-    def cancel(self): self.dismiss(None)
-
-    @on(Button.Pressed, "#ok")
-    def ok(self):
-        is_key = self.query_one("#toggle_auth").label == "Key"
-        val = self.query_one("#auth_key").value if is_key else self.query_one("#auth_pass").value
-
-        host_user = {}
-        if not self.host or not self.user:
-            raw = self.query_one("#auth_host_user").value
-            if "@" in raw:
-                u, h = raw.split("@", 1)
-                host_user = {"user": u, "host": h}
-            else:
-                self.app.notify("Invalid user@host", severity="error")
-                return
-
-        self.dismiss({"method": "key" if is_key else "password", "value": val, **host_user})
-
-class PTYPicker(ModalScreen):
-    def __init__(self, ptys: Dict[str, Dict], default_pty: str):
-        super().__init__()
-        self.ptys = ptys
-        self.default_pty = default_pty
-        self.search_query = ""
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="modal_dialog", classes="pty-picker"):
-            yield Label("[bold cyan]PTY Picker[/]")
-            yield Input(placeholder="Search PTYs...", id="picker_search")
-            yield OptionList(id="picker_list")
-            yield Label("[dim]j/k: navigate | Enter: select | Esc: cancel[/]", classes="modal-footer")
-
-    def on_mount(self):
-        self.update_list()
-        self.query_one("#picker_search").focus()
-
-    def update_list(self):
-        ol = self.query_one("#picker_list")
-        ol.clear_options()
-
-        # Filterable items
-        items = []
-        for pid, info in self.ptys.items():
-            is_default = pid == self.default_pty
-            status = info.get("status", "idle")
-            blocks = info.get("block_count", 0)
-
-            icon = "●" if is_default else "○"
-            if status == "running": icon = "⟳"
-
-            display = f"{icon} {pid:<12} ({status:<8}) {blocks} blocks"
-            if is_default: display += " [dim](default)[/]"
-
-            if not self.search_query or fuzzy_match(self.search_query, pid):
-                items.append(Option(display, id=pid))
-
-        for item in items:
-            ol.add_option(item)
-
-        # Static actions at the bottom (always visible or filtered?)
-        # Requirements say: "Type to fuzzy filter", usually that includes everything.
-        if not self.search_query or fuzzy_match(self.search_query, "new local"):
-            ol.add_option(Option("[green]+ new local[/]", id="action:new_local"))
-        if not self.search_query or fuzzy_match(self.search_query, "new remote"):
-            ol.add_option(Option("[blue]+ new remote[/]", id="action:new_remote"))
-
-    @on(Input.Changed, "#picker_search")
-    def on_search(self, event: Input.Changed):
-        self.search_query = event.value
-        self.update_list()
-
-    @on(Input.Submitted, "#picker_search")
-    def on_search_submit(self, event: Input.Submitted):
-        ol = self.query_one("#picker_list")
-        if ol.highlighted is not None:
-            opt = ol.get_option_at_index(ol.highlighted)
-            self.dismiss(opt.id)
-
-    @on(OptionList.OptionSelected, "#picker_list")
-    def on_select(self, event: OptionList.OptionSelected):
-        self.dismiss(event.option.id)
-
-    def on_key(self, event: events.Key):
-        if event.key == "escape":
-            self.dismiss(None)
-        elif event.key == "enter":
-            ol = self.query_one("#picker_list")
-            if ol.highlighted is not None:
-                opt = ol.get_option_at_index(ol.highlighted)
-                self.dismiss(opt.id)
-            event.stop()
-            event.prevent_default()
-        elif event.key in ("up", "down", "k", "j"):
-            ol = self.query_one("#picker_list")
-            if event.key in ("up", "k"):
-                ol.highlighted = max(0, (ol.highlighted or 0) - 1)
-            else:
-                ol.highlighted = min(ol.option_count - 1, (ol.highlighted or 0) + 1)
-            event.stop()
-            event.prevent_default()
 
 class SaveWorkflowModal(ModalScreen):
     def __init__(self, text: str):
@@ -401,7 +279,7 @@ class NotebookInput(TextArea):
                 # as separate flags in the key string itself, but we check the specific key name.
                 event.stop(); event.prevent_default()
                 asyncio.create_task(self.app.action_submit())
-        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m", "shift+enter"):
+        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m", "shift+enter", "shift+return"):
             # Allow multiline for BASH and NOTE
             if self.app.input_mode in ("BASH", "NOTE"):
                 event.stop(); event.prevent_default()
@@ -419,10 +297,11 @@ class NotebookInput(TextArea):
             self.app.action_esc_pressed()
 
 class CommandBlock(BaseBlock):
-    def __init__(self, block_id, command, cwd, app_ref, is_editing=False, editing_content=None, cursor_pos=None, pty_id="local-1", **kwargs):
+    def __init__(self, block_id, command, cwd, app_ref, is_editing=False, editing_content=None, cursor_pos=None, pty_uid=0, pty_name="local-0", **kwargs):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
-        self.pty_id = pty_id
+        self.pty_uid = pty_uid
+        self.pty_name = pty_name
         self.output = ""
         # Initialize with fixed TTY dimensions established by the app
         self.terminal_screen = pyte.HistoryScreen(app_ref.preferred_cols, app_ref.preferred_rows, history=1000)
@@ -436,15 +315,14 @@ class CommandBlock(BaseBlock):
         edit_classes = "" if self.is_editing else "hidden"
 
         header_text = f"[bold blue]{escape(self.cwd)}[/]"
-        if self.pty_id != "local-1":
-            header_text = f"[bold cyan][{escape(self.pty_id)}][/] {header_text}"
+        header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
 
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
             yield Label(f"{header_text}\n[white]{escape(self.content)}[/]", id="cmd_label", classes=label_classes)
             yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
-        yield Label("[grey44]Ready[/]", id="info", classes="block-info")
+        yield Label(f"[grey44]Ready[/] [cyan][{self.pty_name} (ID:{self.pty_uid})][/]", id="info", classes="block-info")
 
     def on_resize(self, event: events.Resize) -> None:
         # Fixed size TTY, no automatic resizing to match widget size
@@ -635,7 +513,9 @@ class CommandBlock(BaseBlock):
         if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
             icon += " [interactive] TUI"
 
-        display_text = f"{self._last_status_text}{icon}"
+        # Show PTY Name and UID in info bar
+        pty_info = f" [cyan][{self.pty_name} (ID:{self.pty_uid})][/]"
+        display_text = f"{self._last_status_text}{icon}{pty_info}"
 
         if self._color_error:
             info.update(f"{display_text} [dim]⚠ color error[/]")
@@ -676,8 +556,8 @@ class CommandBlock(BaseBlock):
                     await self.app_ref.send_message({"type": "edit_cancel", "block_id": self.block_id})
 
             header_text = f"[bold blue]{escape(self.cwd)}[/]"
-            if self.pty_id != "local-1":
-                header_text = f"[bold cyan][{escape(self.pty_id)}][/] {header_text}"
+            if self.pty_uid != 0 or self.pty_name != "local-0":
+                header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
             label.update(f"{header_text}\n[white]{escape(self.content)}[/]")
             label.remove_class("hidden")
             edit.add_class("hidden")
@@ -691,6 +571,7 @@ class CommandBlock(BaseBlock):
 
 class ClientApp(App):
     CSS_PATH = THEME_FILE
+    COMMANDS = {NeptuneCommandProvider}
 
     def _on_mouse_event(self, event: events.MouseEvent) -> None:
         event.stop()
@@ -700,6 +581,7 @@ class ClientApp(App):
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+f", "toggle_filter", "Filter"),
         Binding("ctrl+g", "remove_filter", "Remove Filter"),
+        Binding("ctrl+t", "spawn_pty_manager", "PTY Manager"),
         Binding("escape", "esc_pressed", "Back/Clear")
     ]
 
@@ -728,18 +610,15 @@ class ClientApp(App):
         self.last_escape_time = 0
 
         # PTY State
-        self.ptys: Dict[str, Dict] = {
-            "local-1": {"type": "local", "status": "idle", "block_count": 0, "index": 1}
+        self.ptys: Dict[int, Dict] = {
+            0: {"type": "local", "status": "idle", "block_count": 0, "name": "local-0"}
         }
-        self.default_pty = "local-1"
-        self.last_remote_pty = None
-        self.pty_creation_counter = 1
-        self.pty_index_map = {1: "local-1"}
+        self.default_pty_uid = 0
+        self.last_remote_pty_uid = None
         self.bang_time = 0.0
 
         self.available_commands = [
-            {"name": "pty", "params": "[new|kill|list]", "desc": "PTY management CLI"},
-            {"name": "spawnpty", "params": "", "desc": "Open PTY Picker overlay"},
+            {"name": "ptyman", "params": "", "desc": "Open PTY Manager overlay"},
             {"name": "export", "params": "[file]", "desc": "Save current session as a Markdown file"},
             {"name": "import", "params": "[file]", "desc": "Load blocks from an external Markdown file"},
             {"name": "exit", "params": "", "desc": "Close the client and return to terminal"},
@@ -880,24 +759,14 @@ class ClientApp(App):
 
             if "ptys" in msg:
                 for p in msg.get("ptys", []):
-                    pid = p.get("pty_id")
-                    if pid not in self.ptys:
-                        self.pty_creation_counter += 1
-                        idx = self.pty_creation_counter
-                        self.ptys[pid] = {
-                            "type": p.get("type", "local"),
-                            "status": p.get("status", "idle"),
-                            "block_count": p.get("block_count", 0),
-                            "active_block_id": p.get("active_block_id"),
-                            "index": idx
-                        }
-                        self.pty_index_map[idx] = pid
-                    else:
-                        self.ptys[pid].update({
-                            "status": p.get("status", "idle"),
-                            "block_count": p.get("block_count", 0),
-                            "active_block_id": p.get("active_block_id")
-                        })
+                    uid = p.get("uid")
+                    self.ptys[uid] = {
+                        "type": p.get("type", "local"),
+                        "status": p.get("status", "idle"),
+                        "block_count": p.get("block_count", 0),
+                        "active_block_id": p.get("active_block_id"),
+                        "name": p.get("name")
+                    }
 
         elif msg_type == "user_join":
             u_id, u_col, u_name = msg.get("user_id"), msg.get("color"), msg.get("name")
@@ -953,7 +822,13 @@ class ClientApp(App):
                         block.update_status(data.get("status"))
                     if "cwd" in data:
                         block.cwd = data.get("cwd")
-                    block.pty_id = data.get("pty_id", block.pty_id)
+                    if "pty_uid" in data:
+                        block.pty_uid = data.get("pty_uid")
+                    if "pty_name" in data:
+                        block.pty_name = data.get("pty_name")
+
+                    if "pty_uid" in data or "pty_name" in data:
+                         block.update_status(getattr(block, "_last_status", "ready"))
 
                     # Auto-exit CONTROL mode if block finishes
                     if self.input_mode == "CONTROL" and self.focused == block:
@@ -971,7 +846,9 @@ class ClientApp(App):
                        block.query_one("#md_render").update(block.content)
                        block.query_one("#block_text_edit").text = block.content
                    else:
-                       block.query_one("#cmd_label").update(f"[bold blue]{escape(block.cwd)}[/]\n[white]{escape(block.content)}[/]")
+                       header_text = f"[bold blue]{escape(block.cwd)}[/]"
+                       header_text = f"[bold cyan][{escape(block.pty_name)}][/] {header_text}"
+                       block.query_one("#cmd_label").update(f"{header_text}\n[white]{escape(block.content)}[/]")
                        block.query_one("#block_text_edit").text = block.content
 
         elif msg_type == "output":
@@ -1013,79 +890,73 @@ class ClientApp(App):
                     self.enter_normal_mode()
 
         elif msg_type == "pty.created":
-            pty_id = msg.get("pty_id")
+            uid = int(msg.get("uid"))
             pty_type = msg.get("pty_type")
-            is_default = msg.get("default", False)
-            if pty_id not in self.ptys:
-                self.pty_creation_counter += 1
-                idx = self.pty_creation_counter
-                self.ptys[pty_id] = {"type": pty_type, "status": "idle", "block_count": 0, "index": idx}
-                self.pty_index_map[idx] = pty_id
-            if is_default:
-                self.default_pty = pty_id
+            self.ptys[uid] = {"type": pty_type, "status": "idle", "block_count": 0, "name": msg.get("name")}
             if pty_type == "remote":
-                self.last_remote_pty = pty_id
-            self.notify(f"PTY created: {pty_id} ({pty_type})")
+                self.last_remote_pty_uid = uid
+            self.notify(f"PTY created: {msg.get('name')} (UID:{uid})")
 
         elif msg_type == "pty.destroyed":
-            pty_id = msg.get("pty_id")
-            if pty_id in self.ptys:
-                idx = self.ptys[pty_id].get("index")
-                if idx in self.pty_index_map:
-                    del self.pty_index_map[idx]
-                del self.ptys[pty_id]
-            if self.default_pty == pty_id:
-                self.default_pty = "local-1"
-            self.notify(f"PTY destroyed: {pty_id}")
+            uid = int(msg.get("uid"))
+            if uid in self.ptys:
+                name = self.ptys[uid].get("name")
+                del self.ptys[uid]
+                self.notify(f"PTY destroyed: {name} (UID:{uid})")
+            if self.default_pty_uid == uid:
+                self.default_pty_uid = 0
+                self.notify(f"Default PTY destroyed. Resetting to ID:0", severity="warning")
+            if getattr(self, "current_pty_uid", None) == uid:
+                self.current_pty_uid = 0
 
         elif msg_type == "pty.default_changed":
-            self.default_pty = msg.get("pty_id", "local-1")
-            self.notify(f"Default PTY: {self.default_pty}")
+            # Handled client-side now
+            pass
 
         elif msg_type == "pty.error":
-            self.notify(f"PTY Error ({msg.get('pty_id')}): {msg.get('message')}", severity="error")
+            self.notify(f"PTY Error: {msg.get('message')}", severity="error")
 
         elif msg_type == "pty.list":
             server_ptys = msg.get("ptys", [])
             # Update local state from server list
+            active_uids = []
             for p in server_ptys:
-                pid = p.get("pty_id")
-                if pid not in self.ptys:
-                    self.pty_creation_counter += 1
-                    idx = self.pty_creation_counter
-                    self.ptys[pid] = {
-                        "type": p.get("type", "local"),
-                        "status": p.get("status", "idle"),
-                        "block_count": p.get("block_count", 0),
-                        "active_block_id": p.get("active_block_id"),
-                        "index": idx
-                    }
-                    self.pty_index_map[idx] = pid
-                else:
-                    self.ptys[pid].update({
-                        "status": p.get("status", "idle"),
-                        "block_count": p.get("block_count", 0),
-                        "active_block_id": p.get("active_block_id")
-                    })
-            # Remove ptys no longer on server (except local-1)
-            active_ids = [p.get("pty_id") for p in server_ptys]
-            for pid in list(self.ptys.keys()):
-                if pid != "local-1" and pid not in active_ids:
-                    idx = self.ptys[pid].get("index")
-                    if idx in self.pty_index_map: del self.pty_index_map[idx]
-                    del self.ptys[pid]
+                uid = int(p.get("uid"))
+                active_uids.append(uid)
+                self.ptys[uid] = {
+                    "type": p.get("type", "local"),
+                    "status": p.get("status", "idle"),
+                    "block_count": p.get("block_count", 0),
+                    "active_block_id": p.get("active_block_id"),
+                    "name": p.get("name")
+                }
+            # Remove ptys no longer on server
+            for uid in list(self.ptys.keys()):
+                if uid not in active_uids:
+                    del self.ptys[uid]
+
+            # Update PTY Manager if open
+            for screen in self.screen_stack:
+                if isinstance(screen, PTYManagerModal):
+                    screen.ptys = self.ptys
+                    screen.default_pty_uid = self.default_pty_uid
+                    screen.update_list()
 
         elif msg_type == "queue_status":
-            # "queues": [{"pty_id": "...", "block_count": N, "status": "..."}, ...]
             queues = msg.get("queues", [])
             for q in queues:
-                pid = q.get("pty_id")
-                if pid in self.ptys:
-                    self.ptys[pid]["block_count"] = q.get("block_count", 0)
+                uid = int(q.get("uid"))
+                if uid in self.ptys:
+                    self.ptys[uid]["block_count"] = q.get("block_count", 0)
                     if "status" in q:
-                        self.ptys[pid]["status"] = q.get("status")
+                        self.ptys[uid]["status"] = q.get("status")
                     if "active_block_id" in q:
-                        self.ptys[pid]["active_block_id"] = q.get("active_block_id")
+                        self.ptys[uid]["active_block_id"] = q.get("active_block_id")
+
+            # Update PTY Manager if open
+            for screen in self.screen_stack:
+                if isinstance(screen, PTYManagerModal):
+                    screen.update_list()
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data.get("id")
@@ -1096,8 +967,9 @@ class ClientApp(App):
             new_block = NoteBlock(b_id, b_content, self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
         else:
             b_cwd = data.get("cwd", os.getcwd())
-            b_pty = data.get("pty_id", "local-1")
-            new_block = CommandBlock(b_id, b_content, b_cwd, self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos, pty_id=b_pty)
+            b_pty_uid = data.get("pty_uid", 0)
+            b_pty_name = data.get("pty_name", f"pty-{b_pty_uid}")
+            new_block = CommandBlock(b_id, b_content, b_cwd, self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos, pty_uid=b_pty_uid, pty_name=b_pty_name)
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
         await container.mount(new_block)
@@ -1190,7 +1062,7 @@ class ClientApp(App):
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
 
-    def enter_input_mode(self, prefix="", pty_id=None):
+    def enter_input_mode(self, prefix="", pty_uid=None):
         if self.input_mode == "SELECTION":
             self.was_in_selection_mode = True
             focused = self.focused
@@ -1204,7 +1076,7 @@ class ClientApp(App):
         elif not self.was_in_selection_mode:
             self.insert_after_id = None
 
-        self.current_pty_id = pty_id or self.default_pty
+        self.current_pty_uid = pty_uid if pty_uid is not None else self.default_pty_uid
 
         mode_map = {"!": "BASH", ":": "CMD", ";": "NOTE"}
         self.input_mode = mode_map.get(prefix, "INPUT")
@@ -1278,7 +1150,15 @@ class ClientApp(App):
             "CONTROL": "#f44336"
         }
         c = colors.get(self.input_mode, "#7c4dff")
-        self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
+        text = f"[bold {c}]MODE: {self.input_mode}[/]"
+
+        if self.input_mode == "BASH":
+            uid = getattr(self, "current_pty_uid", self.default_pty_uid)
+            info = self.ptys.get(uid, {})
+            name = info.get("name", f"pty-{uid}")
+            text += f" [cyan]➔ {name} (ID:{uid})[/]"
+
+        self.mode_label.update(text)
 
     def enter_control_mode(self, block):
         if not isinstance(block, CommandBlock):
@@ -1297,7 +1177,7 @@ class ClientApp(App):
         if not text.strip(): self.enter_normal_mode(); return
         ta.text = ""; self.query_one("#palette").remove_class("visible")
 
-        target_pty = getattr(self, "current_pty_id", self.default_pty)
+        target_pty_uid = getattr(self, "current_pty_uid", self.default_pty_uid)
 
         if self.input_mode == "CMD":
             await self.handle_internal_command(text.strip())
@@ -1310,6 +1190,14 @@ class ClientApp(App):
         if self.input_mode == "BASH":
             content = text.strip()
             self.history.add(content)
+
+            if target_pty_uid not in self.ptys:
+                self.notify(f"Selected PTY (ID:{target_pty_uid}) no longer exists. Resetting to default.", severity="error")
+                self.default_pty_uid = 0
+                self.current_pty_uid = 0
+                self.action_spawn_pty_manager()
+                return
+
             # No longer intercepting 'cd' here; it will be handled by the server's master shell.
             await self.send_message({
                 "type": "submit",
@@ -1317,7 +1205,7 @@ class ClientApp(App):
                 "content": content,
                 "cwd": os.getcwd(),
                 "insert_after": self.insert_after_id,
-                "pty_id": target_pty
+                "pty_uid": target_pty_uid
             })
         elif self.input_mode == "NOTE":
             await self.send_message({
@@ -1336,49 +1224,8 @@ class ClientApp(App):
     async def handle_internal_command(self, cmd_line):
         parts = cmd_line.split(" ", 1)
         cmd, args = parts[0], parts[1] if len(parts) > 1 else ""
-        if cmd == "pty":
-            sub_parts = args.split(" ")
-            sub = sub_parts[0]
-            if sub == "new":
-                if len(sub_parts) > 1 and sub_parts[1] == "ssh":
-                    h, u, k = "", "", "~/.ssh/id_rsa"
-                    if len(sub_parts) > 2:
-                        target = sub_parts[2]
-                        if "@" in target:
-                            u, h = target.split("@", 1)
-                        if len(sub_parts) > 3:
-                            k = sub_parts[3]
-                            # If key provided, we can either skip modal or still show it.
-                            # Instructions: ":pty new ssh user@host [keypath] -> spawn remote PTY"
-                            # I'll just skip the modal if user@host and keypath are both there.
-                            await self.send_message({
-                                "type": "pty.create.remote",
-                                "pty_id": h,
-                                "ssh_config": {"host": h, "user": u, "key": k}
-                            })
-                            self.notify(f"Spawning remote PTY: {u}@{h}")
-                            return
-
-                    self.push_screen(RemotePTYAuthModal(h, u, k),
-                        lambda res: asyncio.create_task(self._finish_remote_pty_create(h, u, res)))
-                else:
-                    await self.send_message({"type": "pty.create.local", "pty_id": f"local-{self.pty_creation_counter+1}"})
-            elif sub == "kill":
-                if self.default_pty == "local-1":
-                    self.notify("local-1 can never be destroyed", severity="warning")
-                else:
-                    await self.send_message({"type": "pty.destroy", "pty_id": self.default_pty})
-            elif sub == "list":
-                await self.send_message({"type": "pty.list"})
-                # Server will send pty.list which we already handle.
-                # Requirement: "show PTY status in status bar area" & "temporary status notification"
-                status_text = "PTYs: " + ", ".join([f"{pid}({info['status']})" for pid, info in self.ptys.items()])
-                self.notify(status_text)
-            else:
-                # :pty (change default)
-                self.action_spawn_pty_picker()
-        elif cmd == "spawnpty":
-            self.action_spawn_pty_picker()
+        if cmd == "ptyman":
+            self.action_spawn_pty_manager()
         elif cmd == "export": self.export_notebook(args or f"session_{int(time.time())}.md")
         elif cmd == "import": await self.import_notebook(args)
         elif cmd == "exit": self.exit()
@@ -1387,7 +1234,7 @@ class ClientApp(App):
         elif cmd == "help": self.notify("Commands: pty [new|kill|list], spawnpty, export [file], import [file], exit, save_wf, clear, help")
         else: self.notify(f"Unknown command: {cmd}", severity="error")
 
-    def action_spawn_pty_picker(self):
+    def action_spawn_pty_manager(self):
         if self.input_mode == "SELECTION":
             self.was_in_selection_mode = True
             focused = self.focused
@@ -1395,21 +1242,18 @@ class ClientApp(App):
                 focused = focused.parent
             if focused:
                 self.insert_after_id = focused.block_id
-        self.push_screen(PTYPicker(self.ptys, self.default_pty), self._handle_picker_result)
+        self.push_screen(PTYManagerModal(self.ptys, self.default_pty_uid), self._handle_manager_result)
 
-    async def _handle_picker_result(self, res):
+    def _handle_manager_result(self, res):
         if not res: return
-        if res == "action:new_local":
-            new_id = f"local-{self.pty_creation_counter+1}"
-            await self.send_message({"type": "pty.create.local", "pty_id": new_id})
-            self.enter_input_mode(prefix="!", pty_id=new_id)
-        elif res == "action:new_remote":
-             # Host/User empty here, will be filled in modal
-             self.push_screen(RemotePTYAuthModal("", ""),
-                        lambda r: asyncio.create_task(self._finish_remote_pty_create("", "", r)))
-        else:
-            # Selected an existing PTY
-            await self.send_message({"type": "pty.set_default", "pty_id": res})
+        action = res.get("action")
+        if action == "select":
+            uid = res.get("uid")
+            self.default_pty_uid = uid
+            self.enter_input_mode(prefix="!", pty_uid=uid)
+
+    def _finish_remote_pty_create_callback(self, res):
+        self.run_worker(self._finish_remote_pty_create("", "", res))
 
     def action_save_notebook_dialog(self): self.push_screen(SaveNotebookModal(), self.export_notebook)
     def action_import_notebook_dialog(self): self.push_screen(ImportNotebookModal(), lambda f: asyncio.create_task(self.import_notebook(f)))
@@ -1417,6 +1261,29 @@ class ClientApp(App):
     def action_save_workflow(self, text: str):
         if not text.strip(): return
         self.push_screen(SaveWorkflowModal(text.strip()), lambda s: s and asyncio.create_task(self._save_wf(s)))
+
+    def action_save_workflow_from_input(self):
+        self.action_save_workflow(self.query_one("#main_input").text)
+
+    def action_clear_session(self):
+        asyncio.create_task(self.send_message({"type": "clear_session"}))
+
+    async def _rerun_block(self, block):
+        if not isinstance(block, CommandBlock): return
+
+        uid = block.pty_uid
+        if uid is None or uid not in self.ptys:
+            self.notify(f"Assigned PTY (ID:{uid}) no longer exists. Please select a new PTY.", severity="warning")
+            def _handle_reassign(res):
+                if res and res.get("action") == "select":
+                    block.pty_uid = res.get("uid")
+                    block.pty_name = self.ptys.get(block.pty_uid, {}).get("name", "unknown")
+                    asyncio.create_task(self.send_message({"type": "run_block", "block_id": block.block_id, "pty_uid": block.pty_uid}))
+
+            self.push_screen(PTYManagerModal(self.ptys, self.default_pty_uid), _handle_reassign)
+            return
+
+        await self.send_message({"type": "run_block", "block_id": block.block_id, "pty_uid": uid})
 
     def export_notebook(self, filename: str):
         if not filename: return
@@ -1550,37 +1417,57 @@ class ClientApp(App):
             return
 
         # Resolution order
-        # 1. Exact match in ptys
-        if target in self.ptys:
-            self.enter_input_mode(prefix="!", pty_id=target)
-            return
+        # 1. Exact UID match
+        if target.isdigit():
+            uid = int(target)
+            if uid in self.ptys:
+                self.enter_input_mode(prefix="!", pty_uid=uid)
+                return
 
-        # 2. "local" -> pty.create.local
+        # 2. Match by name
+        for uid, info in self.ptys.items():
+            if info.get("name") == target:
+                self.enter_input_mode(prefix="!", pty_uid=uid)
+                return
+
+        # 3. "local" -> pty.create.local
         if target == "local":
-            new_id = f"local-{self.pty_creation_counter + 1}"
-            await self.send_message({"type": "pty.create.local", "pty_id": new_id})
-            self.enter_input_mode(prefix="!", pty_id=new_id)
+            await self.send_message({"type": "pty.create.local"})
+            # We don't have the UID yet, server will broadcast pty.created
+            self.enter_input_mode(prefix="!")
             return
 
-        # 3. user@host[:key] -> remote
+        # 4. user@host[:port][:key] -> remote
         if "@" in target:
-            host_part = target
+            parts = target.split(":")
+            user_host = parts[0]
+            user, host = user_host.split("@", 1)
+            port = "22"
             key_path = "~/.ssh/id_rsa"
-            if ":" in target:
-                host_part, key_path = target.split(":", 1)
 
-            user, host = host_part.split("@", 1)
+            if len(parts) > 1:
+                # Check if second part is a port or key path
+                if parts[1].isdigit():
+                    port = parts[1]
+                    if len(parts) > 2:
+                        key_path = parts[2]
+                else:
+                    key_path = parts[1]
 
-            if ":" in target: # user@host:key was provided, skip modal
-                 await self.send_message({
-                     "type": "pty.create.remote",
-                     "pty_id": host,
-                     "ssh_config": {"host": host, "user": user, "key": key_path}
-                 })
-                 self.enter_input_mode(prefix="!", pty_id=host)
-            else:
-                self.push_screen(RemotePTYAuthModal(host, user, key_path),
-                    lambda res: asyncio.create_task(self._finish_remote_pty_create(host, user, res)))
+            if len(parts) > 1: # Some extra info provided, maybe skip modal
+                 # If only port was provided, we might still want the modal for key/password
+                 # Unless it's user@host:port:key
+                 if len(parts) > 2:
+                     await self.send_message({
+                         "type": "pty.create.remote",
+                         "name": host,
+                         "ssh_config": {"host": host, "user": user, "port": port, "key": key_path}
+                     })
+                     self.enter_input_mode(prefix="!")
+                     return
+
+            self.push_screen(RemotePTYAuthModal(host, user, port, key_path),
+                lambda res: self.run_worker(self._finish_remote_pty_create(host, user, res)))
             return
 
         self.notify(f"Unknown PTY target: {target}", severity="error")
@@ -1596,8 +1483,8 @@ class ClientApp(App):
 
         msg = {
             "type": "pty.create.remote",
-            "pty_id": h,
-            "ssh_config": {"host": h, "user": u}
+            "name": h,
+            "ssh_config": {"host": h, "user": u, "port": res.get("port", "22")}
         }
         if res.get("method") == "key":
             msg["ssh_config"]["key"] = res.get("value")
@@ -1605,9 +1492,13 @@ class ClientApp(App):
             msg["ssh_config"]["password"] = res.get("value")
 
         await self.send_message(msg)
-        self.enter_input_mode(prefix="!", pty_id=h)
+        self.enter_input_mode(prefix="!")
 
     def on_key(self, event: events.Key):
+        # Allow Modals to handle their own keys (Tab, Esc, etc.) without interference
+        if isinstance(self.screen, ModalScreen):
+            return
+
         # Global exit hatch for CONTROL mode (failsafe)
         if self.input_mode == "CONTROL":
             # 1. Double Escape within 0.5s
@@ -1649,6 +1540,7 @@ class ClientApp(App):
                     self.input_mode = "INPUT"
                 else:
                     self.bang_time = now
+                    self._bang_uid_buffer = ""
                     async def delayed_bang(t):
                         await asyncio.sleep(0.3)
                         if self.bang_time == t:
@@ -1657,17 +1549,34 @@ class ClientApp(App):
                     asyncio.create_task(delayed_bang(now))
                 event.stop(); event.prevent_default(); return
             elif self.bang_time and event.character and event.character.isdigit():
-                # !index
-                idx = int(event.character)
-                self.bang_time = 0
-                pty_id = self.pty_index_map.get(idx)
-                self.enter_input_mode(prefix="!", pty_id=pty_id)
-                if not pty_id: self.notify(f"No PTY with index {idx}", severity="error")
+                # Append digit to current bang_time buffer
+                if not hasattr(self, "_bang_uid_buffer"): self._bang_uid_buffer = ""
+                self._bang_uid_buffer += event.character
+                # Restart delay for potentially more digits
+                t_now = time.time()
+                self.bang_time = t_now
+
+                async def delayed_uid_finish(t):
+                    await asyncio.sleep(0.4) # Slightly longer for multi-digit
+                    if self.bang_time == t:
+                        uid = int(self._bang_uid_buffer)
+                        self._bang_uid_buffer = ""
+                        self.bang_time = 0
+                        if uid in self.ptys:
+                            # Enter input mode for this UID without changing default
+                            self.enter_input_mode(prefix="!", pty_uid=uid)
+                        else:
+                            self.notify(f"No PTY with UID {uid}", severity="error")
+                asyncio.create_task(delayed_uid_finish(t_now))
                 event.stop(); event.prevent_default(); return
 
         if self.input_mode == "NORMAL":
             if event.key == "ctrl+p":
-                self.action_spawn_pty_picker()
+                # Standard Command Palette (handled by Textual automatically if bound to ctrl+p by default,
+                # but we override ctrl+p for PTYPicker before. Now we want it to be Command Palette)
+                # Textual binds ctrl+p to CommandPalette by default on some versions,
+                # let's just make sure it's triggered.
+                self.action_command_palette()
                 event.stop(); event.prevent_default(); return
             elif event.character == ":": self.enter_input_mode(prefix=":"); event.stop(); event.prevent_default()
             elif event.character == ";": self.enter_input_mode(prefix=";"); event.stop(); event.prevent_default()
@@ -1688,7 +1597,7 @@ class ClientApp(App):
         elif self.input_mode == "SELECTION":
             focused = self.focused; blocks = [c for c in self.query_one("#command_history").children if isinstance(c, BaseBlock) and not c.has_class("filtered-out")]
             if event.key == "ctrl+p":
-                self.action_spawn_pty_picker()
+                self.action_command_palette()
                 event.stop(); event.prevent_default(); return
             if event.character and event.character.isdigit() and (event.character != "0" or self.count_str): self.count_str += event.character; return
             count, self.count_str = int(self.count_str) if self.count_str else 1, ""
@@ -1704,7 +1613,7 @@ class ClientApp(App):
                  blocks[new_idx].focus(); blocks[new_idx].scroll_visible()
                  self.last_selected_block_id = blocks[new_idx].block_id
             elif event.key == "x": asyncio.create_task(self.action_delete_block())
-            elif event.key == "r": asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id, "pty_id": focused.pty_id if isinstance(focused, CommandBlock) else self.default_pty}))
+            elif event.key == "r": self.run_worker(self._rerun_block(focused))
             elif event.key == "y":
                  if isinstance(focused, NoteBlock): self.yank_buffer = ("NOTE", focused.content); self.notify("Note yanked")
                  elif isinstance(focused, CommandBlock): self.yank_buffer = ("CMD", focused.content, focused.cwd); self.notify("Command yanked")
@@ -1715,7 +1624,7 @@ class ClientApp(App):
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
             elif event.key == "ctrl+s" and isinstance(focused, CommandBlock): self.action_save_workflow(focused.content)
             elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
-            elif event.key in ("j", "enter", "ctrl+j") and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id, "pty_id": focused.pty_id}))
+            elif event.key in ("j", "enter", "ctrl+j") and isinstance(focused, CommandBlock): self.run_worker(self._rerun_block(focused))
             elif event.key in ("ctrl+up", "alt+up"): asyncio.create_task(self.action_move_up())
             elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
@@ -1752,6 +1661,8 @@ class ClientApp(App):
             data = None
             if event.key in key_map:
                 data = key_map[event.key]
+            elif event.key == "ctrl+j": # Enter in selection mode or ctrl+j in some TUIs
+                data = "\r"
             elif event.character:
                 data = event.character
             elif len(event.key) == 1:

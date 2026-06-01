@@ -18,6 +18,10 @@ Screen {
     color: $text-main;
 }
 
+ModalScreen {
+    align: center middle;
+}
+
 #command_history {
     height: 1fr;
     scrollbar-gutter: stable;
@@ -209,14 +213,6 @@ NoteBlock {
 }
 
 /* Modals */
-#modal_dialog {
-    padding: 1 2;
-    background: $bg-block;
-    border: solid $border;
-    width: 60;
-    height: auto;
-    align: center middle;
-}
 
 #modal_buttons {
     margin-top: 1;
@@ -234,10 +230,19 @@ NoteBlock {
     text-align: center;
 }
 
-.pty-picker #picker_list {
+.pty-manager-modal #pty_list {
     height: 10;
     border: solid $border;
     background: $bg-input;
+}
+
+#modal_dialog {
+    padding: 1 2;
+    background: $bg-block;
+    border: solid $border;
+    width: 80;
+    height: auto;
+    align: center middle;
 }
 
 #pty_target_bar {
