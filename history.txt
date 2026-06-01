@@ -1,1 +1,2 @@
-echo 'Latency Test'
+echo OracleEcho
+echo AAA

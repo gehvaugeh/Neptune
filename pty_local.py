@@ -145,14 +145,13 @@ class LocalPTY(BasePTY):
 
     async def _monitor_command(self, block_id: str, sentinel: str):
         # Poll PGID until it returns to shell_pgid OR sentinel is received
-        start_time = asyncio.get_running_loop().time()
         while not self.finished.is_set():
             # Check for explicitly captured PGID existence first
             if self.current_pgid:
                 out = await self._run_control_command(["ps", "-o", "pgid=", "-g", str(self.current_pgid)])
                 if not out:
                     # Process group is gone
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.25)
                     if self.finished.is_set(): break
                     status = "killed" if self.interrupted.is_set() else "done"
                     await self.broadcast({"type": "update_block", "block": {
@@ -168,20 +167,17 @@ class LocalPTY(BasePTY):
                     is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
 
                     if not is_user_cmd_running:
-                        # Process group returned to shell, but wait a bit for sentinel
-                        if asyncio.get_running_loop().time() - start_time > 1.0:
-                             # Give some time for the printf to be read by the reader() task
-                             await asyncio.sleep(0.5)
-                             if self.finished.is_set(): break
-                             # If still not set, command might have been killed or failed before printf
-                             status = "killed" if self.interrupted.is_set() else "done"
-                             await self.broadcast({"type": "update_block", "block": {
-                                 "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self.shell_cwd
-                             }})
-                             break
+                        # Process group returned to shell
+                        await asyncio.sleep(0.25)
+                        if self.finished.is_set(): break
+                        status = "killed" if self.interrupted.is_set() else "done"
+                        await self.broadcast({"type": "update_block", "block": {
+                            "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self.shell_cwd
+                        }})
+                        break
                 except Exception: pass
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.25)
 
     async def send_input(self, data: str):
         if self.master_fd:

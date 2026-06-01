@@ -14,8 +14,8 @@
   - Every `output` message from the server triggers a `render_terminal` call on the client. High-frequency output can overwhelm the UI thread.
 
 ### Remote PTY Bottlenecks
-- **Polling Latency**: `RemotePTY` uses a 0.5s polling interval to check if a command is still running via `ps`. This adds a minimum of 0.5s latency to command completion detection.
-- **`ps` Overhead**: Calling `ps` over SSH every 0.5s is expensive and increases network traffic/latency.
+- **Polling Latency**: `RemotePTY` previously used a 0.5s polling interval. This has been optimized to 0.25s to balance responsiveness and overhead.
+- **`ps` Overhead**: Calling `ps` over SSH frequently is expensive.
 - **Input Lag**: Typing in `CONTROL` mode (TUI) sends every key individually over the socket, then over SSH.
 
 ---
@@ -35,11 +35,10 @@
 - **Implementation**: Use `on_scroll` events or focus tracking to decide when to skip `render_terminal`.
 
 ### P4: Improve Remote PTY Command Monitoring (Server)
-- **Concept**: Instead of polling with `ps`, use a more reliable sentinel-based approach or a persistent monitoring process on the remote side.
+- **Concept**: Find a "sweet spot" for `ps` polling frequency that provides good responsiveness without overloading the system.
 - **Implementation**:
-  - Enhance the sentinel pattern to be injected more reliably.
-  - Reduce `ps` polling frequency or eliminate it if sentinels are received.
-  - Use `ControlPersist` and better multiplexing features of SSH.
+  - Set polling interval to 0.25s.
+  - Ensure robust sentinel handling when the command eventually finishes.
 
 ### P5: Output Batching (Server)
 - **Concept**: Batch small chunks of output from PTYs before broadcasting to clients.

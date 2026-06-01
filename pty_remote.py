@@ -113,26 +113,21 @@ class RemotePTY(BasePTY):
     async def _monitor_command(self, block_id: str, sentinel: str):
         buf = ""
         last_poll_time = 0.0
-        poll_interval = 2.0 # Polling is now just a fallback
+        poll_interval = 0.25 # Sweet spot for responsiveness vs overhead
 
         try:
             while True:
                 try:
-                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.05)
+                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
                     if not chunk: break
                     buf += chunk.decode(errors="replace")
                 except asyncio.TimeoutError:
                     pass
 
-                # Check if sentinel is in buffer - this is the FAST path
-                if f"\x1e{sentinel}_" in buf and "\x1f" in buf[buf.find(f"\x1e{sentinel}_"):]:
-                    # Sentinel arrived, we can exit early!
-                    break
-
                 now = asyncio.get_running_loop().time()
                 if now - last_poll_time >= poll_interval:
                     last_poll_time = now
-                    # Check if process is still alive via ps (fallback)
+                    # Check if process is still alive via ps
                     cmd = self._get_ssh_base(use_socket=True)
                     cmd.append(f"ps -t {self.remote_tty} -o pgid=")
                     try:
@@ -141,7 +136,13 @@ class RemotePTY(BasePTY):
                         pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
                         is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
                         if not is_user_cmd_running:
+                            # Command finished, wait slightly for final output and sentinel
                             await asyncio.sleep(0.2)
+                            # One last read attempt
+                            try:
+                                chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
+                                if chunk: buf += chunk.decode(errors="replace")
+                            except: pass
                             break
                     except: pass
 
