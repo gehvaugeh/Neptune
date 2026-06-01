@@ -32,26 +32,14 @@ def _patch_pyte():
                     continue
 _patch_pyte()
 
-from typing import List, Dict, Any
-from collections import namedtuple
-
-# Define FakeChar globally for performance and consistency
-FakeChar = namedtuple("FakeChar", ["fg", "bg", "bold", "italics", "underscore", "reverse"])
-
-
-from typing import List, Dict, Any
-from collections import namedtuple
-
-# Define FakeChar globally for performance and consistency
-FakeChar = namedtuple("FakeChar", ["fg", "bg", "bold", "italics", "underscore", "reverse"])
-
+from typing import List, Dict
 
 from rich.text import Text
 from rich.style import Style
 from rich.markup import escape
 from textual.app import App, ComposeResult
-from textual.widget import Widget
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
+from textual.command import Provider, Hit
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.binding import Binding
@@ -60,6 +48,7 @@ from textual import work, on, events, message
 
 from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE
 from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider
+from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
 
 # Setup client logging
 logging.basicConfig(
@@ -75,7 +64,32 @@ class ServerMessage(message.Message):
 
 DEFAULT_SOCKET_PATH = "/tmp/neptune.sock"
 
+class NeptuneCommandProvider(Provider):
+    async def search(self, query: str) -> ComposeResult:
+        matcher = self.matcher(query)
+        commands = [
+            ("PTY Manager", "spawn_pty_manager", "Open PTY Manager overlay"),
+            ("Export Notebook", "save_notebook_dialog", "Save current session as Markdown"),
+            ("Import Notebook", "import_notebook_dialog", "Load blocks from Markdown"),
+            ("Clear Session", "clear_session", "Remove all blocks and reset server state"),
+            ("Exit", "quit", "Close Neptune"),
+            ("Save Workflow", "save_workflow_from_input", "Save current input as workflow"),
+        ]
+        for name, action, desc in commands:
+            score = matcher.match(name)
+            if score > 0:
+                yield Hit(
+                    score,
+                    matcher.highlight(name),
+                    lambda action=action: getattr(self.app, f"action_{action}")(),
+                    help=desc
+                )
+
 # --- MODALE DIALOGE ---
+
+# The following modals were moved to pty_manager_ui.py:
+# - RemotePTYAuthModal
+# - PTYPicker (replaced by PTYManagerModal)
 
 class SaveNotebookModal(ModalScreen):
     def compose(self) -> ComposeResult:
@@ -107,6 +121,7 @@ class ImportNotebookModal(ModalScreen):
     def import_nb(self):
         self.dismiss(self.query_one("#file_name").value)
 
+
 class SaveWorkflowModal(ModalScreen):
     def __init__(self, text: str):
         super().__init__()
@@ -135,22 +150,6 @@ class SaveWorkflowModal(ModalScreen):
             self.dismiss((n, c))
 
 # --- BLOCKS ---
-
-class TerminalOutput(Widget):
-    """A high-performance terminal output widget."""
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._rich_text = Text()
-        self._last_render_key = None
-
-    def update(self, rich_text: Text, cache_key: Any):
-        self._rich_text = rich_text
-        self._last_render_key = cache_key
-        # Ensure the parent container knows the content size might have changed
-        self.refresh(layout=True)
-
-    def render(self) -> Text:
-        return self._rich_text
 
 class BlockEditor(TextArea):
     def on_key(self, event: events.Key) -> None:
@@ -182,8 +181,6 @@ class BaseBlock(Static):
         self.locked_by = None
         self.lock_color = None
         self.last_click_time = 0
-        self._search_text = ""
-        self._search_text_dirty = True
 
     def update_lock(self, user_id, user_color):
         self.locked_by = user_id
@@ -254,6 +251,7 @@ class NoteBlock(BaseBlock):
             if not remote:
                 if save:
                     self.content = edit.text
+                    self._search_cache_dirty = True
                     await self.app_ref.send_message({"type": "edit_save", "block_id": self.block_id, "content": self.content})
                 else:
                     edit.text = self.content
@@ -282,7 +280,7 @@ class NotebookInput(TextArea):
                 # as separate flags in the key string itself, but we check the specific key name.
                 event.stop(); event.prevent_default()
                 asyncio.create_task(self.app.action_submit())
-        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m", "shift+enter"):
+        elif event.key in ("ctrl+enter", "ctrl+j", "ctrl+m", "shift+enter", "shift+return"):
             # Allow multiline for BASH and NOTE
             if self.app.input_mode in ("BASH", "NOTE"):
                 event.stop(); event.prevent_default()
@@ -300,31 +298,32 @@ class NotebookInput(TextArea):
             self.app.action_esc_pressed()
 
 class CommandBlock(BaseBlock):
-    def __init__(self, block_id, command, cwd, app_ref, is_editing=False, editing_content=None, cursor_pos=None, **kwargs):
+    def __init__(self, block_id, command, cwd, app_ref, is_editing=False, editing_content=None, cursor_pos=None, pty_uid=0, pty_name="local-0", **kwargs):
         super().__init__(block_id, command, app_ref, is_editing, editing_content, cursor_pos, **kwargs)
         self.cwd = cwd
-        self.full_output = ""
+        self.pty_uid = pty_uid
+        self.pty_name = pty_name
+        self.output = ""
         # Initialize with fixed TTY dimensions established by the app
         self.terminal_screen = pyte.HistoryScreen(app_ref.preferred_cols, app_ref.preferred_rows, history=1000)
         self.stream = pyte.Stream(self.terminal_screen)
         self._style_cache = {}
         self._color_error = False
         self._last_status_text = "Ready"
-        self._render_task = None
-        self._needs_render = False
-        self._last_render_time = 0
-        self._render_throttle = 0.05 # Max 20 FPS during heavy output
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
         edit_classes = "" if self.is_editing else "hidden"
 
+        header_text = f"[bold blue]{escape(self.cwd)}[/]"
+        header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
+
         with Horizontal(classes="block-header"):
             yield Label("➜", classes="prompt-symbol")
-            yield Label(f"[bold blue]{escape(self.cwd)}[/]\n[white]{escape(self.content)}[/]", id="cmd_label", classes=label_classes)
+            yield Label(f"{header_text}\n[white]{escape(self.content)}[/]", id="cmd_label", classes=label_classes)
             yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
-        yield TerminalOutput(id="output", classes="block-output")
-        yield Label("[grey44]Ready[/]", id="info", classes="block-info")
+        yield Static("", id="output", classes="block-output", markup=False)
+        yield Label(f"[grey44]Ready[/] [cyan][{self.pty_name} (ID:{self.pty_uid})][/]", id="info", classes="block-info")
 
     def on_resize(self, event: events.Resize) -> None:
         # Fixed size TTY, no automatic resizing to match widget size
@@ -334,52 +333,40 @@ class CommandBlock(BaseBlock):
         if not isinstance(text, str):
             text = text.decode(errors="replace")
 
-        self.full_output += text
-        if len(self.full_output) > 1_000_000:
-            self.full_output = self.full_output[-1_000_000:]
+        self.output += text
+        if len(self.output) > 1_000_000:
+            self.output = self.output[-1_000_000:]
 
-        self._search_text_dirty = True
-
-        # Keep terminal emulation in the main thread for thread-safety with pyte,
-        # but the actual UI rendering is throttled separately.
+        self._search_cache_dirty = True
         self.stream.feed(text)
         if self.is_mounted:
-            self.trigger_render()
+            self.throttle_render()
 
-    def trigger_render(self):
-        # Interactive mode (CONTROL) should be very responsive,
-        # so we reduce throttling or disable it.
-        throttle = 0.01 if self.app_ref.input_mode == "CONTROL" else self._render_throttle
-
+    def throttle_render(self):
+        # 20 FPS throttle (50ms)
         now = time.time()
-        if now - self._last_render_time > throttle:
+        last_render = getattr(self, "_last_render_time", 0)
+        if now - last_render > 0.05:
             self.render_terminal()
             self._last_render_time = now
-            self._needs_render = False
         else:
-            self._needs_render = True
-            if not self._render_task or self._render_task.done():
-                self._render_task = asyncio.create_task(self._throttled_render(throttle))
+            # Schedule a final render if not already scheduled
+            if not getattr(self, "_render_scheduled", False):
+                self._render_scheduled = True
+                asyncio.get_event_loop().call_later(0.05, self._scheduled_render)
 
-    async def _throttled_render(self, throttle):
-        await asyncio.sleep(throttle)
-        if self._needs_render and self.is_mounted:
+    def _scheduled_render(self):
+        self._render_scheduled = False
+        if self.is_mounted:
             self.render_terminal()
             self._last_render_time = time.time()
-            self._needs_render = False
-
-    def _get_rich_style_from_attrs(self, attrs):
-        if attrs is None: return None
-        return self._get_rich_style(FakeChar(*attrs))
 
     def render_terminal(self):
         if not self.is_mounted: return
         self._color_error = False
-        # We always use the pyte screen for rendering to ensure consistent VT100 support
         rich_text = Text()
 
         cursor_x, cursor_y = self.terminal_screen.cursor.x, self.terminal_screen.cursor.y
-        # Only show cursor if in interactive mode, and respect cursor visibility mode from PTY
         show_cursor = (self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self) and not self.terminal_screen.cursor.hidden
 
         def append_line(y, line):
@@ -389,83 +376,66 @@ class CommandBlock(BaseBlock):
                 rich_text.append("\n")
                 return
 
-            # Optimization: Process runs of characters with identical attributes
-            # to minimize style lookups and append calls.
-            last_attrs = None
-            current_chunk = []
+            if not isinstance(line, list):
+                line = [line[x] for x in range(self.terminal_screen.columns)]
 
-            # For buffer lines (StaticDefaultDict), we iterate by column index
-            # For history lines (lists), we iterate directly
-            items = range(self.terminal_screen.columns) if not isinstance(line, list) else line
+            # Chunk-based rendering: group same-style chars
+            current_style = self._get_rich_style(line[0])
+            start_x = 0
 
-            for i in items:
-                char = line[i] if not isinstance(line, list) else i
-                x = i if not isinstance(line, list) else -2 # -2 means history line, no cursor
+            for x, char in enumerate(line):
+                char_style = self._get_rich_style(char)
 
-                # Pyte Char attributes that affect style
-                attrs = (char.fg, char.bg, char.bold, char.italics, char.underscore, char.reverse)
+                # If cursor is here, we MUST break the chunk
+                is_cursor = (show_cursor and y == cursor_y and x == cursor_x)
 
-                # Handle cursor as a style break
-                is_cursor = (x == cursor_x and y == cursor_y and show_cursor)
-
-                if is_cursor or attrs != last_attrs:
-                    if current_chunk:
-                        rich_text.append("".join(current_chunk), style=self._get_rich_style_from_attrs(last_attrs))
-                        current_chunk = []
+                if char_style != current_style or is_cursor:
+                    # Append previous chunk
+                    if x > start_x:
+                        chunk_text = "".join(line[i].data for i in range(start_x, x))
+                        rich_text.append(chunk_text, style=current_style)
 
                     if is_cursor:
-                        char_style = self._get_rich_style_from_attrs(attrs)
                         rich_text.append(char.data or " ", style="reverse" if not char_style else f"{char_style} reverse")
-                        last_attrs = None # Force style refresh after cursor
+                        start_x = x + 1
                     else:
-                        last_attrs = attrs
-                        current_chunk.append(char.data)
-                else:
-                    current_chunk.append(char.data)
+                        start_x = x
 
-            if current_chunk:
-                rich_text.append("".join(current_chunk), style=self._get_rich_style_from_attrs(last_attrs))
+                    current_style = char_style
 
+            # Append last chunk
+            if start_x < len(line):
+                chunk_text = "".join(line[i].data for i in range(start_x, len(line)))
+                rich_text.append(chunk_text, style=current_style)
             rich_text.append("\n")
 
-        # Prepend history only if NOT running and explicitly focused (or small history)
-        # to keep TUI layouts stable and fast.
+        # Prepend history only if NOT running, to keep TUI layouts stable
         is_running = getattr(self, "_last_status", "") == "running"
         if self.app_ref.input_mode != "CONTROL" and not is_running:
-            # Optimization: Only render history for the focused block or if it's small.
-            # Large history rendering for every block on screen is very expensive.
-            history_size = len(self.terminal_screen.history.top) + len(self.terminal_screen.history.bottom)
-            if self.app_ref.focused == self or history_size < 100:
-                for line_obj in self.terminal_screen.history.top:
-                    append_line(-1, line_obj)
-                for line_obj in self.terminal_screen.history.bottom:
-                    append_line(-1, line_obj)
-            else:
-                # Add a hint that history is hidden
-                rich_text.append(f"[dim]... {history_size} lines of history hidden (focus to see) ...[/]\n")
+            for line_obj in self.terminal_screen.history.top:
+                append_line(-1, line_obj)
+            for line_obj in self.terminal_screen.history.bottom:
+                append_line(-1, line_obj)
 
         # Find the last non-empty line (considering data and non-default background/formatting)
         # We always do this compact rendering to avoid empty trailing space
-        # EXCEPT in interactive mode or when running where we want the full terminal height.
         end_y = self.terminal_screen.lines
-        is_running = getattr(self, "_last_status", "") == "running"
-        if self.app_ref.input_mode != "CONTROL" and not is_running:
-            for y in range(self.terminal_screen.lines - 1, -1, -1):
-                row = self.terminal_screen.buffer[y]
-                is_empty = True
-                if y == cursor_y and show_cursor:
-                     is_empty = False
-                else:
-                    for x in range(self.terminal_screen.columns):
-                        char = row[x]
-                        if char.data != ' ' or char.bg != 'default' or char.reverse:
-                            is_empty = False
-                            break
-                if not is_empty:
-                    end_y = y + 1
-                    break
+        for y in range(self.terminal_screen.lines - 1, -1, -1):
+            row = self.terminal_screen.buffer[y]
+            is_empty = True
+            if y == cursor_y and show_cursor:
+                 is_empty = False
             else:
-                end_y = 1 # Keep at least one line
+                for x in range(self.terminal_screen.columns):
+                    char = row[x]
+                    if char.data != ' ' or char.bg != 'default' or char.reverse:
+                        is_empty = False
+                        break
+            if not is_empty:
+                end_y = y + 1
+                break
+        else:
+            end_y = 1 # Keep at least one line
 
         for y in range(end_y):
             append_line(y, self.terminal_screen.buffer[y])
@@ -473,8 +443,9 @@ class CommandBlock(BaseBlock):
         # Optimize: Only update if content or cursor changed
         out_widget = self.query_one("#output")
         cache_key = (str(rich_text), cursor_x, cursor_y, show_cursor)
-        if out_widget._last_render_key != cache_key:
-            out_widget.update(rich_text, cache_key)
+        if getattr(out_widget, "_last_render_key", None) != cache_key:
+            out_widget.update(rich_text)
+            out_widget._last_render_key = cache_key
 
         if self._color_error:
             info = self.query_one("#info")
@@ -538,26 +509,39 @@ class CommandBlock(BaseBlock):
     def update_status(self, status):
         if not self.is_mounted: return
         info = self.query_one("#info")
+
+        icon = ""
         if status == "running":
             self._last_status_text = "[yellow]Running...[/]"
             self.add_class("running")
+            icon = " ⟳"
         elif "queued" in status:
             num = status.split("(")[1].split(")")[0]
             self._last_status_text = f"[blue]⏳ In Queue (#{num})[/]"
             self.remove_class("running")
+            icon = " ⏳"
         elif status == "ok":
             self._last_status_text = "[green]✅ OK[/]"
             self.remove_class("running")
+            icon = " ✓"
         elif "error" in status:
             self._last_status_text = f"[red]❌ {status.upper()}[/]"
             self.remove_class("running")
+            icon = " ✗"
         else:
             self._last_status_text = f"[grey44]{status.capitalize()}[/]"
 
+        if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
+            icon += " [interactive] TUI"
+
+        # Show PTY Name and UID in info bar
+        pty_info = f" [cyan][{self.pty_name} (ID:{self.pty_uid})][/]"
+        display_text = f"{self._last_status_text}{icon}{pty_info}"
+
         if self._color_error:
-            info.update(f"{self._last_status_text} [dim]⚠ color error[/]")
+            info.update(f"{display_text} [dim]⚠ color error[/]")
         else:
-            info.update(self._last_status_text)
+            info.update(display_text)
 
     async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
@@ -587,12 +571,16 @@ class CommandBlock(BaseBlock):
             if not remote:
                 if save:
                     self.content = edit.text
+                    self._search_cache_dirty = True
                     await self.app_ref.send_message({"type": "edit_save", "block_id": self.block_id, "content": self.content})
                 else:
                     edit.text = self.content
                     await self.app_ref.send_message({"type": "edit_cancel", "block_id": self.block_id})
 
-            label.update(f"[bold blue]{escape(self.cwd)}[/]\n[white]{escape(self.content)}[/]")
+            header_text = f"[bold blue]{escape(self.cwd)}[/]"
+            if self.pty_uid != 0 or self.pty_name != "local-0":
+                header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
+            label.update(f"{header_text}\n[white]{escape(self.content)}[/]")
             label.remove_class("hidden")
             edit.add_class("hidden")
             if not remote:
@@ -605,6 +593,7 @@ class CommandBlock(BaseBlock):
 
 class ClientApp(App):
     CSS_PATH = THEME_FILE
+    COMMANDS = {NeptuneCommandProvider}
 
     def _on_mouse_event(self, event: events.MouseEvent) -> None:
         event.stop()
@@ -614,6 +603,7 @@ class ClientApp(App):
         Binding("ctrl+q", "quit", "Exit"),
         Binding("ctrl+f", "toggle_filter", "Filter"),
         Binding("ctrl+g", "remove_filter", "Remove Filter"),
+        Binding("ctrl+t", "spawn_pty_manager", "PTY Manager"),
         Binding("escape", "esc_pressed", "Back/Clear")
     ]
 
@@ -633,7 +623,6 @@ class ClientApp(App):
         self.writer = None
         self.previous_filter = ""
         self._suppress_search = False
-        self._filter_timer = None
         self.workflows = load_workflows()
         self.yank_buffer = None
         self.last_selected_block_id = None
@@ -641,7 +630,17 @@ class ClientApp(App):
         self.insert_after_id = None
         self.count_str = ""
         self.last_escape_time = 0
+
+        # PTY State
+        self.ptys: Dict[int, Dict] = {
+            0: {"type": "local", "status": "idle", "block_count": 0, "name": "local-0"}
+        }
+        self.default_pty_uid = 0
+        self.last_remote_pty_uid = None
+        self.bang_time = 0.0
+
         self.available_commands = [
+            {"name": "ptyman", "params": "", "desc": "Open PTY Manager overlay"},
             {"name": "export", "params": "[file]", "desc": "Save current session as a Markdown file"},
             {"name": "import", "params": "[file]", "desc": "Load blocks from an external Markdown file"},
             {"name": "exit", "params": "", "desc": "Close the client and return to terminal"},
@@ -661,6 +660,10 @@ class ClientApp(App):
             f_inp = Input(placeholder="Search blocks...", id="filter_input")
             f_inp.tooltip = "Enter text to filter blocks by command or output content."
             yield f_inp
+        with Horizontal(id="pty_target_bar", classes="hidden"):
+            yield Label(" 🌐 PTY Target: ", id="pty_target_label")
+            p_inp = Input(placeholder="local | user@host | user@host:key | pty_id", id="pty_target_input")
+            yield p_inp
         with ScrollableContainer(id="command_history"):
             yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]", id="notebook_header")
         with Vertical(id="bottom_dock") as dock:
@@ -763,7 +766,7 @@ class ClientApp(App):
                 except: pass
             self.blocks = {}
             for block_data in msg.get("blocks", []):
-                b_id = block_data["id"]
+                b_id = block_data.get("id")
                 is_editing = (b_id == editing_id)
                 await self.create_block(
                     block_data,
@@ -775,6 +778,17 @@ class ClientApp(App):
                 self.query_one("#main_input").focus()
             elif focused_id and focused_id in self.blocks:
                 self.call_after_refresh(self.blocks[focused_id].focus)
+
+            if "ptys" in msg:
+                for p in msg.get("ptys", []):
+                    uid = p.get("uid")
+                    self.ptys[uid] = {
+                        "type": p.get("type", "local"),
+                        "status": p.get("status", "idle"),
+                        "block_count": p.get("block_count", 0),
+                        "active_block_id": p.get("active_block_id"),
+                        "name": p.get("name")
+                    }
 
         elif msg_type == "user_join":
             u_id, u_col, u_name = msg.get("user_id"), msg.get("color"), msg.get("name")
@@ -797,7 +811,7 @@ class ClientApp(App):
         elif msg_type == "reorder":
             container = self.query_one("#command_history")
             new_blocks_data = msg.get("blocks", [])
-            new_ids = [b["id"] for b in new_blocks_data]
+            new_ids = [b.get("id") for b in new_blocks_data]
 
             for b_id in list(self.blocks.keys()):
                 if b_id not in new_ids:
@@ -808,7 +822,7 @@ class ClientApp(App):
             header = container.query_one("#notebook_header")
             prev_widget = header
             for b_data in new_blocks_data:
-                b_id = b_data["id"]
+                b_id = b_data.get("id")
                 if b_id not in self.blocks: await self.create_block(b_data)
                 block = self.blocks[b_id]
                 container.move_child(block, after=prev_widget)
@@ -817,32 +831,46 @@ class ClientApp(App):
 
         elif msg_type == "update_block":
             data = msg.get("block")
-            b_id = data["id"]
+            if not data: return
+            b_id = data.get("id")
             if b_id in self.blocks:
                 block = self.blocks[b_id]
-                block.content = data["content"]
+                if "content" in data:
+                    block.content = data.get("content")
                 if isinstance(block, CommandBlock):
                     old_status = getattr(block, "_last_status", None)
-                    block._last_status = data["status"]
-                    block.cwd = data["cwd"]
-                    block.update_status(data["status"])
+                    if "status" in data:
+                        block._last_status = data.get("status")
+                        block.update_status(data.get("status"))
+                    if "cwd" in data:
+                        block.cwd = data.get("cwd")
+                    if "pty_uid" in data:
+                        block.pty_uid = data.get("pty_uid")
+                    if "pty_name" in data:
+                        block.pty_name = data.get("pty_name")
+
+                    if "pty_uid" in data or "pty_name" in data:
+                         block.update_status(getattr(block, "_last_status", "ready"))
 
                     # Auto-exit CONTROL mode if block finishes
                     if self.input_mode == "CONTROL" and self.focused == block:
-                        if old_status == "running" and data["status"] != "running":
+                        if old_status == "running" and data.get("status") != "running":
                             if self.was_in_selection_mode:
                                 self.enter_selection_mode()
                             else:
                                 self.enter_normal_mode()
-                    block.full_output = ""
-                    block.terminal_screen.reset()
-                    block.append_output(data.get("output", ""))
+                    if "output" in data:
+                        block.output = ""
+                        block.terminal_screen.reset()
+                        block.append_output(data.get("output", ""))
                 if not block.is_editing:
                    if isinstance(block, NoteBlock):
                        block.query_one("#md_render").update(block.content)
                        block.query_one("#block_text_edit").text = block.content
                    else:
-                       block.query_one("#cmd_label").update(f"[bold blue]{escape(block.cwd)}[/]\n[white]{escape(block.content)}[/]")
+                       header_text = f"[bold blue]{escape(block.cwd)}[/]"
+                       header_text = f"[bold cyan][{escape(block.pty_name)}][/] {header_text}"
+                       block.query_one("#cmd_label").update(f"{header_text}\n[white]{escape(block.content)}[/]")
                        block.query_one("#block_text_edit").text = block.content
 
         elif msg_type == "output":
@@ -883,22 +911,98 @@ class ClientApp(App):
                 else:
                     self.enter_normal_mode()
 
+        elif msg_type == "pty.created":
+            uid = int(msg.get("uid"))
+            pty_type = msg.get("pty_type")
+            self.ptys[uid] = {"type": pty_type, "status": "idle", "block_count": 0, "name": msg.get("name")}
+            if pty_type == "remote":
+                self.last_remote_pty_uid = uid
+            self.notify(f"PTY created: {msg.get('name')} (UID:{uid})")
+
+        elif msg_type == "pty.destroyed":
+            uid = int(msg.get("uid"))
+            if uid in self.ptys:
+                name = self.ptys[uid].get("name")
+                del self.ptys[uid]
+                self.notify(f"PTY destroyed: {name} (UID:{uid})")
+            if self.default_pty_uid == uid:
+                self.default_pty_uid = 0
+                self.notify(f"Default PTY destroyed. Resetting to ID:0", severity="warning")
+            if getattr(self, "current_pty_uid", None) == uid:
+                self.current_pty_uid = 0
+
+        elif msg_type == "pty.default_changed":
+            # Handled client-side now
+            pass
+
+        elif msg_type == "pty.error":
+            self.notify(f"PTY Error: {msg.get('message')}", severity="error")
+
+        elif msg_type == "pty.list":
+            server_ptys = msg.get("ptys", [])
+            # Update local state from server list
+            active_uids = []
+            for p in server_ptys:
+                uid = int(p.get("uid"))
+                active_uids.append(uid)
+                self.ptys[uid] = {
+                    "type": p.get("type", "local"),
+                    "status": p.get("status", "idle"),
+                    "block_count": p.get("block_count", 0),
+                    "active_block_id": p.get("active_block_id"),
+                    "name": p.get("name")
+                }
+            # Remove ptys no longer on server
+            for uid in list(self.ptys.keys()):
+                if uid not in active_uids:
+                    del self.ptys[uid]
+
+            # Update PTY Manager if open
+            for screen in self.screen_stack:
+                if isinstance(screen, PTYManagerModal):
+                    screen.ptys = self.ptys
+                    screen.default_pty_uid = self.default_pty_uid
+                    screen.update_list()
+
+        elif msg_type == "queue_status":
+            queues = msg.get("queues", [])
+            for q in queues:
+                uid = int(q.get("uid"))
+                if uid in self.ptys:
+                    self.ptys[uid]["block_count"] = q.get("block_count", 0)
+                    if "status" in q:
+                        self.ptys[uid]["status"] = q.get("status")
+                    if "active_block_id" in q:
+                        self.ptys[uid]["active_block_id"] = q.get("active_block_id")
+
+            # Update PTY Manager if open
+            for screen in self.screen_stack:
+                if isinstance(screen, PTYManagerModal):
+                    screen.update_list()
+
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
-        b_id = data["id"]
-        if b_id in self.blocks: return
-        if data["type"] == "NOTE": new_block = NoteBlock(b_id, data["content"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
+        b_id = data.get("id")
+        if not b_id or b_id in self.blocks: return
+        b_type = data.get("type", "CMD")
+        b_content = data.get("content", "")
+        if b_type == "NOTE":
+            new_block = NoteBlock(b_id, b_content, self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
         else:
-            new_block = CommandBlock(b_id, data["content"], data["cwd"], self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos)
+            b_cwd = data.get("cwd", os.getcwd())
+            b_pty_uid = data.get("pty_uid", 0)
+            b_pty_name = data.get("pty_name", f"pty-{b_pty_uid}")
+            new_block = CommandBlock(b_id, b_content, b_cwd, self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos, pty_uid=b_pty_uid, pty_name=b_pty_name)
         self.blocks[b_id] = new_block
         container = self.query_one("#command_history")
         await container.mount(new_block)
 
-        if data["type"] == "CMD":
-            new_block.append_output(data["output"])
-            new_block.update_status(data["status"])
-        if data["locked_by"]:
-                user_info = self.users.get(data["locked_by"], {})
-                new_block.update_lock(data["locked_by"], user_info.get("color", "white"))
+        if b_type == "CMD":
+            new_block.append_output(data.get("output", ""))
+            new_block.update_status(data.get("status", "ready"))
+        locked_by = data.get("locked_by")
+        if locked_by:
+            user_info = self.users.get(locked_by, {})
+            new_block.update_lock(locked_by, user_info.get("color", "white"))
 
         # Apply current filter to the new block
         inp = self.query_one("#filter_input")
@@ -914,6 +1018,13 @@ class ClientApp(App):
             inp.value = self.previous_filter
             if not inp.value:
                 bar.add_class("hidden")
+            self.enter_normal_mode()
+            return
+
+        pty_bar = self.query_one("#pty_target_bar")
+        pty_inp = self.query_one("#pty_target_input")
+        if not pty_bar.has_class("hidden") and self.focused == pty_inp:
+            pty_bar.add_class("hidden")
             self.enter_normal_mode()
             return
 
@@ -973,7 +1084,7 @@ class ClientApp(App):
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
 
-    def enter_input_mode(self, prefix=""):
+    def enter_input_mode(self, prefix="", pty_uid=None):
         if self.input_mode == "SELECTION":
             self.was_in_selection_mode = True
             focused = self.focused
@@ -981,8 +1092,13 @@ class ClientApp(App):
                 focused = focused.parent
             if focused:
                 self.insert_after_id = focused.block_id
-        else:
+        elif self.input_mode == "INPUT" and self.was_in_selection_mode:
+            # Keep existing insert_after_id set by !! or Picker flow
+            pass
+        elif not self.was_in_selection_mode:
             self.insert_after_id = None
+
+        self.current_pty_uid = pty_uid if pty_uid is not None else self.default_pty_uid
 
         mode_map = {"!": "BASH", ":": "CMD", ";": "NOTE"}
         self.input_mode = mode_map.get(prefix, "INPUT")
@@ -1030,33 +1146,31 @@ class ClientApp(App):
 
     @on(Input.Changed, "#filter_input")
     def filter_blocks(self, event: Input.Changed):
-        if self._filter_timer:
+        self.apply_filter(event.value)
+
+    def apply_filter(self, query: str):
+        # Debounce filter applying
+        if hasattr(self, "_filter_timer"):
             self._filter_timer.cancel()
 
-        # Debounce filtering for better responsiveness
-        self._filter_timer = asyncio.get_event_loop().call_later(
-            0.1, lambda: asyncio.create_task(self._run_filter(event.value.lower()))
-        )
+        async def _do_filter():
+            await asyncio.sleep(0.1) # 100ms debounce
+            q = query.lower()
+            for block in self.blocks.values():
+                self._filter_single_block(block, q)
+
+        self._filter_timer = asyncio.create_task(_do_filter())
 
     def _filter_single_block(self, block, query: str):
-        query = query.lower()
-        if block._search_text_dirty:
-            text = block.content
-            if hasattr(block, "full_output"):
-                text += block.full_output
-            block._search_text = text.lower()
-            block._search_text_dirty = False
+        # Cache search text
+        if not hasattr(block, "_search_cache") or getattr(block, "_search_cache_dirty", True):
+            block._search_cache = (block.content + getattr(block, 'output', '')).lower()
+            block._search_cache_dirty = False
 
-        if not query or fuzzy_match(query, block._search_text):
+        if not query or fuzzy_match(query, block._search_cache):
             block.remove_class("filtered-out")
         else:
             block.add_class("filtered-out")
-
-    async def _run_filter(self, query: str):
-        for block in self.blocks.values():
-            self._filter_single_block(block, query)
-
-
 
     def update_mode_label(self):
         if not hasattr(self, "mode_label"): return
@@ -1070,7 +1184,15 @@ class ClientApp(App):
             "CONTROL": "#f44336"
         }
         c = colors.get(self.input_mode, "#7c4dff")
-        self.mode_label.update(f"[bold {c}]MODE: {self.input_mode}[/]")
+        text = f"[bold {c}]MODE: {self.input_mode}[/]"
+
+        if self.input_mode == "BASH":
+            uid = getattr(self, "current_pty_uid", self.default_pty_uid)
+            info = self.ptys.get(uid, {})
+            name = info.get("name", f"pty-{uid}")
+            text += f" [cyan]➔ {name} (ID:{uid})[/]"
+
+        self.mode_label.update(text)
 
     def enter_control_mode(self, block):
         if not isinstance(block, CommandBlock):
@@ -1089,6 +1211,8 @@ class ClientApp(App):
         if not text.strip(): self.enter_normal_mode(); return
         ta.text = ""; self.query_one("#palette").remove_class("visible")
 
+        target_pty_uid = getattr(self, "current_pty_uid", self.default_pty_uid)
+
         if self.input_mode == "CMD":
             await self.handle_internal_command(text.strip())
             if self.was_in_selection_mode:
@@ -1100,13 +1224,22 @@ class ClientApp(App):
         if self.input_mode == "BASH":
             content = text.strip()
             self.history.add(content)
+
+            if target_pty_uid not in self.ptys:
+                self.notify(f"Selected PTY (ID:{target_pty_uid}) no longer exists. Resetting to default.", severity="error")
+                self.default_pty_uid = 0
+                self.current_pty_uid = 0
+                self.action_spawn_pty_manager()
+                return
+
             # No longer intercepting 'cd' here; it will be handled by the server's master shell.
             await self.send_message({
                 "type": "submit",
                 "mode": "CMD",
                 "content": content,
                 "cwd": os.getcwd(),
-                "insert_after": self.insert_after_id
+                "insert_after": self.insert_after_id,
+                "pty_uid": target_pty_uid
             })
         elif self.input_mode == "NOTE":
             await self.send_message({
@@ -1125,13 +1258,36 @@ class ClientApp(App):
     async def handle_internal_command(self, cmd_line):
         parts = cmd_line.split(" ", 1)
         cmd, args = parts[0], parts[1] if len(parts) > 1 else ""
-        if cmd == "export": self.export_notebook(args or f"session_{int(time.time())}.md")
+        if cmd == "ptyman":
+            self.action_spawn_pty_manager()
+        elif cmd == "export": self.export_notebook(args or f"session_{int(time.time())}.md")
         elif cmd == "import": await self.import_notebook(args)
         elif cmd == "exit": self.exit()
         elif cmd == "save_wf": self.action_save_workflow(self.query_one("#main_input").text)
         elif cmd == "clear": await self.send_message({"type": "clear_session"})
-        elif cmd == "help": self.notify("Commands: export [file], import [file], exit, save_wf, clear, help")
+        elif cmd == "help": self.notify("Commands: pty [new|kill|list], spawnpty, export [file], import [file], exit, save_wf, clear, help")
         else: self.notify(f"Unknown command: {cmd}", severity="error")
+
+    def action_spawn_pty_manager(self):
+        if self.input_mode == "SELECTION":
+            self.was_in_selection_mode = True
+            focused = self.focused
+            while focused and not isinstance(focused, BaseBlock):
+                focused = focused.parent
+            if focused:
+                self.insert_after_id = focused.block_id
+        self.push_screen(PTYManagerModal(self.ptys, self.default_pty_uid), self._handle_manager_result)
+
+    def _handle_manager_result(self, res):
+        if not res: return
+        action = res.get("action")
+        if action == "select":
+            uid = res.get("uid")
+            self.default_pty_uid = uid
+            self.enter_input_mode(prefix="!", pty_uid=uid)
+
+    def _finish_remote_pty_create_callback(self, res):
+        self.run_worker(self._finish_remote_pty_create("", "", res))
 
     def action_save_notebook_dialog(self): self.push_screen(SaveNotebookModal(), self.export_notebook)
     def action_import_notebook_dialog(self): self.push_screen(ImportNotebookModal(), lambda f: asyncio.create_task(self.import_notebook(f)))
@@ -1139,6 +1295,29 @@ class ClientApp(App):
     def action_save_workflow(self, text: str):
         if not text.strip(): return
         self.push_screen(SaveWorkflowModal(text.strip()), lambda s: s and asyncio.create_task(self._save_wf(s)))
+
+    def action_save_workflow_from_input(self):
+        self.action_save_workflow(self.query_one("#main_input").text)
+
+    def action_clear_session(self):
+        asyncio.create_task(self.send_message({"type": "clear_session"}))
+
+    async def _rerun_block(self, block):
+        if not isinstance(block, CommandBlock): return
+
+        uid = block.pty_uid
+        if uid is None or uid not in self.ptys:
+            self.notify(f"Assigned PTY (ID:{uid}) no longer exists. Please select a new PTY.", severity="warning")
+            def _handle_reassign(res):
+                if res and res.get("action") == "select":
+                    block.pty_uid = res.get("uid")
+                    block.pty_name = self.ptys.get(block.pty_uid, {}).get("name", "unknown")
+                    asyncio.create_task(self.send_message({"type": "run_block", "block_id": block.block_id, "pty_uid": block.pty_uid}))
+
+            self.push_screen(PTYManagerModal(self.ptys, self.default_pty_uid), _handle_reassign)
+            return
+
+        await self.send_message({"type": "run_block", "block_id": block.block_id, "pty_uid": uid})
 
     def export_notebook(self, filename: str):
         if not filename: return
@@ -1150,8 +1329,8 @@ class ClientApp(App):
             if isinstance(block, NoteBlock): md_output.append(f"{block.content}\n")
             elif isinstance(block, CommandBlock):
                 md_output.append(f"```bash\n{block.content}\n```\n")
-                if block.full_output.strip():
-                    clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.full_output)
+                if block.output.strip():
+                    clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.output)
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
@@ -1241,7 +1420,7 @@ class ClientApp(App):
                 context = {"history": self.history.cache, "workflows": self.workflows, "cwd": os.getcwd()}
                 sugs = provider.get_suggestions(inp.text, context)
                 for s in sugs:
-                    if s["value"] == val and s["type"] == "path":
+                    if s.get("value") == val and s.get("type") == "path":
                         is_path = True; break
             except: pass
 
@@ -1263,7 +1442,97 @@ class ClientApp(App):
         if self.input_mode == "BASH":
             self.update_palette(self.query_one("#main_input").text)
 
+    @on(Input.Submitted, "#pty_target_input")
+    async def pty_target_submitted(self, event: Input.Submitted):
+        target = event.value.strip()
+        self.query_one("#pty_target_bar").add_class("hidden")
+        if not target:
+            self.enter_normal_mode()
+            return
+
+        # Resolution order
+        # 1. Exact UID match
+        if target.isdigit():
+            uid = int(target)
+            if uid in self.ptys:
+                self.enter_input_mode(prefix="!", pty_uid=uid)
+                return
+
+        # 2. Match by name
+        for uid, info in self.ptys.items():
+            if info.get("name") == target:
+                self.enter_input_mode(prefix="!", pty_uid=uid)
+                return
+
+        # 3. "local" -> pty.create.local
+        if target == "local":
+            await self.send_message({"type": "pty.create.local"})
+            # We don't have the UID yet, server will broadcast pty.created
+            self.enter_input_mode(prefix="!")
+            return
+
+        # 4. user@host[:port][:key] -> remote
+        if "@" in target:
+            parts = target.split(":")
+            user_host = parts[0]
+            user, host = user_host.split("@", 1)
+            port = "22"
+            key_path = "~/.ssh/id_rsa"
+
+            if len(parts) > 1:
+                # Check if second part is a port or key path
+                if parts[1].isdigit():
+                    port = parts[1]
+                    if len(parts) > 2:
+                        key_path = parts[2]
+                else:
+                    key_path = parts[1]
+
+            if len(parts) > 1: # Some extra info provided, maybe skip modal
+                 # If only port was provided, we might still want the modal for key/password
+                 # Unless it's user@host:port:key
+                 if len(parts) > 2:
+                     await self.send_message({
+                         "type": "pty.create.remote",
+                         "name": host,
+                         "ssh_config": {"host": host, "user": user, "port": port, "key": key_path}
+                     })
+                     self.enter_input_mode(prefix="!")
+                     return
+
+            self.push_screen(RemotePTYAuthModal(host, user, port, key_path),
+                lambda res: self.run_worker(self._finish_remote_pty_create(host, user, res)))
+            return
+
+        self.notify(f"Unknown PTY target: {target}", severity="error")
+        self.enter_normal_mode()
+
+    async def _finish_remote_pty_create(self, host, user, res):
+        if not res:
+            self.enter_normal_mode()
+            return
+
+        h = res.get("host", host)
+        u = res.get("user", user)
+
+        msg = {
+            "type": "pty.create.remote",
+            "name": h,
+            "ssh_config": {"host": h, "user": u, "port": res.get("port", "22")}
+        }
+        if res.get("method") == "key":
+            msg["ssh_config"]["key"] = res.get("value")
+        else:
+            msg["ssh_config"]["password"] = res.get("value")
+
+        await self.send_message(msg)
+        self.enter_input_mode(prefix="!")
+
     def on_key(self, event: events.Key):
+        # Allow Modals to handle their own keys (Tab, Esc, etc.) without interference
+        if isinstance(self.screen, ModalScreen):
+            return
+
         # Global exit hatch for CONTROL mode (failsafe)
         if self.input_mode == "CONTROL":
             # 1. Double Escape within 0.5s
@@ -1284,14 +1553,72 @@ class ClientApp(App):
             return
 
         p, inp = self.query_one("#palette"), self.query_one("#main_input")
+
+        # Unified trigger handling for NORMAL and SELECTION
+        if self.input_mode in ("NORMAL", "SELECTION"):
+            if event.character == "!":
+                now = time.time()
+                if now - self.bang_time < 0.3:
+                    # Double bang !!
+                    self.bang_time = 0
+                    if self.input_mode == "SELECTION":
+                        self.was_in_selection_mode = True
+                        focused = self.focused
+                        while focused and not isinstance(focused, BaseBlock): focused = focused.parent
+                        if focused: self.insert_after_id = focused.block_id
+
+                    pty_bar = self.query_one("#pty_target_bar")
+                    pty_bar.remove_class("hidden")
+                    self.query_one("#pty_target_input").value = ""
+                    self.query_one("#pty_target_input").focus()
+                    self.input_mode = "INPUT"
+                else:
+                    self.bang_time = now
+                    self._bang_uid_buffer = ""
+                    async def delayed_bang(t):
+                        await asyncio.sleep(0.3)
+                        if self.bang_time == t:
+                            self.bang_time = 0
+                            self.enter_input_mode(prefix="!")
+                    asyncio.create_task(delayed_bang(now))
+                event.stop(); event.prevent_default(); return
+            elif self.bang_time and event.character and event.character.isdigit():
+                # Append digit to current bang_time buffer
+                if not hasattr(self, "_bang_uid_buffer"): self._bang_uid_buffer = ""
+                self._bang_uid_buffer += event.character
+                # Restart delay for potentially more digits
+                t_now = time.time()
+                self.bang_time = t_now
+
+                async def delayed_uid_finish(t):
+                    await asyncio.sleep(0.4) # Slightly longer for multi-digit
+                    if self.bang_time == t:
+                        uid = int(self._bang_uid_buffer)
+                        self._bang_uid_buffer = ""
+                        self.bang_time = 0
+                        if uid in self.ptys:
+                            # Enter input mode for this UID without changing default
+                            self.enter_input_mode(prefix="!", pty_uid=uid)
+                        else:
+                            self.notify(f"No PTY with UID {uid}", severity="error")
+                asyncio.create_task(delayed_uid_finish(t_now))
+                event.stop(); event.prevent_default(); return
+
         if self.input_mode == "NORMAL":
-            if event.character == "!": self.enter_input_mode(prefix="!"); event.stop(); event.prevent_default()
+            if event.key == "ctrl+p":
+                # Standard Command Palette (handled by Textual automatically if bound to ctrl+p by default,
+                # but we override ctrl+p for PTYPicker before. Now we want it to be Command Palette)
+                # Textual binds ctrl+p to CommandPalette by default on some versions,
+                # let's just make sure it's triggered.
+                self.action_command_palette()
+                event.stop(); event.prevent_default(); return
             elif event.character == ":": self.enter_input_mode(prefix=":"); event.stop(); event.prevent_default()
             elif event.character == ";": self.enter_input_mode(prefix=";"); event.stop(); event.prevent_default()
             elif event.character == "s": self.enter_selection_mode(); event.stop(); event.prevent_default()
         elif self.input_mode in ("BASH", "CMD", "NOTE", "INPUT"):
             vis = p.has_class("visible")
-            if event.key == "ctrl+p":
+            if event.key == "ctrl+p" and self.query_one("#pty_target_bar").has_class("hidden"):
+                # Don't trigger autocomplete if we are in PTY target input
                 event.prevent_default()
                 if vis: p.remove_class("visible")
                 else: p.add_class("visible"); self.update_palette(inp.text)
@@ -1303,9 +1630,13 @@ class ClientApp(App):
                 else: self.sync_input(); p.remove_class("visible")
         elif self.input_mode == "SELECTION":
             focused = self.focused; blocks = [c for c in self.query_one("#command_history").children if isinstance(c, BaseBlock) and not c.has_class("filtered-out")]
+            if event.key == "ctrl+p":
+                self.action_command_palette()
+                event.stop(); event.prevent_default(); return
             if event.character and event.character.isdigit() and (event.character != "0" or self.count_str): self.count_str += event.character; return
             count, self.count_str = int(self.count_str) if self.count_str else 1, ""
-            if event.character in (":", "!", ";"): self.enter_input_mode(prefix=event.character); return
+            if event.character == ":": self.enter_input_mode(prefix=":"); return
+            elif event.character == ";": self.enter_input_mode(prefix=";"); return
             if event.key in ("up", "down", "k", "j") and not (event.key in ("j", "enter") and isinstance(focused, CommandBlock) and not focused.is_editing):
                  if not blocks: return
                  idx = blocks.index(focused) if focused in blocks else -1
@@ -1316,7 +1647,7 @@ class ClientApp(App):
                  blocks[new_idx].focus(); blocks[new_idx].scroll_visible()
                  self.last_selected_block_id = blocks[new_idx].block_id
             elif event.key == "x": asyncio.create_task(self.action_delete_block())
-            elif event.key == "r": asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
+            elif event.key == "r": self.run_worker(self._rerun_block(focused))
             elif event.key == "y":
                  if isinstance(focused, NoteBlock): self.yank_buffer = ("NOTE", focused.content); self.notify("Note yanked")
                  elif isinstance(focused, CommandBlock): self.yank_buffer = ("CMD", focused.content, focused.cwd); self.notify("Command yanked")
@@ -1327,7 +1658,7 @@ class ClientApp(App):
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
             elif event.key == "ctrl+s" and isinstance(focused, CommandBlock): self.action_save_workflow(focused.content)
             elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
-            elif event.key in ("j", "enter", "ctrl+j") and isinstance(focused, CommandBlock): asyncio.create_task(self.send_message({"type": "run_block", "block_id": focused.block_id}))
+            elif event.key in ("j", "enter", "ctrl+j") and isinstance(focused, CommandBlock): self.run_worker(self._rerun_block(focused))
             elif event.key in ("ctrl+up", "alt+up"): asyncio.create_task(self.action_move_up())
             elif event.key in ("ctrl+down", "alt+down"): asyncio.create_task(self.action_move_down())
         elif self.input_mode == "CONTROL":
@@ -1364,6 +1695,8 @@ class ClientApp(App):
             data = None
             if event.key in key_map:
                 data = key_map[event.key]
+            elif event.key == "ctrl+j": # Enter in selection mode or ctrl+j in some TUIs
+                data = "\r"
             elif event.character:
                 data = event.character
             elif len(event.key) == 1:
@@ -1377,9 +1710,6 @@ class ClientApp(App):
 
             if data:
                 asyncio.create_task(self.send_message({"type": "terminal_input", "data": data}))
-                # Manually trigger a render refresh to show typed characters/cursor move immediately
-                if isinstance(focused, CommandBlock):
-                    focused.trigger_render()
                 event.stop()
                 event.prevent_default()
 

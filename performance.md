@@ -1,53 +1,57 @@
-# Neptune Performance Profile
+# Neptune Performance Analysis & Optimization Proposals
 
-This document tracks performance bottlenecks identified during profiling and provides recommendations for optimization.
+## 1. Findings
 
-## Summary of Findings
+### Client-Side Bottlenecks
+- **Terminal Rendering (`CommandBlock.render_terminal`)**:
+  - The current renderer iterates through every cell in the `pyte` buffer.
+  - It creates many small `Text` objects or appends characters one by one.
+  - There is a style cache, but the overhead of `rich.Text` manipulation for every cell is high.
+- **Large Notebooks**:
+  - Having 100+ blocks in the `ScrollableContainer` causes layout and rendering lag in Textual.
+  - Filtering iterates through all blocks and toggles CSS classes, which can be slow if not debounced or if many blocks match.
+- **Message Handling**:
+  - Every `output` message from the server triggers a `render_terminal` call on the client. High-frequency output can overwhelm the UI thread.
 
-Neptune's performance has been significantly improved through a series of client-side and server-side optimizations. The primary bottlenecks were in terminal rendering, high-frequency UI updates, and redundant string operations during filtering.
+### Remote PTY Bottlenecks
+- **Polling Latency**: `RemotePTY` uses a 0.5s polling interval to check if a command is still running via `ps`. This adds a minimum of 0.5s latency to command completion detection.
+- **`ps` Overhead**: Calling `ps` over SSH every 0.5s is expensive and increases network traffic/latency.
+- **Input Lag**: Typing in `CONTROL` mode (TUI) sends every key individually over the socket, then over SSH.
 
-## Client-Side Performance
+---
 
-### Identified Bottlenecks (and Optimizations)
+## 2. Optimization Proposals
 
-1. **Cell-by-Cell Terminal Rendering (`render_terminal`)**
-   - **Status**: **Optimized** via Chunk-based Rendering.
-   - **Optimization**: Instead of cell-by-cell processing, the renderer now groups characters with identical attributes into chunks.
-   - **Impact**: Reduced rendering overhead by ~35%.
+### P1: Chunk-based Terminal Rendering (Client)
+- **Concept**: Instead of cell-by-cell rendering, group contiguous characters with the same style into a single `rich.Text.append` call.
+- **Implementation**: Modify `render_terminal` in `client.py` to scan for style changes and batch appends.
 
-2. **Excessive History Rendering**
-   - **Status**: **Optimized** via Lazy Rendering.
-   - **Optimization**: History is only rendered for focused blocks or small history buffers.
-   - **Impact**: drastically improved responsiveness in large notebooks.
+### P2: UI Update Throttling (Client)
+- **Concept**: Limit the frequency of `render_terminal` calls and general UI refreshes to a maximum FPS (e.g., 20 FPS).
+- **Implementation**: Use a timer or `asyncio.sleep` to debounce/throttle updates in `CommandBlock.append_output`.
 
-3. **High Frequency of UI Updates**
-   - **Status**: **Optimized** via Throttling & Custom Widget.
-   - **Optimization**: Added a 20 FPS throttle and implemented a custom `TerminalOutput` widget that avoids `Static.update` overhead.
-   - **Impact**: Smooth TUI performance even during massive output bursts.
+### P3: Virtualized/Lazy Rendering for Blocks (Client)
+- **Concept**: Only render or update the terminal buffer for blocks that are actually visible or recently focused.
+- **Implementation**: Use `on_scroll` events or focus tracking to decide when to skip `render_terminal`.
 
-4. **Inefficient Block Filtering**
-   - **Status**: **Optimized** via Caching & Debouncing.
-   - **Optimization**: Search text for each block is cached, and filtering is debounced (100ms).
-   - **Impact**: Snappy filtering even with hundreds of blocks.
+### P4: Improve Remote PTY Command Monitoring (Server)
+- **Concept**: Instead of polling with `ps`, use a more reliable sentinel-based approach or a persistent monitoring process on the remote side.
+- **Implementation**:
+  - Enhance the sentinel pattern to be injected more reliably.
+  - Reduce `ps` polling frequency or eliminate it if sentinels are received.
+  - Use `ControlPersist` and better multiplexing features of SSH.
 
-## Server-Side Performance
+### P5: Output Batching (Server)
+- **Concept**: Batch small chunks of output from PTYs before broadcasting to clients.
+- **Implementation**: Buffer output for ~20ms in `PTYManager` before sending.
 
-### Identified Bottlenecks (and Optimizations)
+### P6: Optimized Filtering (Client)
+- **Concept**: Cache the searchable text for blocks and use a faster fuzzy matching algorithm. Debounce the filter input.
 
-1. **High Message Overhead**
-   - **Status**: **Optimized** via Output Batching.
-   - **Optimization**: Small PTY reads are batched (20ms interval) before being broadcast to clients.
-   - **Impact**: Significant reduction in context switching and network traffic during rapid output.
+---
 
-### Benchmark Results (final)
-
-| Scenario | Metric | Result (Before) | Result (After) | Improvement |
-|----------|--------|-----------------|----------------|-------------|
-| 100 small updates | Total Time | ~2.8s | ~1.8s | **~35%** |
-| Render 1000 lines | Total Time | ~0.25s | ~0.18s | **~28%** |
-| Filter 500 blocks | UI Latency | Variable (Laggy) | Snappy | **High** |
-
-## Future Recommendations
-
-1. **Rust/C Extension**: Further optimize the terminal rendering loop using a Rust extension.
-2. **Virtualized Block List**: Implement a virtual list for blocks to handle 1000+ blocks more efficiently.
+## 3. Action Plan
+1. Implement **P1** (Chunk-based rendering) and **P2** (Throttling) first as they have the highest impact on general responsiveness.
+2. Implement **P4** (Remote PTY monitoring) to fix the input/completion lag.
+3. Implement **P5** (Output batching) to reduce message overhead.
+4. Update Blackbox tests to measure and report these improvements.
