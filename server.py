@@ -17,12 +17,18 @@ class Server:
         self.blocks, self.control_block_id = [], None
 
     def add_block(self, block_type, content, cwd=None, index=None, pty_uid=None):
-        uid = pty_uid if pty_uid is not None else 0
+        uid = pty_uid
         if not cwd:
-            pty = self.pty_manager.ptys.get(uid)
+            # Default to local-0 (uid 0) if no UID provided and no CWD
+            search_uid = uid if uid is not None else 0
+            pty = self.pty_manager.ptys.get(search_uid)
             if pty: cwd = pty.cwd
 
-        pty_name = self.pty_manager.names.get(uid, "unknown")
+        if uid is None:
+            pty_name = "none"
+        else:
+            pty_name = self.pty_manager.names.get(uid, "unknown")
+
         block = {"id":str(uuid.uuid4()), "type":block_type, "content":content, "cwd":cwd or os.getcwd(), "output":"", "status":"ready", "locked_by":None, "pty_uid":uid, "pty_name": pty_name}
         if index is not None and 0 <= index <= len(self.blocks): self.blocks.insert(index, block)
         else: self.blocks.append(block)
@@ -119,7 +125,7 @@ class Server:
                     if idx != -1:
                         y = msg.get("yank_data", [])
                         if len(y) >= 2:
-                            self.add_block(y[0], y[1], cwd=y[2] if len(y)>2 else None, index=idx+1 if msg.get("position")=="after" else idx)
+                            self.add_block(y[0], y[1], cwd=y[2] if len(y)>2 else None, index=idx+1 if msg.get("position")=="after" else idx, pty_uid=y[3] if len(y)>3 else None)
                             await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
                 elif msg_type == "run_block":
                     block = self.get_block(msg.get("block_id"))
@@ -130,6 +136,11 @@ class Server:
                             except: pass
                             block["pty_uid"] = p_uid
                             block["pty_name"] = self.pty_manager.names.get(block["pty_uid"], "unknown")
+
+                        if msg.get("only_update"):
+                            await self.session_manager.broadcast({"type": "update_block", "block": block})
+                            return
+
                         block["output"] = ""
                         await self.session_manager.broadcast({"type": "update_block", "block": block})
                         b_pty_uid = block["pty_uid"]
@@ -144,7 +155,7 @@ class Server:
                 elif msg_type == "import_blocks":
                     self.blocks = []
                     for b_data in msg.get("blocks", []):
-                        block = self.add_block(b_data.get("type"), b_data.get("content"), b_data.get("cwd"))
+                        block = self.add_block(b_data.get("type"), b_data.get("content"), b_data.get("cwd"), pty_uid=b_data.get("pty_uid"))
                         block.update({"output":b_data.get("output",""), "status":b_data.get("status","ready")})
                     await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
                 elif msg_type == "control_start":
