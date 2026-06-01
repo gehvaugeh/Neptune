@@ -272,13 +272,6 @@ class PTYManagerModal(ModalScreen):
                 event.stop(); event.prevent_default()
             else:
                 self.dismiss(None)
-        elif event.key == "enter":
-            ol = self.query_one("#pty_list")
-            if ol.highlighted is not None:
-                uid_str = ol.get_option_at_index(ol.highlighted).id
-                if uid_str:
-                    self.dismiss({"action": "select", "uid": int(uid_str)})
-            event.stop()
 
     def _do_delete(self, uid):
         self.app.run_worker(self.app.send_message({"type": "pty.destroy", "pty_uid": int(uid)}))

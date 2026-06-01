@@ -492,6 +492,13 @@ class CommandBlock(BaseBlock):
         self._style_cache[cache_key] = (style, is_err)
         return style
 
+    def update_header(self):
+        if not self.is_mounted: return
+        label = self.query_one("#cmd_label")
+        header_text = f"[bold blue]{escape(self.cwd)}[/]"
+        header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
+        label.update(f"{header_text}\n[white]{escape(self.content)}[/]")
+
     def update_status(self, status):
         if not self.is_mounted: return
         info = self.query_one("#info")
@@ -563,10 +570,7 @@ class CommandBlock(BaseBlock):
                     edit.text = self.content
                     await self.app_ref.send_message({"type": "edit_cancel", "block_id": self.block_id})
 
-            header_text = f"[bold blue]{escape(self.cwd)}[/]"
-            if self.pty_uid != 0 or self.pty_name != "local-0":
-                header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
-            label.update(f"{header_text}\n[white]{escape(self.content)}[/]")
+            self.update_header()
             label.remove_class("hidden")
             edit.add_class("hidden")
             if not remote:
@@ -854,9 +858,7 @@ class ClientApp(App):
                        block.query_one("#md_render").update(block.content)
                        block.query_one("#block_text_edit").text = block.content
                    else:
-                       header_text = f"[bold blue]{escape(block.cwd)}[/]"
-                       header_text = f"[bold cyan][{escape(block.pty_name)}][/] {header_text}"
-                       block.query_one("#cmd_label").update(f"{header_text}\n[white]{escape(block.content)}[/]")
+                       block.update_header()
                        block.query_one("#block_text_edit").text = block.content
 
         elif msg_type == "output":
@@ -1272,6 +1274,8 @@ class ClientApp(App):
                 uid = res.get("uid")
                 focused.pty_uid = uid
                 focused.pty_name = self.ptys.get(uid, {}).get("name", f"pty-{uid}")
+                focused.update_header()
+                focused.update_status(getattr(focused, "_last_status", "ready"))
                 asyncio.create_task(self.send_message({
                     "type": "run_block",
                     "block_id": focused.block_id,
@@ -1343,7 +1347,8 @@ class ClientApp(App):
         for block in container.children:
             if isinstance(block, NoteBlock): md_output.append(f"{block.content}\n")
             elif isinstance(block, CommandBlock):
-                md_output.append(f"```bash (uid:{block.pty_uid})\n{block.content}\n```\n")
+                pty_uid_export = block.pty_uid if block.pty_uid is not None else 0
+                md_output.append(f"```bash (uid:{pty_uid_export})\n{block.content}\n```\n")
                 if include_output and block.output.strip():
                     clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.output)
                     md_output.append(f"```text\n{clean.strip()}\n```\n")
