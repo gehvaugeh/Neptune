@@ -1259,6 +1259,9 @@ class ClientApp(App):
         while focused and not isinstance(focused, BaseBlock):
             focused = focused.parent
 
+        if not focused and self.last_selected_block_id:
+            focused = self.blocks.get(self.last_selected_block_id)
+
         if not focused or not isinstance(focused, CommandBlock):
             self.notify("no command block selected", severity="warning")
             return
@@ -1369,7 +1372,12 @@ class ClientApp(App):
                         m = re.search(r'uid:(\d+)', metadata)
                         if m:
                             pty_uid = int(m.group(1))
-                            if pty_uid > 0: pty_uid = None
+                            if pty_uid != 0: pty_uid = None
+                        else:
+                            pty_uid = None # (uid:something) present but not int? default to none
+                    else:
+                        # No uid metadata at all
+                        pty_uid = 0
                     new_blocks.append({"type": "CMD", "content": code, "cwd": os.getcwd(), "pty_uid": pty_uid})
                 elif lang == "text" and include_output and new_blocks and new_blocks[-1]["type"] == "CMD":
                     new_blocks[-1]["output"] = code
@@ -1539,7 +1547,7 @@ class ClientApp(App):
 
         msg = {
             "type": "pty.create.remote",
-            "name": h,
+            "name": None, # Let server generate unique name host-UID
             "ssh_config": {"host": h, "user": u, "port": res.get("port", "22")}
         }
         if res.get("method") == "key":

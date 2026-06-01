@@ -211,15 +211,20 @@ class PTYManagerModal(ModalScreen):
             if not self.search_query or fuzzy_match(self.search_query, f"{uid} {name}"):
                 items.append(Option(display, id=str(uid)))
 
+        for item in items:
+            ol.add_option(item)
+
         # Always ensure something is highlighted if list not empty
         if items and ol.highlighted is None:
              ol.highlighted = 0
 
-        for item in items:
-            ol.add_option(item)
-
         if current_highlight is not None:
             ol.highlighted = min(current_highlight, ol.option_count - 1) if ol.option_count > 0 else None
+
+    @on(OptionList.OptionSelected, "#pty_list")
+    def on_select(self, event: OptionList.OptionSelected):
+        if event.option.id:
+            self.dismiss({"action": "select", "uid": int(event.option.id)})
 
     @on(Input.Changed, "#manager_search")
     def on_search(self, event: Input.Changed):
