@@ -1349,9 +1349,11 @@ class ClientApp(App):
             elif isinstance(block, CommandBlock):
                 pty_uid_export = block.pty_uid if block.pty_uid is not None else 0
                 md_output.append(f"```bash (uid:{pty_uid_export})\n{block.content}\n```\n")
-                if include_output and block.output.strip():
+                if include_output and block.output:
                     clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.output)
-                    md_output.append(f"```text\n{clean.strip()}\n```\n")
+                    if clean.strip():
+                        # Use rstrip to keep leading indentation but remove trailing empty lines
+                        md_output.append(f"```text\n{clean.rstrip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
             self.notify(f"Notebook Saved: {filename}", severity="information")
@@ -1385,7 +1387,10 @@ class ClientApp(App):
                         pty_uid = 0
                     new_blocks.append({"type": "CMD", "content": code, "cwd": os.getcwd(), "pty_uid": pty_uid})
                 elif lang == "text" and include_output and new_blocks and new_blocks[-1]["type"] == "CMD":
-                    new_blocks[-1]["output"] = code
+                    # pyte expects \r\n for proper line breaks from a raw feed usually,
+                    # but here we are restoring saved output.
+                    # Normalize and ensure newlines are clean.
+                    new_blocks[-1]["output"] = code.replace("\r\n", "\n").replace("\n", "\r\n")
                 last_pos = match.end()
             if clean_after := "\n".join([l for l in content[last_pos:].splitlines() if not l.strip().startswith("# Shell Notebook Export")]).strip():
                 new_blocks.append({"type": "NOTE", "content": clean_after})
