@@ -152,6 +152,14 @@ class NeptuneTestRunner:
             oracle.send_input("x")    # delete
             self.assert_screen(oracle, "PTY destroyed", "Verify PTY Destruction", timeout=15.0)
 
+            print("Testing PTY Renaming...")
+            oracle.send_input("<esc><esc>:ptyman<return>")
+            time.sleep(1)
+            oracle.send_input("r") # Rename default PTY
+            self.assert_screen(oracle, "Rename PTY", "Verify Rename Modal")
+            oracle.send_input("NewName\r")
+            self.assert_screen(oracle, "NewName", "Verify PTY Name Update in UI")
+
         finally:
             oracle.child.terminate(force=True)
 
@@ -162,6 +170,11 @@ class NeptuneTestRunner:
             print("Testing Modals...")
             oracle.send_input("<esc><esc>:help <return>")
             self.assert_screen(oracle, "Commands:", "Help Modal Visibility")
+            oracle.send_input("<esc>")
+
+            print("Testing Command Palette (Ctrl+P)...")
+            oracle.send_input("<esc><esc><ctrl+p>")
+            self.assert_screen(oracle, "Search for commands", "Verify Command Palette Appearance")
             oracle.send_input("<esc>")
 
             print("Testing Selection Mode Hotkeys...")
