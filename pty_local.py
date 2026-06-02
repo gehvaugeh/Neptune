@@ -47,7 +47,21 @@ class LocalPTY(BasePTY):
         os.close(s)
         h_exp = "set -H" if self.hist_exp else "set +H"
         init_sentinel = f"INIT_{os.urandom(4).hex()}"
-        os.write(m, f" stty -echo\n PS1=''; PS2=''; set -m\n {h_exp}\n set -o history\n history -r\n printf '\\x1e{init_sentinel}\\x1f'\n".encode())
+
+        # Inject hooks
+        # preexec: DEBUG trap. Ignore printf to avoid loops.
+        # precmd: PROMPT_COMMAND.
+        hook_init = (
+            f" stty -echo\n"
+            f" PS1=''; PS2=''; set -m\n"
+            f" {h_exp}\n"
+            f" set -o history\n"
+            f" history -r\n"
+            f" trap '[[ \"$BASH_COMMAND\" != \"printf\"* ]] && printf \"\\\\x1eB_%s\\\\x1f\" \"$BASH_COMMAND\"' DEBUG\n"
+            f" export PROMPT_COMMAND='printf \"\\\\x1eE_%s_%s\\\\x1f\" \"$?\" \"$PWD\"'\n"
+            f" printf '\\x1e{init_sentinel}\\x1f'\n"
+        )
+        os.write(m, hook_init.encode())
 
         self.shell_pgid = os.getpgid(self.master_proc.pid)
         self.reader_task = asyncio.create_task(self.reader())
@@ -78,37 +92,40 @@ class LocalPTY(BasePTY):
                         self._init_done.set()
 
                 if self.current_block_id:
-                    # 1. Identify and handle ANY sentinel (\x1eNS_... \x1f)
+                    # Handle Hooks: \x1eB_... \x1f and \x1eE_... \x1f
                     while True:
-                        sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', self._reader_buf)
-                        if not sent_match: break
+                        # Find any hook sentinel
+                        m_hook = re.search(r'\x1e([BE])_(.*?)\x1f', self._reader_buf)
+                        if not m_hook: break
 
-                        # Data before sentinel is real output
-                        pre_data = self._reader_buf[:sent_match.start()]
+                        pre_data = self._reader_buf[:m_hook.start()]
                         if pre_data:
                             await self.broadcast({"type":"output","block_id":self.current_block_id,"data":pre_data,"pty_uid":self.pty_uid})
 
-                        # Is this OUR sentinel?
-                        if self.current_sentinel and f"\x1e{self.current_sentinel}_" in sent_match.group(0):
-                            self.shell_cwd = sent_match.group(2).strip()
-                            await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok" if int(sent_match.group(1))==0 else f"error({sent_match.group(1)})","cwd":self.shell_cwd,"pty_uid":self.pty_uid}})
+                        hook_type = m_hook.group(1)
+                        hook_data = m_hook.group(2)
+
+                        if hook_type == 'B':
+                            # Command started
+                            pass
+                        elif hook_type == 'E':
+                            # Command ended: E_EXITCODE_CWD
+                            parts = hook_data.split('_', 1)
+                            exit_code = parts[0]
+                            self.shell_cwd = parts[1] if len(parts) > 1 else self.shell_cwd
+                            status = "ok" if exit_code == "0" else f"error({exit_code})"
+                            await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":status,"cwd":self.shell_cwd,"pty_uid":self.pty_uid}})
                             self.finished.set()
-                        else:
-                            # Stale sentinel from previous command, just discard it
-                            logging.debug(f"[{self.pty_id}] Discarded stale sentinel: {sent_match.group(0)}")
 
-                        self._reader_buf = self._reader_buf[sent_match.end():]
+                        self._reader_buf = self._reader_buf[m_hook.end():]
 
-                    # 2. Broadcast remaining output, but stay clear of potential partial sentinel
+                    # Broadcast remaining output, avoiding partial sentinels
                     split_idx = self._reader_buf.find('\x1e')
-
                     if split_idx != -1:
                         if split_idx > 0:
                             await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:split_idx],"pty_uid":self.pty_uid})
                             self._reader_buf = self._reader_buf[split_idx:]
-
-                        # If it's not a sentinel prefix or it's too long, broadcast it
-                        if not self._reader_buf.startswith('\x1eNS_') or len(self._reader_buf) > 256:
+                        if len(self._reader_buf) > 512: # Safety flush
                             await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
                             self._reader_buf = ""
                     elif self._reader_buf:
@@ -125,59 +142,24 @@ class LocalPTY(BasePTY):
         cmd = block.get("content").strip()
         self.interrupted.clear()
         self.finished.clear()
-        self.current_pgid = None
         try:
             h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
             os.write(self.master_fd, f" history -s $'{h_cmd}'\n".encode())
 
-            sentinel = f"NS_{os.urandom(4).hex()}"
-            self.current_sentinel = sentinel
+            # Simple direct write. The hooks will handle the rest.
+            os.write(self.master_fd, f" {cmd}\n".encode())
 
-            # Run command directly to preserve state (cd, variables)
-            wrapper = f" {cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
-            os.write(self.master_fd, wrapper.encode())
-
-            # Shared monitoring loop for both local and remote
-            await self._monitor_command(block_id, sentinel)
+            # Monitor via hooks (finished Event is set in reader)
+            await self._monitor_command(block_id)
         finally:
-            self.current_sentinel = None
-            self.current_pgid = None
+            pass
 
-    async def _monitor_command(self, block_id: str, sentinel: str):
-        # Poll PGID until it returns to shell_pgid OR sentinel is received
-        while not self.finished.is_set():
-            # Check for explicitly captured PGID existence first
-            if self.current_pgid:
-                out = await self._run_control_command(["ps", "-o", "pgid=", "-g", str(self.current_pgid)])
-                if not out:
-                    # Process group is gone
-                    await asyncio.sleep(0.25)
-                    if self.finished.is_set(): break
-                    status = "killed" if self.interrupted.is_set() else "done"
-                    await self.broadcast({"type": "update_block", "block": {
-                        "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self.shell_cwd
-                    }})
-                    break
-
-            # Fallback/Safety: Check ALL PGIDs on the TTY
-            pgid_str = await self._run_control_command(["ps", "-t", self.tty_name, "-o", "pgid="])
-            if pgid_str:
-                try:
-                    pgids = [int(line.strip()) for line in pgid_str.splitlines() if line.strip().isdigit()]
-                    is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
-
-                    if not is_user_cmd_running:
-                        # Process group returned to shell
-                        await asyncio.sleep(0.25)
-                        if self.finished.is_set(): break
-                        status = "killed" if self.interrupted.is_set() else "done"
-                        await self.broadcast({"type": "update_block", "block": {
-                            "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self.shell_cwd
-                        }})
-                        break
-                except Exception: pass
-
-            await asyncio.sleep(0.25)
+    async def _monitor_command(self, block_id: str):
+        # Wait for the finished event, which is set in the reader() when E_ sentinel is found
+        try:
+            await self.finished.wait()
+        except asyncio.CancelledError:
+            pass
 
     async def send_input(self, data: str):
         if self.master_fd:

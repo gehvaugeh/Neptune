@@ -61,7 +61,7 @@ class RemotePTY(BasePTY):
             *s_cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
 
-        # Step 3, 4, 5: Get TTY, PGID, CWD and set prompt
+        # Step 3, 4, 5: Get TTY, PGID, CWD and set hooks
         init_sentinel = f"INIT_{os.urandom(4).hex()}"
         init_script = (
             f"stty -echo opost onlcr\n"
@@ -70,7 +70,9 @@ class RemotePTY(BasePTY):
             f"tty\n"
             f"ps -o pgid= -p $$\n"
             f"pwd\n"
-            f"echo '{init_sentinel}'\n"
+            f"trap '[[ \"$BASH_COMMAND\" != \"printf\"* ]] && printf \"\\\\x1eB_%s\\\\x1f\" \"$BASH_COMMAND\"' DEBUG\n"
+            f"export PROMPT_COMMAND='printf \"\\\\x1eE_%s_%s\\\\x1f\" \"$?\" \"$PWD\"'\n"
+            f"printf '\\x1e{init_sentinel}\\x1f'\n"
         )
         self.shell_proc.stdin.write(init_script.encode())
         await self.shell_proc.stdin.drain()
@@ -100,21 +102,14 @@ class RemotePTY(BasePTY):
         block_id = block.get("id")
         cmd = block.get("content").strip()
         self.interrupted.clear()
-        self.current_pgid = None
 
-        sentinel = f"NS_{os.urandom(4).hex()}"
-        # Run command directly to preserve state
-        wrapper = f" {cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
-
-        self.shell_proc.stdin.write(wrapper.encode())
+        # Simple direct write. Hooks will handle monitoring.
+        self.shell_proc.stdin.write(f" {cmd}\n".encode())
         await self.shell_proc.stdin.drain()
-        await self._monitor_command(block_id, sentinel)
+        await self._monitor_command(block_id)
 
-    async def _monitor_command(self, block_id: str, sentinel: str):
+    async def _monitor_command(self, block_id: str):
         buf = ""
-        last_poll_time = 0.0
-        poll_interval = 0.25 # Sweet spot for responsiveness vs overhead
-
         try:
             while True:
                 try:
@@ -122,98 +117,48 @@ class RemotePTY(BasePTY):
                     if not chunk: break
                     buf += chunk.decode(errors="replace")
                 except asyncio.TimeoutError:
+                    # Periodically check if process group returned to shell as fallback
+                    # but only if we've been waiting for a while
                     pass
 
-                now = asyncio.get_running_loop().time()
-                if now - last_poll_time >= poll_interval:
-                    last_poll_time = now
-                    # Check if process is still alive via ps
-                    cmd = self._get_ssh_base(use_socket=True)
-                    cmd.append(f"ps -t {self.remote_tty} -o pgid=")
-                    try:
-                        p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                        out, _ = await p.communicate()
-                        pgids = [int(line.strip()) for line in out.decode().splitlines() if line.strip().isdigit()]
-                        is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
-                        if not is_user_cmd_running:
-                            # Command finished, wait slightly for final output and sentinel
-                            await asyncio.sleep(0.2)
-                            # One last read attempt
-                            try:
-                                chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
-                                if chunk: buf += chunk.decode(errors="replace")
-                            except: pass
-                            break
-                    except: pass
+                # Handle Hooks: \x1eB_... \x1f and \x1eE_... \x1f
+                while True:
+                    m_hook = re.search(r'\x1e([BE])_(.*?)\x1f', buf)
+                    if not m_hook: break
 
-                try:
-                    # 2. Identify and handle ANY sentinel (\x1eNS_... \x1f)
-                    while True:
-                        sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', buf)
-                        if not sent_match: break
+                    pre_data = buf[:m_hook.start()]
+                    if pre_data:
+                        await self.broadcast({"type": "output", "block_id": block_id, "data": pre_data, "pty_uid": self.pty_uid})
 
-                        # Data before sentinel is real output
-                        pre_data = buf[:sent_match.start()]
-                        if pre_data:
-                            await self.broadcast({"type": "output", "block_id": block_id, "data": pre_data, "pty_uid": self.pty_uid})
+                    hook_type = m_hook.group(1)
+                    hook_data = m_hook.group(2)
 
-                        # Is this OUR sentinel?
-                        if f"\x1e{sentinel}_" in sent_match.group(0):
-                            exit_code = int(sent_match.group(1))
-                            self._cwd = sent_match.group(2).strip()
-                            await self.broadcast({"type": "update_block", "block": {
-                                "id": block_id, "status": "ok" if exit_code == 0 else f"error({exit_code})", "pty_uid": self.pty_uid, "cwd": self._cwd
-                            }})
-                            return # Done
-                        else:
-                            # Stale sentinel from previous command, just discard it
-                            logging.debug(f"[{self.pty_id}] Discarded stale sentinel: {sent_match.group(0)}")
+                    if hook_type == 'B':
+                        pass
+                    elif hook_type == 'E':
+                        parts = hook_data.split('_', 1)
+                        exit_code = parts[0]
+                        self._cwd = parts[1] if len(parts) > 1 else self._cwd
+                        status = "ok" if exit_code == "0" else f"error({exit_code})"
+                        await self.broadcast({"type": "update_block", "block": {
+                            "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self._cwd
+                        }})
+                        return # Done
 
-                        buf = buf[sent_match.end():]
+                    buf = buf[m_hook.end():]
 
-                    # 3. Broadcast remaining output, but stay clear of potential partial sentinel
-                    split_idx = buf.find('\x1e')
-
-                    if split_idx != -1:
-                        if split_idx > 0:
-                            await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:split_idx], "pty_uid": self.pty_uid})
-                            buf = buf[split_idx:]
-
-                        # If it's not a sentinel prefix or it's too long, broadcast it
-                        if not buf.startswith('\x1eNS_') or len(buf) > 256:
-                            await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
-                            buf = ""
-                    elif buf:
+                # Broadcast remaining output, avoiding partial sentinels
+                split_idx = buf.find('\x1e')
+                if split_idx != -1:
+                    if split_idx > 0:
+                        await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:split_idx], "pty_uid": self.pty_uid})
+                        buf = buf[split_idx:]
+                    if len(buf) > 512:
                         await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
                         buf = ""
-                except asyncio.TimeoutError:
-                    continue
-
-            # If loop exited via PGID check, broadcast remaining data and final status
-            # But process one last time for sentinel to avoid leakage
-            while True:
-                sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', buf)
-                if not sent_match: break
-                pre_data = buf[:sent_match.start()]
-                if pre_data:
-                    await self.broadcast({"type": "output", "block_id": block_id, "data": pre_data, "pty_uid": self.pty_uid})
-
-                if f"\x1e{sentinel}_" in sent_match.group(0):
-                    exit_code = int(sent_match.group(1))
-                    self._cwd = sent_match.group(2).strip()
-                    await self.broadcast({"type": "update_block", "block": {
-                        "id": block_id, "status": "ok" if exit_code == 0 else f"error({exit_code})", "pty_uid": self.pty_uid, "cwd": self._cwd
-                    }})
-                    return
-                buf = buf[sent_match.end():]
-
-            if buf:
-                await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
-
-            status = "killed" if self.interrupted.is_set() else "done"
-            await self.broadcast({"type": "update_block", "block": {
-                "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self._cwd
-            }})
+                elif buf:
+                    await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
+                    buf = ""
         finally:
             self.current_pgid = None
 
