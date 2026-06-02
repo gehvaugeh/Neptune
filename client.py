@@ -38,7 +38,7 @@ from rich.text import Text
 from rich.style import Style
 from rich.markup import escape
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
+from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input, Checkbox
 from textual.command import Provider, Hit
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, ScrollableContainer
@@ -69,6 +69,7 @@ class NeptuneCommandProvider(Provider):
         matcher = self.matcher(query)
         commands = [
             ("PTY Manager", "spawn_pty_manager", "Open PTY Manager overlay"),
+            ("Change Block PTY", "change_pty", "Change target PTY of selected command block"),
             ("Export Notebook", "save_notebook_dialog", "Save current session as Markdown"),
             ("Import Notebook", "import_notebook_dialog", "Load blocks from Markdown"),
             ("Clear Session", "clear_session", "Remove all blocks and reset server state"),
@@ -96,6 +97,7 @@ class SaveNotebookModal(ModalScreen):
         with Vertical(id="modal_dialog"):
             yield Label("[bold cyan]Notebook exportieren (.md)[/]")
             yield Input(placeholder="dateiname.md", id="file_name", value=f"session_{int(time.time())}.md")
+            yield Checkbox("Include Output", value=True, id="include_output")
             with Horizontal(id="modal_buttons"):
                 yield Button("Abbrechen", variant="error", id="cancel")
                 yield Button("Exportieren", variant="success", id="export")
@@ -105,13 +107,15 @@ class SaveNotebookModal(ModalScreen):
     def export(self):
         name = self.query_one("#file_name").value
         if not name.endswith(".md"): name += ".md"
-        self.dismiss(name)
+        include_output = self.query_one("#include_output").value
+        self.dismiss((name, include_output))
 
 class ImportNotebookModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
             yield Label("[bold magenta]Notebook importieren (.md)[/]")
             yield Input(placeholder="dateiname.md", id="file_name")
+            yield Checkbox("Include Output", value=True, id="include_output")
             with Horizontal(id="modal_buttons"):
                 yield Button("Abbrechen", variant="error", id="cancel")
                 yield Button("Importieren", variant="success", id="import")
@@ -119,7 +123,9 @@ class ImportNotebookModal(ModalScreen):
     def cancel(self): self.dismiss(None)
     @on(Button.Pressed, "#import")
     def import_nb(self):
-        self.dismiss(self.query_one("#file_name").value)
+        name = self.query_one("#file_name").value
+        include_output = self.query_one("#include_output").value
+        self.dismiss((name, include_output))
 
 
 class SaveWorkflowModal(ModalScreen):
@@ -323,7 +329,8 @@ class CommandBlock(BaseBlock):
             yield Label(f"{header_text}\n[white]{escape(self.content)}[/]", id="cmd_label", classes=label_classes)
             yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="bash")
         yield Static("", id="output", classes="block-output", markup=False)
-        yield Label(f"[grey44]Ready[/] [cyan][{self.pty_name} (ID:{self.pty_uid})][/]", id="info", classes="block-info")
+        pty_id_display = str(self.pty_uid) if self.pty_uid is not None else "???"
+        yield Label(f"[grey44]Ready[/] [cyan][{self.pty_name} (ID:{pty_id_display})][/]", id="info", classes="block-info")
 
     def on_resize(self, event: events.Resize) -> None:
         # Fixed size TTY, no automatic resizing to match widget size
@@ -506,6 +513,13 @@ class CommandBlock(BaseBlock):
         self._style_cache[cache_key] = (style, is_err)
         return style
 
+    def update_header(self):
+        if not self.is_mounted: return
+        label = self.query_one("#cmd_label")
+        header_text = f"[bold blue]{escape(self.cwd)}[/]"
+        header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
+        label.update(f"{header_text}\n[white]{escape(self.content)}[/]")
+
     def update_status(self, status):
         if not self.is_mounted: return
         info = self.query_one("#info")
@@ -535,7 +549,8 @@ class CommandBlock(BaseBlock):
             icon += " [interactive] TUI"
 
         # Show PTY Name and UID in info bar
-        pty_info = f" [cyan][{self.pty_name} (ID:{self.pty_uid})][/]"
+        pty_id_display = str(self.pty_uid) if self.pty_uid is not None else "???"
+        pty_info = f" [cyan][{self.pty_name} (ID:{pty_id_display})][/]"
         display_text = f"{self._last_status_text}{icon}{pty_info}"
 
         if self._color_error:
@@ -577,10 +592,7 @@ class CommandBlock(BaseBlock):
                     edit.text = self.content
                     await self.app_ref.send_message({"type": "edit_cancel", "block_id": self.block_id})
 
-            header_text = f"[bold blue]{escape(self.cwd)}[/]"
-            if self.pty_uid != 0 or self.pty_name != "local-0":
-                header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
-            label.update(f"{header_text}\n[white]{escape(self.content)}[/]")
+            self.update_header()
             label.remove_class("hidden")
             edit.add_class("hidden")
             if not remote:
@@ -868,9 +880,7 @@ class ClientApp(App):
                        block.query_one("#md_render").update(block.content)
                        block.query_one("#block_text_edit").text = block.content
                    else:
-                       header_text = f"[bold blue]{escape(block.cwd)}[/]"
-                       header_text = f"[bold cyan][{escape(block.pty_name)}][/] {header_text}"
-                       block.query_one("#cmd_label").update(f"{header_text}\n[white]{escape(block.content)}[/]")
+                       block.update_header()
                        block.query_one("#block_text_edit").text = block.content
 
         elif msg_type == "output":
@@ -1256,17 +1266,58 @@ class ClientApp(App):
             self.enter_normal_mode()
 
     async def handle_internal_command(self, cmd_line):
-        parts = cmd_line.split(" ", 1)
-        cmd, args = parts[0], parts[1] if len(parts) > 1 else ""
+        parts = cmd_line.split()
+        if not parts: return
+        cmd = parts[0]
+        args = parts[1:]
+
         if cmd == "ptyman":
             self.action_spawn_pty_manager()
-        elif cmd == "export": self.export_notebook(args or f"session_{int(time.time())}.md")
-        elif cmd == "import": await self.import_notebook(args)
+        elif cmd == "export":
+            filename = args[0] if args else f"session_{int(time.time())}.md"
+            include_output = "no-output" not in args
+            self.export_notebook((filename, include_output))
+        elif cmd == "import":
+            if not args:
+                self.notify("Usage: import <filename> [no-output]", severity="error")
+                return
+            filename = args[0]
+            include_output = "no-output" not in args
+            await self.import_notebook((filename, include_output))
         elif cmd == "exit": self.exit()
         elif cmd == "save_wf": self.action_save_workflow(self.query_one("#main_input").text)
         elif cmd == "clear": await self.send_message({"type": "clear_session"})
         elif cmd == "help": self.notify("Commands: pty [new|kill|list], spawnpty, export [file], import [file], exit, save_wf, clear, help")
         else: self.notify(f"Unknown command: {cmd}", severity="error")
+
+    def action_change_pty(self):
+        focused = self.focused
+        while focused and not isinstance(focused, BaseBlock):
+            focused = focused.parent
+
+        if not focused and self.last_selected_block_id:
+            focused = self.blocks.get(self.last_selected_block_id)
+
+        if not focused or not isinstance(focused, CommandBlock):
+            self.notify("no command block selected", severity="warning")
+            return
+
+        def _handle_change_result(res):
+            if not res: return
+            if res.get("action") == "select":
+                uid = res.get("uid")
+                focused.pty_uid = uid
+                focused.pty_name = self.ptys.get(uid, {}).get("name", f"pty-{uid}")
+                focused.update_header()
+                focused.update_status(getattr(focused, "_last_status", "ready"))
+                asyncio.create_task(self.send_message({
+                    "type": "run_block",
+                    "block_id": focused.block_id,
+                    "pty_uid": uid,
+                    "only_update": True # Hint to server to just update block without running
+                }))
+
+        self.push_screen(PTYManagerModal(self.ptys, self.default_pty_uid), _handle_change_result)
 
     def action_spawn_pty_manager(self):
         if self.input_mode == "SELECTION":
@@ -1319,7 +1370,9 @@ class ClientApp(App):
 
         await self.send_message({"type": "run_block", "block_id": block.block_id, "pty_uid": uid})
 
-    def export_notebook(self, filename: str):
+    def export_notebook(self, data):
+        if not data: return
+        filename, include_output = data if isinstance(data, tuple) else (data, True)
         if not filename: return
         md_output = [f"# Shell Notebook Export - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
 
@@ -1328,29 +1381,50 @@ class ClientApp(App):
         for block in container.children:
             if isinstance(block, NoteBlock): md_output.append(f"{block.content}\n")
             elif isinstance(block, CommandBlock):
-                md_output.append(f"```bash\n{block.content}\n```\n")
-                if block.output.strip():
+                pty_uid_export = block.pty_uid if block.pty_uid is not None else 0
+                md_output.append(f"```bash (uid:{pty_uid_export})\n{block.content}\n```\n")
+                if include_output and block.output:
                     clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.output)
-                    md_output.append(f"```text\n{clean.strip()}\n```\n")
+                    if clean.strip():
+                        # Use rstrip to keep leading indentation but remove trailing empty lines
+                        md_output.append(f"```text\n{clean.rstrip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
             self.notify(f"Notebook Saved: {filename}", severity="information")
         except Exception as e: self.notify(f"Save Error: {e}", severity="error")
 
-    async def import_notebook(self, filename: str):
+    async def import_notebook(self, data):
+        if not data: return
+        filename, include_output = data if isinstance(data, tuple) else (data, True)
         if not filename or not os.path.exists(filename): return
         try:
             with open(filename, "r") as f: content = f.read()
-            pattern = re.compile(r'```(bash|text)\n(.*?)\n```', re.DOTALL)
+            pattern = re.compile(r'```(bash|text)(?:\s*\((.*?)\))?\n(.*?)\n```', re.DOTALL)
             last_pos, new_blocks = 0, []
             for match in pattern.finditer(content):
                 before = content[last_pos:match.start()].strip()
                 if before:
                     lines = [l for l in before.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
                     if clean_before := "\n".join(lines).strip(): new_blocks.append({"type": "NOTE", "content": clean_before})
-                lang, code = match.groups()
-                if lang == "bash": new_blocks.append({"type": "CMD", "content": code, "cwd": os.getcwd()})
-                elif lang == "text" and new_blocks and new_blocks[-1]["type"] == "CMD": new_blocks[-1]["output"] = code
+                lang, metadata, code = match.groups()
+                if lang == "bash":
+                    pty_uid = 0
+                    if metadata and 'uid:' in metadata:
+                        m = re.search(r'uid:(\d+)', metadata)
+                        if m:
+                            pty_uid = int(m.group(1))
+                            if pty_uid != 0: pty_uid = None
+                        else:
+                            pty_uid = None # (uid:something) present but not int? default to none
+                    else:
+                        # No uid metadata at all
+                        pty_uid = 0
+                    new_blocks.append({"type": "CMD", "content": code, "cwd": os.getcwd(), "pty_uid": pty_uid})
+                elif lang == "text" and include_output and new_blocks and new_blocks[-1]["type"] == "CMD":
+                    # pyte expects \r\n for proper line breaks from a raw feed usually,
+                    # but here we are restoring saved output.
+                    # Normalize and ensure newlines are clean.
+                    new_blocks[-1]["output"] = code.replace("\r\n", "\n").replace("\n", "\r\n")
                 last_pos = match.end()
             if clean_after := "\n".join([l for l in content[last_pos:].splitlines() if not l.strip().startswith("# Shell Notebook Export")]).strip():
                 new_blocks.append({"type": "NOTE", "content": clean_after})
@@ -1517,7 +1591,7 @@ class ClientApp(App):
 
         msg = {
             "type": "pty.create.remote",
-            "name": h,
+            "name": None, # Let server generate unique name host-UID
             "ssh_config": {"host": h, "user": u, "port": res.get("port", "22")}
         }
         if res.get("method") == "key":
@@ -1648,9 +1722,10 @@ class ClientApp(App):
                  self.last_selected_block_id = blocks[new_idx].block_id
             elif event.key == "x": asyncio.create_task(self.action_delete_block())
             elif event.key == "r": self.run_worker(self._rerun_block(focused))
+            elif event.key == "c": self.action_change_pty()
             elif event.key == "y":
                  if isinstance(focused, NoteBlock): self.yank_buffer = ("NOTE", focused.content); self.notify("Note yanked")
-                 elif isinstance(focused, CommandBlock): self.yank_buffer = ("CMD", focused.content, focused.cwd); self.notify("Command yanked")
+                 elif isinstance(focused, CommandBlock): self.yank_buffer = ("CMD", focused.content, focused.cwd, focused.pty_uid); self.notify("Command yanked")
             elif event.key == "p":
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "after", "yank_data": self.yank_buffer}))
             elif event.key == "P":

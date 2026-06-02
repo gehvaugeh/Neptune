@@ -9,11 +9,14 @@ from test_driver import NeptuneOracle
 def run_tests():
     results = []
     perf_metrics = {}
+    # Use absolute path for the socket to avoid relative path mismatches
+    # between the test runner and the Neptune process.
     socket_path = os.path.abspath("test.sock")
     if os.path.exists(socket_path):
         try: os.remove(socket_path)
         except: pass
 
+    # main.py is in the root directory
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     main_path = os.path.join(root_dir, "main.py")
     cmd = f"python3 {main_path} all --clean-history -s {socket_path}"
@@ -65,24 +68,61 @@ def run_tests():
             perf_metrics["BASH Echo Latency"] = time.time() - start_time
 
         # 3. Internal Help
+        print("Testing Internal Help...")
         oracle.send_input("<esc><esc>:help <return>")
         assert_screen("Commands:", "Internal Help Command")
 
         # 4. NOTE creation
+        print("Testing Note...")
         oracle.send_input("<esc><esc>;NoteMarker <return>")
         assert_screen("NoteMarker", "Create Note")
 
         # 5. Clear screen
+        print("Cleaning up...")
         oracle.send_input("<esc><esc>:clear <return>")
-        oracle.wait_for_idle(2.0)
+        oracle.wait_for_idle(4.0)
 
         # 6. Selection Navigation & Deletion
+        print("Testing Selection Mode...")
         oracle.send_input("<esc><esc>!echo AAA <return>")
         assert_screen("AAA", "Setup AAA")
         oracle.send_input("s")
         assert_screen("MODE: SELECTION", "Enter Selection Mode")
         oracle.send_input("x")
         assert_not_on_screen("AAA", "Delete block via Selection Mode")
+
+        # 7. Block Reordering
+        print("Testing Reordering...")
+        oracle.send_input("<esc><esc>!echo MoveMe <return>")
+        assert_screen("MoveMe", "Setup MoveMe")
+        oracle.send_input("s")
+        oracle.wait_for_idle(0.5)
+        oracle.send_input("<ctrl+up>")
+        oracle.wait_for_idle(2.0)
+        assert_screen("MODE: SELECTION", "Reorder block (Ctrl+Up)")
+
+        # 8. Autocomplete
+        print("Testing Autocomplete...")
+        oracle.send_input("<esc><esc>!ls <tab>")
+        assert_screen("PATH:", "Path Autocomplete Visibility")
+        oracle.send_input("<esc><esc>")
+
+        # 9. Yank & Paste
+        print("Testing Yank & Paste...")
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(4.0)
+        oracle.send_input("<esc><esc>!echo YankMe <return>")
+        assert_screen("YankMe", "Setup YankMe")
+        oracle.send_input("sy") # Select & Yank
+        oracle.wait_for_idle(0.5)
+        oracle.send_input("p")  # Paste After
+        oracle.wait_for_idle(2.0)
+        oracle.feed_stream()
+        snapshot = oracle.get_screen_snapshot()
+        if snapshot.count("YankMe") >= 2:
+            record("Yank and Paste block", "PASS")
+        else:
+            record("Yank and Paste block", "FAIL", "Duplicated content not found")
 
     except Exception as e:
         record("Test Suite Execution", "ERROR", str(e))
@@ -104,16 +144,17 @@ def generate_report(results, perf_metrics):
         emoji = "✅" if r["result"] == "PASS" else "❌" if r["result"] == "FAIL" else "⚠️"
         report += f"| {r['description']} | {emoji} {r['result']} | {r['details']} |\n"
 
-    report += "\n## Performance Metrics\n\n"
-    report += "| Metric | Value |\n"
-    report += "|--------|-------|\n"
-    for metric, value in perf_metrics.items():
-        report += f"| {metric} | {value:.4f}s |\n"
+    if perf_metrics:
+        report += "\n## Performance Metrics\n\n"
+        report += "| Metric | Value |\n"
+        report += "|--------|-------|\n"
+        for metric, value in perf_metrics.items():
+            report += f"| {metric} | {value:.4f}s |\n"
     return report
 
 if __name__ == "__main__":
-    results, metrics = run_tests()
+    test_results, perf_metrics = run_tests()
     report_path = os.path.join(os.path.dirname(__file__), "blackbox_test_results.md")
     with open(report_path, "w") as f:
-        f.write(generate_report(results, metrics))
+        f.write(generate_report(test_results, perf_metrics))
     print(f"\nBlackbox testing complete. Report: {report_path}")
