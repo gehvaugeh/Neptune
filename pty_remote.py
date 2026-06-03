@@ -147,7 +147,8 @@ class RemotePTY(BasePTY):
             # Drain any stray output
             while True:
                 try:
-                    await asyncio.wait_for(self.shadow_proc.stdout.read(4096), timeout=0.01)
+                    data = await asyncio.wait_for(self.shadow_proc.stdout.read(4096), timeout=0.01)
+                    if not data: break
                 except:
                     break
 
