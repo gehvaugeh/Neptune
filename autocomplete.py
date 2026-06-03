@@ -58,6 +58,7 @@ class ShadowShellProvider(AutocompleteProvider):
         future = asyncio.get_event_loop().create_future()
         app._autocomplete_futures[request_id] = future
 
+        logging.debug(f"ShadowShellProvider: Sending request {request_id}")
         await app.send_message({
             "type": "autocomplete_query",
             "pty_uid": pty_uid,

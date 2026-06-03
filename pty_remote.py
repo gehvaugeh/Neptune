@@ -136,45 +136,50 @@ class RemotePTY(BasePTY):
 
     async def sync_shadow_state(self, cmd: str):
         if self.shadow_proc and self.shadow_proc.stdin and self._is_state_changing(cmd):
-            self.shadow_proc.stdin.write(f" {cmd}\n".encode())
-            await self.shadow_proc.stdin.drain()
+            async with self.shadow_lock:
+                self.shadow_proc.stdin.write(f" {cmd}\n".encode())
+                await self.shadow_proc.stdin.drain()
 
     async def get_completions(self, query: str) -> list[str]:
         if not self.shadow_proc or not self.shadow_proc.stdin: return []
 
-        # Drain any stray output
-        while True:
-            try:
-                await asyncio.wait_for(self.shadow_proc.stdout.read(4096), timeout=0.02)
-            except:
-                break
-
-        sentinel = f"COMP_{os.urandom(4).hex()}"
-
-        # Robust tokenization: find the last token
-        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', query)
-        token = parts[-1] if parts and not query.endswith(" ") else ""
-        q_token = shlex.quote(token)
-
-        if " " in query.strip():
-            comp_cmd = f"compgen -f -- {q_token}; echo {sentinel}\n"
-        else:
-            comp_cmd = f"compgen -c -- {q_token}; compgen -f -- {q_token}; echo {sentinel}\n"
-
-        self.shadow_proc.stdin.write(comp_cmd.encode())
-        await self.shadow_proc.stdin.drain()
-
-        results = []
-        try:
+        async with self.shadow_lock:
+            # Drain any stray output
             while True:
-                line = await asyncio.wait_for(self.shadow_proc.stdout.readline(), timeout=3.0)
-                line = line.decode().strip()
-                if line == sentinel: break
-                if line: results.append(line)
-        except asyncio.TimeoutError:
-            logging.warning(f"[{self.pty_id}] Autocomplete timeout (remote)")
+                try:
+                    await asyncio.wait_for(self.shadow_proc.stdout.read(4096), timeout=0.01)
+                except:
+                    break
 
-        return sorted(list(set(results)))
+            sentinel = f"COMP_{os.urandom(4).hex()}"
+
+            # Robust tokenization: find the last token
+            parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', query)
+            token = parts[-1] if parts and not query.endswith(" ") else ""
+            q_token = shlex.quote(token)
+
+            if " " in query.strip():
+                comp_cmd = f"compgen -f -- {q_token}; echo {sentinel}\n"
+            else:
+                comp_cmd = f"compgen -c -- {q_token}; compgen -f -- {q_token}; echo {sentinel}\n"
+
+            self.shadow_proc.stdin.write(comp_cmd.encode())
+            await self.shadow_proc.stdin.drain()
+
+            results = []
+            try:
+                while True:
+                    line = await asyncio.wait_for(self.shadow_proc.stdout.readline(), timeout=2.0)
+                    if not line: break
+                    line = line.decode().strip()
+                    if line == sentinel: break
+                    if line: results.append(line)
+            except asyncio.TimeoutError:
+                logging.warning(f"[{self.pty_id}] Autocomplete timeout (remote) after reading {len(results)} items")
+            except Exception as e:
+                logging.error(f"[{self.pty_id}] ShadowShell remote read error: {e}")
+
+            return sorted(list(set(results)))
 
     async def _monitor_command(self, block_id: str, sentinel: str):
         buf = ""

@@ -6,6 +6,7 @@ class BasePTY(ABC):
     def __init__(self, pty_uid: int, pty_id: str):
         self.pty_uid = pty_uid
         self.pty_id = pty_id
+        self.shadow_lock = asyncio.Lock()
         self.queue: asyncio.Queue = asyncio.Queue()
         self.mode: Literal["sentinel", "interactive"] = "sentinel"
         self.current_block_id: Optional[str] = None
