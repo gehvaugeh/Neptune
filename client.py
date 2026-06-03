@@ -660,9 +660,11 @@ class ClientApp(App):
         with Vertical(id="bottom_dock") as dock:
             dock.can_focus = True
             yield OptionList(id="palette")
-            self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
-            self.mode_label.tooltip = "Current interaction mode (NORMAL, BASH, CMD, NOTE, SELECTION, BLOCKEDIT)"
-            yield self.mode_label
+            with Horizontal(id="dock_status_bar"):
+                self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
+                self.mode_label.tooltip = "Current interaction mode (NORMAL, BASH, CMD, NOTE, SELECTION, BLOCKEDIT)"
+                yield self.mode_label
+                yield Label("⟳", id="autocomplete_spinner", classes="hidden")
             with Horizontal(id="input_container"):
                 yield Label("", id="mode_prefix")
                 self.user_label = Label(f"User: [bold {self.user_color}]Me[/]", id="user_indicator")
@@ -1428,6 +1430,7 @@ class ClientApp(App):
     @work(exclusive=True)
     async def update_palette(self, val: str):
         p = self.query_one("#palette")
+        spinner = self.query_one("#autocomplete_spinner")
         if self.input_mode == "CONTROL":
              p.clear_options()
              p.remove_class("visible")
@@ -1439,8 +1442,8 @@ class ClientApp(App):
             p.clear_options()
             p.remove_class("visible"); return
 
-        # Show loading indicator if it's taking time
-        # For simplicity, we just clear and wait for results
+        # Show loading indicator
+        spinner.remove_class("hidden")
 
         context = {
             "app": self,
@@ -1450,7 +1453,10 @@ class ClientApp(App):
             "pty_uid": getattr(self, "current_pty_uid", self.default_pty_uid)
         }
 
-        suggestions = await provider.get_suggestions(val, context)
+        try:
+            suggestions = await provider.get_suggestions(val, context)
+        finally:
+            spinner.add_class("hidden")
 
         p.clear_options()
         type_colors = {"shell": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252", "path": "green"}

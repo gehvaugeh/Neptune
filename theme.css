@@ -71,11 +71,21 @@ ModalScreen {
 }
 
 #mode_indicator {
-    width: 1fr;
+    width: auto;
     padding: 0 1;
     height: 1;
     text-style: bold;
     color: $neptune-primary;
+}
+
+#dock_status_bar {
+    height: 1;
+    width: 100%;
+}
+
+#autocomplete_spinner {
+    color: $success;
+    text-style: bold;
 }
 
 /* Block-Struktur für Notebook-Feeling */
