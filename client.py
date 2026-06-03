@@ -621,6 +621,7 @@ class ClientApp(App):
         self.count_str = ""
         self.last_escape_time = 0
         self._autocomplete_futures = {}
+        self._last_suggestions = []
 
         # PTY State
         self.ptys: Dict[int, Dict] = {
@@ -1431,6 +1432,7 @@ class ClientApp(App):
     async def update_palette(self, val: str):
         p = self.query_one("#palette")
         spinner = self.query_one("#autocomplete_spinner")
+        self._last_suggestions = []
         if self.input_mode == "CONTROL":
              p.clear_options()
              p.remove_class("visible")
@@ -1442,8 +1444,18 @@ class ClientApp(App):
             p.clear_options()
             p.remove_class("visible"); return
 
-        # Show loading indicator
+        # Show and animate loading indicator
         spinner.remove_class("hidden")
+        frames = ["⟳", "⟲", "⟱", "⟴"] # Simple rotating effect
+
+        async def animate_spinner():
+            i = 0
+            while not spinner.has_class("hidden"):
+                spinner.update(frames[i % len(frames)])
+                i += 1
+                await asyncio.sleep(0.1)
+
+        anim_task = asyncio.create_task(animate_spinner())
 
         context = {
             "app": self,
@@ -1457,6 +1469,7 @@ class ClientApp(App):
             suggestions = await provider.get_suggestions(val, context)
         finally:
             spinner.add_class("hidden")
+            anim_task.cancel()
 
         p.clear_options()
         type_colors = {"shell": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252", "path": "green"}
@@ -1474,7 +1487,7 @@ class ClientApp(App):
             p.remove_class("visible")
             p.styles.height = 0
 
-    async def sync_input(self):
+    def sync_input(self):
         p = self.query_one("#palette")
         if p.highlighted is None: return
         opt = p.get_option_at_index(p.highlighted)
@@ -1485,31 +1498,28 @@ class ClientApp(App):
             provider = self.providers[self.input_mode]
             bash_prov = provider if self.input_mode == "BASH" else provider.bash_provider
 
-            # Check if selection is a path. Path completion uses token replacement.
-            # History, Workflow, and Cmd types use full replacement.
-            is_path = False
+            # Check if selection is a shell result (path/cmd). These use token replacement.
+            # History and Workflow types use full replacement.
+            is_token_replace = False
             try:
-                # Retrieve the actual suggestion object to check its type
-                context = {"history": self.history.cache, "workflows": self.workflows, "cwd": os.getcwd()}
-                sugs = provider.get_suggestions(inp.text, context)
-                for s in sugs:
-                    if s.get("value") == val and s.get("type") == "path":
-                        is_path = True; break
+                for s in self._last_suggestions:
+                    if s.get("value") == val and s.get("type") in ("shell", "path"):
+                        is_token_replace = True; break
             except: pass
 
             token = bash_prov._get_current_token(inp.text)
-            if is_path and token:
+            if is_token_replace and token:
                 idx = inp.text.rfind(token)
                 inp.text = inp.text[:idx] + val
             else:
-                inp.text = val # Full replacement for history/workflows
+                inp.text = val # Full replacement for history/workflows/commands
         else:
             inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
 
     @on(OptionList.OptionSelected, "#palette")
-    async def opt_sel(self, event):
-        await self.sync_input()
+    def opt_sel(self, event):
+        self.sync_input()
         p = self.query_one("#palette")
         p.remove_class("visible")
         p.styles.height = 0
@@ -1703,13 +1713,13 @@ class ClientApp(App):
             elif event.key in ("up", "down") and vis:
                 event.prevent_default()
                 p.highlighted = max(0, min(p.option_count-1, (p.highlighted or 0) + (-1 if event.key == "up" else 1)))
-                asyncio.create_task(self.sync_input())
+                self.sync_input()
             elif event.key == "tab":
                 event.prevent_default()
                 if not vis:
                     self.update_palette(inp.text)
                 else:
-                    asyncio.create_task(self.sync_input())
+                    self.sync_input()
                     p.remove_class("visible")
                     p.styles.height = 0
         elif self.input_mode == "SELECTION":

@@ -57,7 +57,8 @@ class LocalPTY(BasePTY):
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env)
 
         shadow_init_sentinel = f"SHADOW_INIT_{os.urandom(4).hex()}"
-        self.shadow_proc.stdin.write(f"{init_rc} echo {shadow_init_sentinel}\n".encode())
+        # Set stty -echo to prevent command echoing in shadow shell
+        self.shadow_proc.stdin.write(f" stty -echo\n {init_rc} echo {shadow_init_sentinel}\n".encode())
         await self.shadow_proc.stdin.drain()
 
         # Wait for shadow shell initialization
@@ -187,7 +188,7 @@ class LocalPTY(BasePTY):
         while True:
             try:
                 # Use a small timeout to non-blockingly drain
-                await asyncio.wait_for(self.shadow_proc.stdout.read(4096), timeout=0.05)
+                await asyncio.wait_for(self.shadow_proc.stdout.read(4096), timeout=0.02)
             except:
                 break
 
@@ -196,17 +197,18 @@ class LocalPTY(BasePTY):
         # We use a unique sentinel to capture the output
         sentinel = f"COMP_{os.urandom(4).hex()}"
 
-        # Robust tokenization: find the last token
-        try:
-            parts = shlex.split(query, posix=True) if query else []
-            token = parts[-1] if parts and not query.endswith(" ") else ""
-        except ValueError:
-            # Fallback for unbalanced quotes
-            token = query.split()[-1] if query and not query.endswith(" ") else ""
-
+        # Robust tokenization to find the last token
+        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', query)
+        token = parts[-1] if parts and not query.endswith(" ") else ""
         q_token = shlex.quote(token)
 
-        comp_cmd = f"compgen -c -- {q_token}; compgen -f -- {q_token}; echo {sentinel}\n"
+        # If the query contains a space, we are likely looking for files, not commands
+        # BUT compgen -c is good for finding executables in the path.
+        if " " in query.strip():
+            comp_cmd = f"compgen -f -- {q_token}; echo {sentinel}\n"
+        else:
+            comp_cmd = f"compgen -c -- {q_token}; compgen -f -- {q_token}; echo {sentinel}\n"
+
         self.shadow_proc.stdin.write(comp_cmd.encode())
         await self.shadow_proc.stdin.drain()
 

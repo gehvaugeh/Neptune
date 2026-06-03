@@ -90,13 +90,19 @@ class BashAutocompleteProvider(AutocompleteProvider):
         for r in results:
             all_suggestions.extend(r)
 
+        # Robust tokenization: find the last token
+        token = self._get_current_token(query)
+
         # Match scoring and sorting
         def score(s):
-            # Prioritize exact matches and shorter values
+            # Prioritize exact matches and shorter values relative to the TOKEN
             val = s['value'].lower()
-            q = query.lower()
+            q = token.lower() if token else query.lower()
+            if not q: return 2
+
+            # If the suggestion contains the query token at the end (for paths)
             if val == q: return 0
-            if val.startswith(q): return 1
+            if val.startswith(q) or val.endswith(f"/{q}"): return 1
             return 2
 
         all_suggestions.sort(key=lambda s: (score(s), len(s['value'])))

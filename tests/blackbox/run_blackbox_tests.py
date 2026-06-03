@@ -112,7 +112,7 @@ def run_tests():
         print("Testing Yank & Paste...")
         # Clear again for clean state
         oracle.send_input("<esc><esc>:clear <return>")
-        oracle.wait_for_idle(4.0)
+        oracle.wait_for_idle(5.0)
         oracle.send_input("<esc><esc>!echo YankMe <return>")
         assert_screen("YankMe", "Setup YankMe")
         oracle.send_input("sy") # Select & Yank

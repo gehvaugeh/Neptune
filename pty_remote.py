@@ -84,7 +84,8 @@ class RemotePTY(BasePTY):
             f"echo '{init_sentinel}'\n"
         )
         # Also initialize shadow shell
-        self.shadow_proc.stdin.write(init_rc.encode())
+        # Set stty -echo to prevent command echoing in shadow shell
+        self.shadow_proc.stdin.write(f" stty -echo\n {init_rc}".encode())
         await self.shadow_proc.stdin.drain()
         self.shell_proc.stdin.write(init_script.encode())
         await self.shell_proc.stdin.drain()
@@ -140,18 +141,26 @@ class RemotePTY(BasePTY):
 
     async def get_completions(self, query: str) -> list[str]:
         if not self.shadow_proc or not self.shadow_proc.stdin: return []
+
+        # Drain any stray output
+        while True:
+            try:
+                await asyncio.wait_for(self.shadow_proc.stdout.read(4096), timeout=0.02)
+            except:
+                break
+
         sentinel = f"COMP_{os.urandom(4).hex()}"
 
         # Robust tokenization: find the last token
-        try:
-            parts = shlex.split(query, posix=True) if query else []
-            token = parts[-1] if parts and not query.endswith(" ") else ""
-        except ValueError:
-            token = query.split()[-1] if query and not query.endswith(" ") else ""
-
+        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', query)
+        token = parts[-1] if parts and not query.endswith(" ") else ""
         q_token = shlex.quote(token)
 
-        comp_cmd = f"compgen -c -- {q_token}; compgen -f -- {q_token}; echo {sentinel}\n"
+        if " " in query.strip():
+            comp_cmd = f"compgen -f -- {q_token}; echo {sentinel}\n"
+        else:
+            comp_cmd = f"compgen -c -- {q_token}; compgen -f -- {q_token}; echo {sentinel}\n"
+
         self.shadow_proc.stdin.write(comp_cmd.encode())
         await self.shadow_proc.stdin.drain()
 
