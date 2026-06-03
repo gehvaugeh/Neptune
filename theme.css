@@ -185,15 +185,17 @@ NoteBlock {
 /* Autocomplete Palette - Expanding Upwards */
 #palette {
     display: none;
-    max-height: 12;
+    height: 0;
+    max-height: 5;
     background: $bg-block;
-    border-top: solid $border;
+    border: none;
     color: $text-main;
     scrollbar-gutter: stable;
 }
 
 #palette.visible {
     display: block;
+    border-bottom: solid $border;
 }
 
 #bottom_dock {
@@ -201,7 +203,7 @@ NoteBlock {
 }
 
 #palette {
-    dock: top;
+    /* No dock: top; let it be part of the vertical flow */
 }
 
 #palette > .option-list--option {

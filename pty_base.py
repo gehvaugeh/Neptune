@@ -47,3 +47,13 @@ class BasePTY(ABC):
     @abstractmethod
     async def resize(self, rows: int, cols: int) -> None:
         pass
+
+    @abstractmethod
+    async def sync_shadow_state(self, cmd: str) -> None:
+        """Propagate state-changing commands to the shadow shell."""
+        pass
+
+    @abstractmethod
+    async def get_completions(self, query: str) -> list[str]:
+        """Query the shadow shell for completions using compgen."""
+        pass

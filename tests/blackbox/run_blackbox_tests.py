@@ -104,7 +104,8 @@ def run_tests():
         # 8. Autocomplete
         print("Testing Autocomplete...")
         oracle.send_input("<esc><esc>!ls <tab>")
-        assert_screen("PATH:", "Path Autocomplete Visibility")
+        # The new provider uses 'SHELL:' instead of 'PATH:' for shadow shell results
+        assert_screen("SHELL:", "Path Autocomplete Visibility")
         oracle.send_input("<esc><esc>")
 
         # 9. Yank & Paste

@@ -241,6 +241,20 @@ class Server:
                         await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                 elif msg_type == "pty.list":
                     await self.session_manager.send_to_client(writer, json.dumps({"type":"pty.list", "ptys":self.pty_manager.list_ptys()}).encode()+b"\n", user_id)
+                elif msg_type == "autocomplete_query":
+                    uid = msg.get("pty_uid", 0)
+                    query = msg.get("query", "")
+                    request_id = msg.get("request_id")
+
+                    try: uid = int(uid)
+                    except: uid = 0
+
+                    results = []
+                    if uid in self.pty_manager.ptys:
+                        results = await self.pty_manager.ptys[uid].get_completions(query)
+
+                    resp = {"type": "autocomplete_response", "results": results, "request_id": request_id}
+                    await self.session_manager.send_to_client(writer, json.dumps(resp).encode() + b"\n", user_id)
         except: pass
         finally:
             if writer in self.session_manager.clients: del self.session_manager.clients[writer]

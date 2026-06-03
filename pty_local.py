@@ -1,4 +1,4 @@
-import asyncio, os, pty, termios, struct, fcntl, signal, re, logging
+import asyncio, os, pty, termios, struct, fcntl, signal, re, logging, shlex
 from typing import Optional, Callable, Awaitable
 from pty_base import BasePTY
 from common import HISTORY_FILE, get_shell
@@ -11,6 +11,7 @@ class LocalPTY(BasePTY):
         self.broadcast, self.hist_exp = broadcast, hist_exp
         self.master_fd: Optional[int] = None
         self.master_proc: Optional[asyncio.subprocess.Process] = None
+        self.shadow_proc: Optional[asyncio.subprocess.Process] = None
         self.shell_pgid: Optional[int] = None
         self.tty_name: Optional[str] = None
         self.reader_task: Optional[asyncio.Task] = None
@@ -41,13 +42,35 @@ class LocalPTY(BasePTY):
         env = {**os.environ, "PS1": "", "PS2": "", "PROMPT_COMMAND": "", "TERM": "xterm-256color",
                "COLORTERM": "truecolor", "HISTFILE": HISTORY_FILE, "HISTCONTROL": "ignorespace",
                "HISTSIZE": "10000", "HISTFILESIZE": "20000"}
+
+        neptunerc = os.path.expanduser("~/.neptunerc")
+        init_rc = f"[[ -f {neptunerc} ]] && source {neptunerc}\n"
+
         self.master_proc = await asyncio.create_subprocess_exec(
             get_shell(), "--noediting", "--norc", "--noprofile",
             stdin=s, stdout=s, stderr=s, preexec_fn=os.setsid, env=env)
         os.close(s)
+
+        # Start Shadow Shell
+        self.shadow_proc = await asyncio.create_subprocess_exec(
+            get_shell(), "--noediting", "--norc", "--noprofile",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env)
+
+        shadow_init_sentinel = f"SHADOW_INIT_{os.urandom(4).hex()}"
+        self.shadow_proc.stdin.write(f"{init_rc} echo {shadow_init_sentinel}\n".encode())
+        await self.shadow_proc.stdin.drain()
+
+        # Wait for shadow shell initialization
+        try:
+            while True:
+                line = await asyncio.wait_for(self.shadow_proc.stdout.readline(), timeout=2.0)
+                if shadow_init_sentinel in line.decode(): break
+        except asyncio.TimeoutError:
+            logging.warning(f"[{self.pty_id}] Shadow shell initialization timed out")
+
         h_exp = "set -H" if self.hist_exp else "set +H"
         init_sentinel = f"INIT_{os.urandom(4).hex()}"
-        os.write(m, f" stty -echo\n PS1=''; PS2=''; set -m\n {h_exp}\n set -o history\n history -r\n printf '\\x1e{init_sentinel}\\x1f'\n".encode())
+        os.write(m, f" stty -echo\n PS1=''; PS2=''; set -m\n {h_exp}\n set -o history\n history -r\n {init_rc} printf '\\x1e{init_sentinel}\\x1f'\n".encode())
 
         self.shell_pgid = os.getpgid(self.master_proc.pid)
         self.reader_task = asyncio.create_task(self.reader())
@@ -126,6 +149,10 @@ class LocalPTY(BasePTY):
         self.interrupted.clear()
         self.finished.clear()
         self.current_pgid = None
+
+        # Inject into shadow shell if state-changing
+        await self.sync_shadow_state(cmd)
+
         try:
             h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
             os.write(self.master_fd, f" history -s $'{h_cmd}'\n".encode())
@@ -142,6 +169,58 @@ class LocalPTY(BasePTY):
         finally:
             self.current_sentinel = None
             self.current_pgid = None
+
+    def _is_state_changing(self, cmd: str) -> bool:
+        cmd = cmd.strip()
+        patterns = [r'^cd\s+', r'^export\s+', r'^\w+=', r'^unset\s+', r'^alias\s+', r'^source\s+', r'^\.\s+']
+        return any(re.search(p, cmd) for p in patterns)
+
+    async def sync_shadow_state(self, cmd: str):
+        if self.shadow_proc and self.shadow_proc.stdin and self._is_state_changing(cmd):
+            self.shadow_proc.stdin.write(f" {cmd}\n".encode())
+            await self.shadow_proc.stdin.drain()
+
+    async def get_completions(self, query: str) -> list[str]:
+        if not self.shadow_proc or not self.shadow_proc.stdin: return []
+
+        # Drain any stray output
+        while True:
+            try:
+                # Use a small timeout to non-blockingly drain
+                await asyncio.wait_for(self.shadow_proc.stdout.read(4096), timeout=0.05)
+            except:
+                break
+
+        # We use a combined compgen for commands and files/dirs
+        # -c for commands, -f for files
+        # We use a unique sentinel to capture the output
+        sentinel = f"COMP_{os.urandom(4).hex()}"
+
+        # Robust tokenization: find the last token
+        try:
+            parts = shlex.split(query, posix=True) if query else []
+            token = parts[-1] if parts and not query.endswith(" ") else ""
+        except ValueError:
+            # Fallback for unbalanced quotes
+            token = query.split()[-1] if query and not query.endswith(" ") else ""
+
+        q_token = shlex.quote(token)
+
+        comp_cmd = f"compgen -c -- {q_token}; compgen -f -- {q_token}; echo {sentinel}\n"
+        self.shadow_proc.stdin.write(comp_cmd.encode())
+        await self.shadow_proc.stdin.drain()
+
+        results = []
+        try:
+            while True:
+                line = await asyncio.wait_for(self.shadow_proc.stdout.readline(), timeout=2.0)
+                line = line.decode().strip()
+                if line == sentinel: break
+                if line: results.append(line)
+        except asyncio.TimeoutError:
+            logging.warning(f"[{self.pty_id}] Autocomplete timeout")
+
+        return sorted(list(set(results)))
 
     async def _monitor_command(self, block_id: str, sentinel: str):
         # Poll PGID until it returns to shell_pgid OR sentinel is received
@@ -235,6 +314,7 @@ class LocalPTY(BasePTY):
     async def kill(self):
         await self.stop()
         if self.master_proc: self.master_proc.terminate(); await self.master_proc.wait()
+        if self.shadow_proc: self.shadow_proc.terminate(); await self.shadow_proc.wait()
         if self.reader_task: self.reader_task.cancel()
         if self.master_fd: os.close(self.master_fd)
         self.master_proc, self.master_fd = None, None

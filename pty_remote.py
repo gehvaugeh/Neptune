@@ -1,4 +1,4 @@
-import asyncio, os, logging, shutil, time, re
+import asyncio, os, logging, shutil, time, re, shlex
 from typing import Optional, Callable, Awaitable, List, Dict
 from pty_base import BasePTY
 
@@ -10,6 +10,7 @@ class RemotePTY(BasePTY):
         self.broadcast, self.ssh_config = broadcast_func, {}
         self.master_proc: Optional[asyncio.subprocess.Process] = None
         self.shell_proc: Optional[asyncio.subprocess.Process] = None
+        self.shadow_proc: Optional[asyncio.subprocess.Process] = None
         self.socket_path = os.path.abspath(f"neptune-{self.pty_uid}.sock")
         self.remote_tty: Optional[str] = None
         self.shell_pgid: Optional[int] = None
@@ -54,24 +55,37 @@ class RemotePTY(BasePTY):
             await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "error": "connection_failed", "message": str(e)})
             raise
 
-        # Step 2: Open persistent shell
+        # Step 2: Open persistent shell and shadow shell
         s_cmd = self._get_ssh_base(use_socket=True)
         s_cmd.extend(["-tt", "bash"])
         self.shell_proc = await asyncio.create_subprocess_exec(
             *s_cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
 
+        shadow_cmd = self._get_ssh_base(use_socket=True)
+        shadow_cmd.extend(["bash"])
+        self.shadow_proc = await asyncio.create_subprocess_exec(
+            *shadow_cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+
         # Step 3, 4, 5: Get TTY, PGID, CWD and set prompt
         init_sentinel = f"INIT_{os.urandom(4).hex()}"
+        neptunerc = "~/.neptunerc"
+        init_rc = f"[[ -f {neptunerc} ]] && source {neptunerc}\n"
+
         init_script = (
             f"stty -echo opost onlcr\n"
             f"export TERM=xterm-256color\n"
             f"export PS1=''; export PS2=''\n"
+            f"{init_rc}"
             f"tty\n"
             f"ps -o pgid= -p $$\n"
             f"pwd\n"
             f"echo '{init_sentinel}'\n"
         )
+        # Also initialize shadow shell
+        self.shadow_proc.stdin.write(init_rc.encode())
+        await self.shadow_proc.stdin.drain()
         self.shell_proc.stdin.write(init_script.encode())
         await self.shell_proc.stdin.drain()
 
@@ -102,6 +116,9 @@ class RemotePTY(BasePTY):
         self.interrupted.clear()
         self.current_pgid = None
 
+        # Inject into shadow shell if state-changing
+        await self.sync_shadow_state(cmd)
+
         sentinel = f"NS_{os.urandom(4).hex()}"
         # Run command directly to preserve state
         wrapper = f" {cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
@@ -109,6 +126,46 @@ class RemotePTY(BasePTY):
         self.shell_proc.stdin.write(wrapper.encode())
         await self.shell_proc.stdin.drain()
         await self._monitor_command(block_id, sentinel)
+
+    def _is_state_changing(self, cmd: str) -> bool:
+        cmd = cmd.strip()
+        # Heuristic for state-changing commands
+        patterns = [r'^cd\s+', r'^export\s+', r'^\w+=', r'^unset\s+', r'^alias\s+', r'^source\s+', r'^\.\s+']
+        return any(re.search(p, cmd) for p in patterns)
+
+    async def sync_shadow_state(self, cmd: str):
+        if self.shadow_proc and self.shadow_proc.stdin and self._is_state_changing(cmd):
+            self.shadow_proc.stdin.write(f" {cmd}\n".encode())
+            await self.shadow_proc.stdin.drain()
+
+    async def get_completions(self, query: str) -> list[str]:
+        if not self.shadow_proc or not self.shadow_proc.stdin: return []
+        sentinel = f"COMP_{os.urandom(4).hex()}"
+
+        # Robust tokenization: find the last token
+        try:
+            parts = shlex.split(query, posix=True) if query else []
+            token = parts[-1] if parts and not query.endswith(" ") else ""
+        except ValueError:
+            token = query.split()[-1] if query and not query.endswith(" ") else ""
+
+        q_token = shlex.quote(token)
+
+        comp_cmd = f"compgen -c -- {q_token}; compgen -f -- {q_token}; echo {sentinel}\n"
+        self.shadow_proc.stdin.write(comp_cmd.encode())
+        await self.shadow_proc.stdin.drain()
+
+        results = []
+        try:
+            while True:
+                line = await asyncio.wait_for(self.shadow_proc.stdout.readline(), timeout=3.0)
+                line = line.decode().strip()
+                if line == sentinel: break
+                if line: results.append(line)
+        except asyncio.TimeoutError:
+            logging.warning(f"[{self.pty_id}] Autocomplete timeout (remote)")
+
+        return sorted(list(set(results)))
 
     async def _monitor_command(self, block_id: str, sentinel: str):
         buf = ""
@@ -305,7 +362,7 @@ class RemotePTY(BasePTY):
             e_cmd.extend(["-O", "exit", target])
             await (await asyncio.create_subprocess_exec(*e_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)).wait()
         except: pass
-        for p in [self.master_proc, self.shell_proc]:
+        for p in [self.master_proc, self.shell_proc, self.shadow_proc]:
             if p:
                 try: p.terminate()
                 except: pass

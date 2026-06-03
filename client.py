@@ -620,6 +620,7 @@ class ClientApp(App):
         self.insert_after_id = None
         self.count_str = ""
         self.last_escape_time = 0
+        self._autocomplete_futures = {}
 
         # PTY State
         self.ptys: Dict[int, Dict] = {
@@ -967,6 +968,11 @@ class ClientApp(App):
             for screen in self.screen_stack:
                 if isinstance(screen, PTYManagerModal):
                     screen.update_list()
+
+        elif msg_type == "autocomplete_response":
+            rid = msg.get("request_id")
+            if rid in self._autocomplete_futures:
+                self._autocomplete_futures[rid].set_result(msg.get("results", []))
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data.get("id")
@@ -1419,29 +1425,50 @@ class ClientApp(App):
         parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
         return parts[-1] if parts else ""
 
-    def update_palette(self, val: str):
-        p = self.query_one("#palette"); p.clear_options()
+    @work(exclusive=True)
+    async def update_palette(self, val: str):
+        p = self.query_one("#palette")
+        if self.input_mode == "CONTROL":
+             p.clear_options()
+             p.remove_class("visible")
+             p.styles.height = 0
+             return
+
         provider = self.providers.get(self.input_mode)
         if not provider:
+            p.clear_options()
             p.remove_class("visible"); return
 
+        # Show loading indicator if it's taking time
+        # For simplicity, we just clear and wait for results
+
         context = {
+            "app": self,
             "history": self.history.cache,
             "workflows": self.workflows,
-            "cwd": os.getcwd()
+            "cwd": os.getcwd(),
+            "pty_uid": getattr(self, "current_pty_uid", self.default_pty_uid)
         }
-        suggestions = provider.get_suggestions(val, context)
 
-        type_colors = {"path": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252"}
+        suggestions = await provider.get_suggestions(val, context)
+
+        p.clear_options()
+        type_colors = {"shell": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252", "path": "green"}
 
         for s in suggestions:
             color = type_colors.get(s['type'], "white")
             p.add_option(Option(f"[{color}]{s['type'].upper()}:[/] {s['display']} [dim]{s['description']}[/]", id=s['value']))
 
-        if p.option_count > 0: p.add_class("visible")
-        else: p.remove_class("visible")
+        if p.option_count > 0:
+            p.add_class("visible")
+            # Dynamic resizing of palette height (max 5 items)
+            # Each item is roughly 1 line high
+            p.styles.height = min(p.option_count, 5)
+        else:
+            p.remove_class("visible")
+            p.styles.height = 0
 
-    def sync_input(self):
+    async def sync_input(self):
         p = self.query_one("#palette")
         if p.highlighted is None: return
         opt = p.get_option_at_index(p.highlighted)
@@ -1475,9 +1502,11 @@ class ClientApp(App):
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
 
     @on(OptionList.OptionSelected, "#palette")
-    def opt_sel(self, event):
-        self.sync_input()
-        self.query_one("#palette").remove_class("visible")
+    async def opt_sel(self, event):
+        await self.sync_input()
+        p = self.query_one("#palette")
+        p.remove_class("visible")
+        p.styles.height = 0
         self.query_one("#main_input").focus()
         if self.input_mode == "BASH":
             self.update_palette(self.query_one("#main_input").text)
@@ -1660,14 +1689,23 @@ class ClientApp(App):
             if event.key == "ctrl+p" and self.query_one("#pty_target_bar").has_class("hidden"):
                 # Don't trigger autocomplete if we are in PTY target input
                 event.prevent_default()
-                if vis: p.remove_class("visible")
-                else: p.add_class("visible"); self.update_palette(inp.text)
+                if vis:
+                    p.remove_class("visible")
+                    p.styles.height = 0
+                else:
+                    self.update_palette(inp.text)
             elif event.key in ("up", "down") and vis:
-                event.prevent_default(); p.highlighted = max(0, min(p.option_count-1, (p.highlighted or 0) + (-1 if event.key == "up" else 1))); self.sync_input()
+                event.prevent_default()
+                p.highlighted = max(0, min(p.option_count-1, (p.highlighted or 0) + (-1 if event.key == "up" else 1)))
+                asyncio.create_task(self.sync_input())
             elif event.key == "tab":
                 event.prevent_default()
-                if not vis: p.add_class("visible"); self.update_palette(inp.text)
-                else: self.sync_input(); p.remove_class("visible")
+                if not vis:
+                    self.update_palette(inp.text)
+                else:
+                    asyncio.create_task(self.sync_input())
+                    p.remove_class("visible")
+                    p.styles.height = 0
         elif self.input_mode == "SELECTION":
             focused = self.focused; blocks = [c for c in self.query_one("#command_history").children if isinstance(c, BaseBlock) and not c.has_class("filtered-out")]
             if event.key == "ctrl+p":
