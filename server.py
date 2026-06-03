@@ -245,6 +245,7 @@ class Server:
                     uid = msg.get("pty_uid", 0)
                     query = msg.get("query", "")
                     request_id = msg.get("request_id")
+                    logging.debug(f"Server: Received autocomplete_query for UID {uid}, query: '{query}'")
 
                     try: uid = int(uid)
                     except: uid = 0
@@ -252,6 +253,9 @@ class Server:
                     results = []
                     if uid in self.pty_manager.ptys:
                         results = await self.pty_manager.ptys[uid].get_completions(query)
+                        logging.debug(f"Server: get_completions returned {len(results)} items")
+                    else:
+                        logging.warning(f"Server: UID {uid} not found in ptys")
 
                     resp = {"type": "autocomplete_response", "results": results, "request_id": request_id}
                     await self.session_manager.send_to_client(writer, json.dumps(resp).encode() + b"\n", user_id)

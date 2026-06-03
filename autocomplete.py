@@ -1,6 +1,7 @@
 import os
 import re
 import asyncio
+import logging
 from typing import List, Dict, Any
 from common import fuzzy_match
 
@@ -44,9 +45,12 @@ class WorkflowProvider(AutocompleteProvider):
 class ShadowShellProvider(AutocompleteProvider):
     async def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
         app = context.get("app")
-        if not app: return []
+        if not app:
+            logging.warning("ShadowShellProvider: No app in context")
+            return []
 
         pty_uid = context.get("pty_uid", 0)
+        logging.debug(f"ShadowShellProvider: Querying completions for UID {pty_uid}, query: '{query}'")
         request_id = str(os.urandom(4).hex())
 
         # We need a way to wait for the response from the server
@@ -63,6 +67,7 @@ class ShadowShellProvider(AutocompleteProvider):
 
         try:
             results = await asyncio.wait_for(future, timeout=2.0)
+            logging.debug(f"ShadowShellProvider: Received {len(results)} results")
             suggestions = []
             for res in results:
                 suggestions.append({
@@ -74,6 +79,7 @@ class ShadowShellProvider(AutocompleteProvider):
                 if len(suggestions) >= 10: break # More from shell but client will trim
             return suggestions
         except asyncio.TimeoutError:
+            logging.warning("ShadowShellProvider: Timeout waiting for response")
             return []
         finally:
             app._autocomplete_futures.pop(request_id, None)
@@ -103,7 +109,8 @@ class BashAutocompleteProvider(AutocompleteProvider):
             # If the suggestion contains the query token at the end (for paths)
             if val == q: return 0
             if val.startswith(q) or val.endswith(f"/{q}"): return 1
-            return 2
+            if q in val: return 2
+            return 3
 
         all_suggestions.sort(key=lambda s: (score(s), len(s['value'])))
         return all_suggestions[:5]

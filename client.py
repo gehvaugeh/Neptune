@@ -732,6 +732,8 @@ class ClientApp(App):
     async def on_server_message(self, event: ServerMessage):
         msg = event.data
         msg_type = msg.get("type")
+        if msg_type not in ("output", "queue_status", "pty.list"):
+            logging.debug(f"Client: Received server message type: {msg_type}")
 
         if msg_type == "init":
             focused_id, editing_id, editing_content, cursor_pos = None, None, None, None
@@ -974,8 +976,10 @@ class ClientApp(App):
 
         elif msg_type == "autocomplete_response":
             rid = msg.get("request_id")
+            results = msg.get("results", [])
+            logging.debug(f"Client: Received autocomplete_response for RID {rid}, {len(results)} items")
             if rid in self._autocomplete_futures:
-                self._autocomplete_futures[rid].set_result(msg.get("results", []))
+                self._autocomplete_futures[rid].set_result(results)
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data.get("id")
@@ -1192,52 +1196,64 @@ class ClientApp(App):
         asyncio.create_task(self.send_message({"type": "control_start", "block_id": block.block_id}))
 
     async def action_submit(self):
-        ta = self.query_one("#main_input"); text = ta.text
-        if not text.strip(): self.enter_normal_mode(); return
-        ta.text = ""; self.query_one("#palette").remove_class("visible")
+        try:
+            ta = self.query_one("#main_input")
+            text = ta.text
+            if not text.strip():
+                self.enter_normal_mode()
+                return
 
-        target_pty_uid = getattr(self, "current_pty_uid", self.default_pty_uid)
+            ta.text = ""
+            self.query_one("#palette").remove_class("visible")
+            self.query_one("#palette").styles.height = 0
 
-        if self.input_mode == "CMD":
-            await self.handle_internal_command(text.strip())
+            target_pty_uid = getattr(self, "current_pty_uid", self.default_pty_uid)
+
+            if self.input_mode == "CMD":
+                await self.handle_internal_command(text.strip())
+                if self.was_in_selection_mode:
+                    self.enter_selection_mode()
+                else:
+                    self.enter_normal_mode()
+                return
+
+            if self.input_mode == "BASH":
+                content = text.strip()
+                logging.debug(f"Client: Submitting BASH command: '{content}' to UID {target_pty_uid}")
+                self.history.add(content)
+
+                if target_pty_uid not in self.ptys:
+                    self.notify(f"Selected PTY (ID:{target_pty_uid}) no longer exists. Resetting to default.", severity="error")
+                    self.default_pty_uid = 0
+                    self.current_pty_uid = 0
+                    self.action_spawn_pty_manager()
+                    return
+
+                # No longer intercepting 'cd' here; it will be handled by the server's master shell.
+                await self.send_message({
+                    "type": "submit",
+                    "mode": "CMD",
+                    "content": content,
+                    "cwd": os.getcwd(),
+                    "insert_after": self.insert_after_id,
+                    "pty_uid": target_pty_uid
+                })
+            elif self.input_mode == "NOTE":
+                await self.send_message({
+                    "type": "submit",
+                    "mode": "NOTE",
+                    "content": text.strip(),
+                    "cwd": os.getcwd(),
+                    "insert_after": self.insert_after_id
+                })
+
             if self.was_in_selection_mode:
                 self.enter_selection_mode()
             else:
                 self.enter_normal_mode()
-            return
-
-        if self.input_mode == "BASH":
-            content = text.strip()
-            self.history.add(content)
-
-            if target_pty_uid not in self.ptys:
-                self.notify(f"Selected PTY (ID:{target_pty_uid}) no longer exists. Resetting to default.", severity="error")
-                self.default_pty_uid = 0
-                self.current_pty_uid = 0
-                self.action_spawn_pty_manager()
-                return
-
-            # No longer intercepting 'cd' here; it will be handled by the server's master shell.
-            await self.send_message({
-                "type": "submit",
-                "mode": "CMD",
-                "content": content,
-                "cwd": os.getcwd(),
-                "insert_after": self.insert_after_id,
-                "pty_uid": target_pty_uid
-            })
-        elif self.input_mode == "NOTE":
-            await self.send_message({
-                "type": "submit",
-                "mode": "NOTE",
-                "content": text.strip(),
-                "cwd": os.getcwd(),
-                "insert_after": self.insert_after_id
-            })
-
-        if self.was_in_selection_mode:
-            self.enter_selection_mode()
-        else:
+        except Exception as e:
+            logging.exception(f"Error in action_submit: {e}")
+            self.notify(f"Submit error: {e}", severity="error")
             self.enter_normal_mode()
 
     async def handle_internal_command(self, cmd_line):
@@ -1430,8 +1446,10 @@ class ClientApp(App):
 
     @work(exclusive=True)
     async def update_palette(self, val: str):
-        p = self.query_one("#palette")
-        spinner = self.query_one("#autocomplete_spinner")
+        try:
+            p = self.query_one("#palette")
+            spinner = self.query_one("#autocomplete_spinner")
+        except: return
         self._last_suggestions = []
         if self.input_mode == "CONTROL":
              p.clear_options()
@@ -1446,14 +1464,20 @@ class ClientApp(App):
 
         # Show and animate loading indicator
         spinner.remove_class("hidden")
-        frames = ["⟳", "⟲", "⟱", "⟴"] # Simple rotating effect
+        # Unicode spinner frames
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
         async def animate_spinner():
             i = 0
             while not spinner.has_class("hidden"):
-                spinner.update(frames[i % len(frames)])
-                i += 1
-                await asyncio.sleep(0.1)
+                try:
+                    spinner.update(frames[i % len(frames)])
+                    i += 1
+                    await asyncio.sleep(0.08)
+                except asyncio.CancelledError:
+                    break
+                except:
+                    break
 
         anim_task = asyncio.create_task(animate_spinner())
 
@@ -1467,6 +1491,7 @@ class ClientApp(App):
 
         try:
             suggestions = await provider.get_suggestions(val, context)
+            logging.debug(f"Client: update_palette got {len(suggestions)} suggestions")
         finally:
             spinner.add_class("hidden")
             anim_task.cancel()

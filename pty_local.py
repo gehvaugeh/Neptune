@@ -58,7 +58,8 @@ class LocalPTY(BasePTY):
 
         shadow_init_sentinel = f"SHADOW_INIT_{os.urandom(4).hex()}"
         # Set stty -echo to prevent command echoing in shadow shell
-        self.shadow_proc.stdin.write(f" stty -echo\n {init_rc} echo {shadow_init_sentinel}\n".encode())
+        # Ensure we are in a clean state
+        self.shadow_proc.stdin.write(f" stty -echo\n export PS1=''; export PS2=''\n {init_rc} echo {shadow_init_sentinel}\n".encode())
         await self.shadow_proc.stdin.drain()
 
         # Wait for shadow shell initialization
@@ -209,6 +210,7 @@ class LocalPTY(BasePTY):
         else:
             comp_cmd = f"compgen -c -- {q_token}; compgen -f -- {q_token}; echo {sentinel}\n"
 
+        logging.debug(f"[{self.pty_id}] ShadowShell: sending comp_cmd: {comp_cmd.strip()}")
         self.shadow_proc.stdin.write(comp_cmd.encode())
         await self.shadow_proc.stdin.drain()
 
@@ -217,6 +219,7 @@ class LocalPTY(BasePTY):
             while True:
                 line = await asyncio.wait_for(self.shadow_proc.stdout.readline(), timeout=2.0)
                 line = line.decode().strip()
+                logging.debug(f"[{self.pty_id}] ShadowShell: read line: '{line}'")
                 if line == sentinel: break
                 if line: results.append(line)
         except asyncio.TimeoutError:
