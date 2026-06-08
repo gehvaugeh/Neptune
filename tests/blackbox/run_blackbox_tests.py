@@ -108,7 +108,34 @@ def run_tests():
         assert_screen("SHELL:", "Path Autocomplete Visibility")
         oracle.send_input("<esc><esc>")
 
-        # 9. Yank & Paste
+        # 9. Autocomplete Append — file after command, not overwriting
+        print("Testing Autocomplete Append...")
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        # Type !ls + space, tab to open palette
+        oracle.send_input("!ls <tab>")
+        oracle.wait_for_idle(0.5)
+        # Palette should be open with SHELL: completions
+        assert_screen("SHELL:", "Autocomplete Append - palette opens")
+        # Second tab selects first result and closes palette
+        oracle.send_input("<tab>")
+        oracle.wait_for_idle(1.0)
+        # Palette should be closed
+        assert_not_on_screen("SHELL:", "Autocomplete Append - palette closed")
+        # The input area shows "!  User: Me  ls<file>" — check that "ls" is still in the input line
+        # (it would be gone if the command text was overwritten by the completion value)
+        assert_screen("Me  ls", "Autocomplete Append - command preserved")
+        # Execute to verify the completed command runs without crash
+        oracle.send_input("<return>")
+        oracle.wait_for_idle(3.0)
+        # If the command text was preserved, output should appear; just verify no crash
+        snapshot = oracle.get_screen_snapshot()
+        if "error" not in snapshot.lower():
+            record("Autocomplete Append - command executes", "PASS")
+        else:
+            record("Autocomplete Append - command executes", "WARN", "Command may have had errors")
+
+        # 10. Yank & Paste
         print("Testing Yank & Paste...")
         # Clear again for clean state
         oracle.send_input("<esc><esc>:clear <return>")
@@ -125,6 +152,87 @@ def run_tests():
             record("Yank and Paste block", "PASS")
         else:
             record("Yank and Paste block", "FAIL", "Duplicated content not found")
+
+        # 12. CMD File Completion via LocalFileProvider
+        print("Testing CMD File Completion...")
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        oracle.send_input(":import <tab>")
+        oracle.wait_for_idle(2.0)
+        assert_screen("PATH:", "CMD File Completion - PATH entries visible")
+        oracle.send_input("<tab>")
+        oracle.wait_for_idle(1.0)
+        assert_not_on_screen("PATH:", "CMD File Completion - palette closes after selection")
+        oracle.send_input("<esc><esc>")
+        oracle.wait_for_idle(0.5)
+
+        # 13. NOTE Markdown Autocomplete
+        print("Testing NOTE Markdown Autocomplete...")
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        oracle.send_input(";# He<tab>")
+        oracle.wait_for_idle(2.0)
+        assert_screen("MD:", "NOTE Markdown - MD entries visible")
+        oracle.send_input("<tab>")
+        oracle.wait_for_idle(1.0)
+        assert_not_on_screen("MD:", "NOTE Markdown - palette closes after selection")
+        oracle.send_input("<esc><esc>")
+        oracle.wait_for_idle(0.5)
+
+        # 14. NOTE Markdown — last-word replacement and text verification
+        print("Testing NOTE Markdown last-word replacement...")
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        oracle.send_input(";some text ##<tab>")
+        oracle.wait_for_idle(2.0)
+        assert_screen("MD:", "NOTE last-word - MD entries visible")
+        oracle.send_input("<tab>")
+        oracle.wait_for_idle(1.0)
+        assert_not_on_screen("MD:", "NOTE last-word - palette closes")
+        # Submit and verify the note content preserves the original prefix
+        oracle.send_input("<return>")
+        oracle.wait_for_idle(2.0)
+        assert_screen("some text", "NOTE last-word - original text preserved")
+        oracle.send_input("<esc><esc>")
+        oracle.wait_for_idle(0.5)
+
+        # 15. NOTE Markdown — arrow navigation (no selection), then select
+        print("Testing NOTE Markdown arrow navigation...")
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        oracle.send_input(";##<tab>")
+        oracle.wait_for_idle(2.0)
+        assert_screen("MD:", "NOTE arrows - MD entries visible")
+        # Navigate with down arrow twice
+        oracle.send_input("<down><down>")
+        oracle.wait_for_idle(1.0)
+        # Select with tab
+        oracle.send_input("<tab>")
+        oracle.wait_for_idle(1.0)
+        assert_not_on_screen("MD:", "NOTE arrows - palette closes after navigation")
+        oracle.send_input("<esc><esc>")
+        oracle.wait_for_idle(0.5)
+
+        # 16. Duplicate ID in autocomplete — workflow + history collision
+        print("Testing Duplicate ID prevention...")
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        # Run a command that matches an existing workflow to seed history.
+        # Both HistoryProvider and WorkflowProvider will return "ls -lah ./",
+        # causing a DuplicateID crash unless IDs are made unique.
+        oracle.send_input("!ls -lah ./<return>")
+        oracle.wait_for_idle(5.0)
+        # Now type ls + space and open the palette.
+        # Before the fix, the duplicate id="ls -lah ./" crashed with DuplicateID.
+        oracle.send_input("!ls <tab>")
+        oracle.wait_for_idle(3.0)
+        # Palette should open without crash (SHELL: visible means providers ran)
+        assert_screen("SHELL:", "Duplicate ID - palette opens without crash")
+        # Also check for HISTORY and WORKFLOW entries to confirm collision case
+        assert_screen("HISTORY:", "Duplicate ID - history entry visible")
+        assert_screen("WORKFLOW:", "Duplicate ID - workflow entry visible")
+        oracle.send_input("<esc><esc>")
+        oracle.wait_for_idle(0.5)
 
     except Exception as e:
         record("Test Suite Execution", "ERROR", str(e))

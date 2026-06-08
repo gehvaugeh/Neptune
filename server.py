@@ -242,24 +242,30 @@ class Server:
                 elif msg_type == "pty.list":
                     await self.session_manager.send_to_client(writer, json.dumps({"type":"pty.list", "ptys":self.pty_manager.list_ptys()}).encode()+b"\n", user_id)
                 elif msg_type == "autocomplete_query":
+                    _msg, _writer, _uid = msg, writer, user_id
                     async def handle_autocomplete():
-                        uid = msg.get("pty_uid", 0)
-                        query = msg.get("query", "")
-                        request_id = msg.get("request_id")
-                        logging.debug(f"Server: Received autocomplete_query for UID {uid}, query: '{query}'")
+                        try:
+                            uid = _msg.get("pty_uid", 0)
+                            query = _msg.get("query", "")
+                            request_id = _msg.get("request_id")
+                            logging.debug(f"Server: Received autocomplete_query for UID {uid}, query: '{query}' rid={request_id}")
 
-                        try: uid = int(uid)
-                        except: uid = 0
+                            uid = int(uid) if uid else 0
 
-                        results = []
-                        if uid in self.pty_manager.ptys:
-                            results = await self.pty_manager.ptys[uid].get_completions(query)
-                            logging.debug(f"Server: get_completions returned {len(results)} items")
-                        else:
-                            logging.warning(f"Server: UID {uid} not found in ptys")
+                            results = []
+                            if uid in self.pty_manager.ptys:
+                                results = await self.pty_manager.ptys[uid].get_completions(query)
+                                logging.debug(f"Server: get_completions returned {len(results)} items")
+                            else:
+                                logging.warning(f"Server: UID {uid} not found in ptys")
 
-                        resp = {"type": "autocomplete_response", "results": results, "request_id": request_id}
-                        await self.session_manager.send_to_client(writer, json.dumps(resp).encode() + b"\n", user_id)
+                            resp = {"type": "autocomplete_response", "results": results, "request_id": request_id}
+                            resp_str = json.dumps(resp)
+                            logging.debug(f"Server: Sending autocomplete_response rid={request_id}, {len(results)} items")
+                            await self.session_manager.send_to_client(_writer, resp_str.encode() + b"\n", _uid)
+                            logging.debug(f"Server: Sent autocomplete_response rid={request_id}")
+                        except Exception as e:
+                            logging.error(f"Server: autocomplete error: {type(e).__name__}: {e}")
 
                     asyncio.create_task(handle_autocomplete())
         except: pass

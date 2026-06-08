@@ -196,7 +196,7 @@ NoteBlock {
 #palette {
     display: none;
     height: 0;
-    max-height: 5;
+    max-height: 6;
     background: $bg-block;
     border: none;
     color: $text-main;

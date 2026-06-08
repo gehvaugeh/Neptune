@@ -47,7 +47,7 @@ from textual.screen import ModalScreen
 from textual import work, on, events, message
 
 from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE
-from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider
+from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider, LocalFileProvider, MD_PREFIX_RE
 from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
 
 # Setup client logging
@@ -681,7 +681,7 @@ class ClientApp(App):
         self.preferred_cols = max(40, self.screen.size.width - 10)
         self.preferred_rows = 24  # Standard fixed height for terminal blocks
 
-        self.run_worker(self.connect_to_server())
+        self.run_worker(self.connect_to_server(), group="server")
         self.enter_normal_mode()
 
     def on_ready(self):
@@ -690,10 +690,12 @@ class ClientApp(App):
         self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
 
     async def connect_to_server(self):
+        logging.debug(f"Client: connect_to_server starting, socket={self.socket_path}")
         try:
             self.reader, self.writer = await asyncio.open_unix_connection(
                 self.socket_path, limit=10 * 1024 * 1024
             )
+            logging.debug(f"Client: connected ok, writer={id(self.writer) if self.writer else 'None'}")
             await self.send_message({
                 "type": "connect",
                 "color": self.user_color,
@@ -710,17 +712,41 @@ class ClientApp(App):
             self.notify(f"Could not connect to server: {e}", severity="error")
 
     async def listen_to_server(self):
+        reader_id = id(self.reader)
+        logging.debug(f"Client: listen_to_server STARTING reader={reader_id}")
         while self.reader and not self.reader.at_eof():
             try:
-                line = await self.reader.readline()
-                if not line: break
+                raw = await self.reader.readline()
+                if not raw:
+                    logging.debug("Client: listen_to_server got empty line (EOF)")
+                    break
+                decoded = raw.decode("utf-8", errors="replace")
+                data = decoded.strip()
+                if not data:
+                    logging.debug("Client: listen_to_server got blank line")
+                    continue
+                logging.debug(f"Client: listen_to_server packet: {decoded[:300]!r}")
                 try:
-                    data = line.decode().strip()
-                    if not data: continue
                     msg = json.loads(data)
+                except json.JSONDecodeError as e:
+                    logging.error(f"Client: listen_to_server JSON error: {e}")
+                    continue
+                # Resolve autocomplete futures directly
+                if msg.get("type") == "autocomplete_response":
+                    rid = msg.get("request_id")
+                    results = msg.get("results", [])
+                    logging.debug(f"Client: listen_to_server got autocomplete_response RID={rid}, {len(results)} items")
+                    if rid in self._autocomplete_futures:
+                        self._autocomplete_futures[rid].set_result(results)
+                        logging.debug(f"Client: Future set for RID {rid}")
+                    else:
+                        logging.warning(f"Client: No future found for RID {rid}")
+                else:
                     self.post_message(ServerMessage(msg))
-                except: continue
-            except: break
+            except Exception as e:
+                logging.error(f"Client: listen_to_server read error: {type(e).__name__}: {e}")
+                break
+        logging.debug(f"Client: listen_to_server STOPPED reader={reader_id} at_eof={self.reader and self.reader.at_eof() or 'N/A'}")
 
     async def send_message(self, msg):
         if self.writer:
@@ -979,7 +1005,10 @@ class ClientApp(App):
             results = msg.get("results", [])
             logging.debug(f"Client: Received autocomplete_response for RID {rid}, {len(results)} items")
             if rid in self._autocomplete_futures:
+                logging.debug(f"Client: Setting future result for RID {rid}")
                 self._autocomplete_futures[rid].set_result(results)
+            else:
+                logging.warning(f"Client: No future found for RID {rid}")
 
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data.get("id")
@@ -1446,6 +1475,7 @@ class ClientApp(App):
 
     @work(exclusive=True)
     async def update_palette(self, val: str):
+        logging.debug(f"Client: update_palette called with val='{val}' len={len(val)} input_mode={self.input_mode}")
         try:
             p = self.query_one("#palette")
             spinner = self.query_one("#autocomplete_spinner")
@@ -1491,7 +1521,10 @@ class ClientApp(App):
 
         try:
             suggestions = await provider.get_suggestions(val, context)
-            logging.debug(f"Client: update_palette got {len(suggestions)} suggestions")
+            self._last_suggestions = suggestions
+            logging.debug(f"Client: update_palette got {len(suggestions)} suggestions for input_mode={self.input_mode}")
+            if suggestions:
+                logging.debug(f"Client: First suggestion: {suggestions[0]}")
         finally:
             spinner.add_class("hidden")
             anim_task.cancel()
@@ -1501,13 +1534,18 @@ class ClientApp(App):
 
         for s in suggestions:
             color = type_colors.get(s['type'], "white")
-            p.add_option(Option(f"[{color}]{s['type'].upper()}:[/] {s['display']} [dim]{s['description']}[/]", id=s['value']))
+            display = escape(str(s.get('display', '')))
+            desc = escape(str(s.get('description', '')))
+            p.add_option(Option(f"[{color}]{s['type'].upper()}:[/] {display} [dim]{desc}[/]", id=f"{s['type']}___{s['value']}"))
 
         if p.option_count > 0:
             p.add_class("visible")
+            if p.highlighted is None:
+                p.highlighted = 0
             # Dynamic resizing of palette height (max 5 items)
-            # Each item is roughly 1 line high
-            p.styles.height = min(p.option_count, 5)
+            # Each item is roughly 1 line high.
+            # Add 1 to account for border-bottom on .visible, so content isn't clipped.
+            p.styles.height = min(p.option_count, 5) + 1
         else:
             p.remove_class("visible")
             p.styles.height = 0
@@ -1516,15 +1554,14 @@ class ClientApp(App):
         p = self.query_one("#palette")
         if p.highlighted is None: return
         opt = p.get_option_at_index(p.highlighted)
-        val = opt.id
+        raw_id = opt.id
+        val = raw_id.split("___", 1)[1] if "___" in raw_id else raw_id
         inp = self.query_one("#main_input"); self._suppress_search = True
 
         if self.input_mode in ("BASH", "CMD"):
             provider = self.providers[self.input_mode]
             bash_prov = provider if self.input_mode == "BASH" else provider.bash_provider
 
-            # Check if selection is a shell result (path/cmd). These use token replacement.
-            # History and Workflow types use full replacement.
             is_token_replace = False
             try:
                 for s in self._last_suggestions:
@@ -1536,8 +1573,50 @@ class ClientApp(App):
             if is_token_replace and token:
                 idx = inp.text.rfind(token)
                 inp.text = inp.text[:idx] + val
+            elif is_token_replace and inp.text.endswith(" "):
+                inp.text = inp.text + val
             else:
-                inp.text = val # Full replacement for history/workflows/commands
+                inp.text = val
+        elif self.input_mode == "NOTE":
+            ctype = None
+            for s in self._last_suggestions:
+                if s.get("value") == val:
+                    ctype = s.get("type"); break
+
+            if ctype == "md":
+                if inp.selection is not None and inp.selected_text:
+                    placeholder = None
+                    for s in self._last_suggestions:
+                        if s.get("value") == val:
+                            placeholder = s.get("placeholder")
+                            break
+                    start_idx = inp.document.get_index_from_location(inp.selection.start)
+                    end_idx = inp.document.get_index_from_location(inp.selection.end)
+                    if placeholder and placeholder in val:
+                        wrapped = val.replace(placeholder, inp.selected_text, 1)
+                    else:
+                        wrapped = val
+                    inp.text = inp.text[:start_idx] + wrapped + inp.text[end_idx:]
+                else:
+                    provider = self.providers["NOTE"]
+                    token = provider._get_current_token(inp.text)
+                    if token:
+                        idx = inp.text.rfind(token)
+                        inp.text = inp.text[:idx] + val
+                    elif inp.text.endswith(" "):
+                        inp.text = inp.text + val
+                    else:
+                        inp.text = val
+            elif ctype == "path":
+                parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', inp.text)
+                token = parts[-1] if parts and not inp.text.endswith(" ") else ""
+                if token:
+                    idx = inp.text.rfind(token)
+                    inp.text = inp.text[:idx] + val
+                else:
+                    inp.text = inp.text + val
+            else:
+                inp.text = val
         else:
             inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
@@ -1728,21 +1807,28 @@ class ClientApp(App):
         elif self.input_mode in ("BASH", "CMD", "NOTE", "INPUT"):
             vis = p.has_class("visible")
             if event.key == "ctrl+p" and self.query_one("#pty_target_bar").has_class("hidden"):
-                # Don't trigger autocomplete if we are in PTY target input
                 event.prevent_default()
                 if vis:
                     p.remove_class("visible")
                     p.styles.height = 0
                 else:
-                    self.update_palette(inp.text)
+                    query = "" if (self.input_mode == "NOTE" and inp.selection is not None) else inp.text
+                    self.update_palette(query)
             elif event.key in ("up", "down") and vis:
                 event.prevent_default()
                 p.highlighted = max(0, min(p.option_count-1, (p.highlighted or 0) + (-1 if event.key == "up" else 1)))
-                self.sync_input()
+                if not (self.input_mode == "NOTE" and inp.selection is not None):
+                    self.sync_input()
             elif event.key == "tab":
                 event.prevent_default()
                 if not vis:
-                    self.update_palette(inp.text)
+                    # In NOTE mode with selection, show all md elements (empty query)
+                    if self.input_mode == "NOTE" and inp.selection is not None:
+                        query = ""
+                    else:
+                        query = inp.text
+                    logging.debug(f"Client: tab pressed, inp.text={inp.text!r}, cursor={inp.cursor_location}")
+                    self.update_palette(query)
                 else:
                     self.sync_input()
                     p.remove_class("visible")
@@ -1835,6 +1921,7 @@ class ClientApp(App):
 
     @on(TextArea.Changed, "#main_input")
     def in_ch(self, event):
+        logging.debug(f"Client: TextArea.Changed text={event.text_area.text!r} cursor={event.text_area.cursor_location} suppress={self._suppress_search} palette_visible={self.query_one('#palette').has_class('visible')}")
         if not self._suppress_search and self.query_one("#palette").has_class("visible"): self.update_palette(event.text_area.text)
         self._suppress_search = False
 

@@ -1,6 +1,7 @@
 import asyncio, os, logging, shutil, time, re, shlex
 from typing import Optional, Callable, Awaitable, List, Dict
 from pty_base import BasePTY
+from common import strip_ansi
 
 TUI_COMMANDS = {"vim", "vi", "nano", "htop", "top", "less", "more", "man", "tmux", "neptune"}
 
@@ -63,7 +64,7 @@ class RemotePTY(BasePTY):
         )
 
         shadow_cmd = self._get_ssh_base(use_socket=True)
-        shadow_cmd.extend(["bash"])
+        shadow_cmd.extend(["-tt", "bash"])
         self.shadow_proc = await asyncio.create_subprocess_exec(
             *shadow_cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
         )
@@ -172,7 +173,7 @@ class RemotePTY(BasePTY):
                 while True:
                     line = await asyncio.wait_for(self.shadow_proc.stdout.readline(), timeout=2.0)
                     if not line: break
-                    line = line.decode().strip()
+                    line = strip_ansi(line.decode().strip().replace('\r', ''))
                     if line == sentinel: break
                     if line: results.append(line)
             except asyncio.TimeoutError:

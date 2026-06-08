@@ -5,6 +5,9 @@ import logging
 from typing import List, Dict, Any
 from common import fuzzy_match
 
+# Regex to detect markdown syntax prefixes in text for NOTE mode autocomplete
+MD_PREFIX_RE = re.compile(r'(#{1,3}\s|-\s|\*\s|\*\*|```|\[)')
+
 class AutocompleteProvider:
     async def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
         """Returns a list of suggestion objects: {'value': str, 'display': str, 'description': str, 'type': str}"""
@@ -69,6 +72,8 @@ class ShadowShellProvider(AutocompleteProvider):
         try:
             results = await asyncio.wait_for(future, timeout=2.0)
             logging.debug(f"ShadowShellProvider: Received {len(results)} results")
+            if results:
+                logging.debug(f"ShadowShellProvider: First 3: {results[:3]}")
             suggestions = []
             for res in results:
                 suggestions.append({
@@ -77,7 +82,7 @@ class ShadowShellProvider(AutocompleteProvider):
                     "description": "Shadow Shell",
                     "type": "shell"
                 })
-                if len(suggestions) >= 10: break # More from shell but client will trim
+                if len(suggestions) >= 10: break
             return suggestions
         except asyncio.TimeoutError:
             logging.warning("ShadowShellProvider: Timeout waiting for response")
@@ -122,17 +127,62 @@ class BashAutocompleteProvider(AutocompleteProvider):
         parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
         return parts[-1] if parts else ""
 
+class LocalFileProvider(AutocompleteProvider):
+    async def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
+        cwd = context.get("cwd", os.getcwd())
+        token = self._get_current_token(query)
+        suggestions = []
+
+        # Determine directory to list and filter prefix
+        if token and "/" in token:
+            dir_part, _, base_part = token.rpartition("/")
+            if not dir_part or dir_part == ".":
+                search_dir = cwd
+            else:
+                search_dir = os.path.join(cwd, dir_part)
+            prefix = base_part
+            prefix_path = token[:len(token) - len(base_part)] if base_part else token
+        else:
+            search_dir = cwd
+            prefix = token or ""
+            prefix_path = prefix
+
+        try:
+            entries = sorted(os.listdir(search_dir))
+            for entry in entries:
+                if prefix and not entry.lower().startswith(prefix.lower()):
+                    continue
+                full_path = os.path.join(search_dir, entry)
+                display = entry + "/" if os.path.isdir(full_path) else entry
+                if prefix_path and prefix is not token and prefix_path:
+                    display = prefix_path + display
+                suggestions.append({
+                    "value": display,
+                    "display": display,
+                    "description": "Local file",
+                    "type": "path"
+                })
+            return suggestions[:10]
+        except (PermissionError, FileNotFoundError):
+            return []
+
+    def _get_current_token(self, text: str) -> str:
+        if not text or text.endswith(" "): return ""
+        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
+        return parts[-1] if parts else ""
+
 class CmdAutocompleteProvider(AutocompleteProvider):
     def __init__(self, commands: List[Dict[str, str]]):
         self.commands = commands
         self.bash_provider = BashAutocompleteProvider()
+        self.file_provider = LocalFileProvider()
 
     async def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
-        # If there's a space, we are in parameter territory
+        # If there's a space, we are in parameter territory — use LocalFileProvider
         if " " in query:
             parts = query.split(" ", 1)
             cmd, param_query = parts[0], parts[1]
-            return await self.bash_provider.get_suggestions(param_query, context)
+            return await self.file_provider.get_suggestions(param_query, context)
 
         suggestions = []
         for cmd in self.commands:
@@ -147,16 +197,24 @@ class CmdAutocompleteProvider(AutocompleteProvider):
 
 class MarkdownAutocompleteProvider(AutocompleteProvider):
     SYNTAX = [
-        {"value": "# ", "display": "# Header 1", "description": "H1 title", "type": "md"},
-        {"value": "## ", "display": "## Header 2", "description": "H2 title", "type": "md"},
-        {"value": "### ", "display": "### Header 3", "description": "H3 title", "type": "md"},
-        {"value": "**bold**", "display": "**Bold**", "description": "Bold text", "type": "md"},
-        {"value": "*italic*", "display": "*Italic*", "description": "Italic text", "type": "md"},
+        {"value": "# Header 1", "display": "# Header 1", "description": "H1 title", "type": "md"},
+        {"value": "## Header 2", "display": "## Header 2", "description": "H2 title", "type": "md"},
+        {"value": "### Header 3", "display": "### Header 3", "description": "H3 title", "type": "md"},
+        {"value": "**Bold**", "display": "**Bold**", "description": "Bold text", "type": "md", "placeholder": "Bold"},
+        {"value": "*Italic*", "display": "*Italic*", "description": "Italic text", "type": "md", "placeholder": "Italic"},
         {"value": "```bash\n\n```", "display": "``` Code Block", "description": "Bash code block", "type": "md"},
-        {"value": "- ", "display": "- List Item", "description": "Unordered list item", "type": "md"},
-        {"value": "[label](url)", "display": "[Link]", "description": "Markdown link", "type": "md"},
+        {"value": "- List Item", "display": "- List Item", "description": "Unordered list item", "type": "md"},
+        {"value": "[label](url)", "display": "[Link]", "description": "Markdown link", "type": "md", "placeholder": "label"},
     ]
 
     async def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
         if not query: return self.SYNTAX[:5]
-        return [s for s in self.SYNTAX if fuzzy_match(query, s['display'])][:5]
+        token = self._get_current_token(query)
+        if not token:
+            return self.SYNTAX[:5]
+        return [s for s in self.SYNTAX if fuzzy_match(token, s['display'])][:5]
+
+    def _get_current_token(self, text: str) -> str:
+        if not text or text.endswith(" "): return ""
+        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
+        return parts[-1] if parts else ""
