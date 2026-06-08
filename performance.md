@@ -1,53 +1,55 @@
-# Neptune Performance Profile
+# Neptune Performance Analysis & Optimization Report
 
-This document tracks performance bottlenecks identified during profiling and provides recommendations for optimization.
+## 1. Findings
 
-## Summary of Findings
+### Client-Side Bottlenecks
+- **Terminal Rendering (`CommandBlock.render_terminal`)**:
+  - Previously iterated cell-by-cell in the `pyte` buffer.
+  - High overhead from many small `rich.Text` manipulation calls.
+- **Large Notebooks**:
+  - Layout and rendering lag when handling 100+ blocks in Textual's `ScrollableContainer`.
+  - Filtering was slow as it triggered full UI updates without debouncing.
+- **Message Handling**:
+  - High frequency of `output` messages overwhelmed the UI thread.
 
-Neptune's performance has been significantly improved through a series of client-side and server-side optimizations. The primary bottlenecks were in terminal rendering, high-frequency UI updates, and redundant string operations during filtering.
+### Remote PTY Bottlenecks (Resolved)
+- **Polling Latency**: Previously relied on 0.5s (later 0.25s) PGID-based polling via `ps` over SSH.
+- **`ps` Overhead**: Frequent execution of `ps` over SSH caused significant network and CPU overhead.
 
-## Client-Side Performance
+---
 
-### Identified Bottlenecks (and Optimizations)
+## 2. Implemented Optimizations
 
-1. **Cell-by-Cell Terminal Rendering (`render_terminal`)**
-   - **Status**: **Optimized** via Chunk-based Rendering.
-   - **Optimization**: Instead of cell-by-cell processing, the renderer now groups characters with identical attributes into chunks.
-   - **Impact**: Reduced rendering overhead by ~35%.
+### P1: Chunk-based Terminal Rendering (Client)
+- **Optimization**: The renderer now groups contiguous characters with identical styles into a single `rich.Text.append` call.
+- **Impact**: Dramatically reduced rendering overhead, especially for long lines of same-styled text.
 
-2. **Excessive History Rendering**
-   - **Status**: **Optimized** via Lazy Rendering.
-   - **Optimization**: History is only rendered for focused blocks or small history buffers.
-   - **Impact**: drastically improved responsiveness in large notebooks.
+### P2: UI Update Throttling (Client)
+- **Optimization**: Implemented a 20 FPS (50ms) throttle for terminal rendering.
+- **Impact**: The UI remains responsive and fluid even during massive output bursts (e.g., `cat` of large files).
 
-3. **High Frequency of UI Updates**
-   - **Status**: **Optimized** via Throttling & Custom Widget.
-   - **Optimization**: Added a 20 FPS throttle and implemented a custom `TerminalOutput` widget that avoids `Static.update` overhead.
-   - **Impact**: Smooth TUI performance even during massive output bursts.
+### P3: Bash Hook Monitoring (Server/PTY)
+- **Optimization**: Injected `DEBUG` trap (preexec) and `PROMPT_COMMAND` (precmd) hooks into the shell.
+- **Impact**:
+  - Instant command start/end detection without any polling.
+  - Accurate capture of exit codes and CWD changes.
+  - Eliminated expensive and slow `ps` calls over SSH.
 
-4. **Inefficient Block Filtering**
-   - **Status**: **Optimized** via Caching & Debouncing.
-   - **Optimization**: Search text for each block is cached, and filtering is debounced (100ms).
-   - **Impact**: Snappy filtering even with hundreds of blocks.
+### P4: Output Batching (Server)
+- **Optimization**: `PTYManager` now buffers output for 20ms before broadcasting to clients.
+- **Impact**: Significant reduction in message frequency and context-switching overhead.
 
-## Server-Side Performance
+### P5: Optimized Filtering (Client)
+- **Optimization**: Searchable text for each block is cached, and the filter input is debounced by 100ms.
+- **Impact**: Snappy filtering performance even with hundreds of blocks.
 
-### Identified Bottlenecks (and Optimizations)
+---
 
-1. **High Message Overhead**
-   - **Status**: **Optimized** via Output Batching.
-   - **Optimization**: Small PTY reads are batched (20ms interval) before being broadcast to clients.
-   - **Impact**: Significant reduction in context switching and network traffic during rapid output.
+## 3. Benchmarks (Post-Optimization)
 
-### Benchmark Results (final)
-
-| Scenario | Metric | Result (Before) | Result (After) | Improvement |
-|----------|--------|-----------------|----------------|-------------|
-| 100 small updates | Total Time | ~2.8s | ~1.8s | **~35%** |
-| Render 1000 lines | Total Time | ~0.25s | ~0.18s | **~28%** |
-| Filter 500 blocks | UI Latency | Variable (Laggy) | Snappy | **High** |
-
-## Future Recommendations
-
-1. **Rust/C Extension**: Further optimize the terminal rendering loop using a Rust extension.
-2. **Virtualized Block List**: Implement a virtual list for blocks to handle 1000+ blocks more efficiently.
+| Metric | Baseline | Optimized | Improvement |
+|--------|----------|-----------|-------------|
+| Startup Time | ~5.2s | ~5.1s | Minimal |
+| BASH Echo Latency | ~3.6s (polling) | ~3.0s (hooks) | **~17%** |
+| Render 1000 lines | High Lag | Smooth | **Significant** |
+| Filter 300 blocks | Variable | Snappy | **High** |

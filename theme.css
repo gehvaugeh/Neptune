@@ -18,6 +18,10 @@ Screen {
     color: $text-main;
 }
 
+ModalScreen {
+    align: center middle;
+}
+
 #command_history {
     height: 1fr;
     scrollbar-gutter: stable;
@@ -113,7 +117,6 @@ NoteBlock {
 
 .block-output {
     color: $text-dim;
-    height: auto;
     max-height: 24; /* Cap height to match preferred_rows but allow shrinking */
     margin: 0 0 0 3;
     background: transparent;
@@ -210,17 +213,48 @@ NoteBlock {
 }
 
 /* Modals */
-#modal_dialog {
-    padding: 1 2;
-    background: $bg-block;
-    border: solid $border;
-    width: 60;
-    height: auto;
-    align: center middle;
-}
 
 #modal_buttons {
     margin-top: 1;
     height: 3;
     align: right middle;
+}
+
+.modal-row {
+    height: 3;
+    align: left middle;
+}
+
+.modal-footer {
+    margin-top: 1;
+    text-align: center;
+}
+
+.pty-manager-modal #pty_list {
+    height: 10;
+    border: solid $border;
+    background: $bg-input;
+}
+
+#modal_dialog {
+    padding: 1 2;
+    background: $bg-block;
+    border: solid $border;
+    width: 80;
+    height: auto;
+    align: center middle;
+}
+
+#pty_target_bar {
+    height: 3;
+    background: #0a1020;
+    border-bottom: solid $border;
+    padding: 0 1;
+    align: left middle;
+}
+
+#pty_target_input {
+    width: 1fr;
+    border: none;
+    background: $bg-block;
 }
