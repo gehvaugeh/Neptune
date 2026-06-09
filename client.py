@@ -155,6 +155,30 @@ class SaveWorkflowModal(ModalScreen):
         if n and c:
             self.dismiss((n, c))
 
+class ExitConfirmModal(ModalScreen):
+    def __init__(self, block_count: int, minutes_since_export: int):
+        super().__init__()
+        self.block_count = block_count
+        self.minutes_since_export = minutes_since_export
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal_dialog"):
+            yield Label("[bold yellow]Unsaved Changes?[/]")
+            yield Label(f"Blocks: [bold]{self.block_count}[/]")
+            yield Label(f"Last export: [bold]{self.minutes_since_export}[/] minute(s) ago")
+            yield Label("Your notebook may have unsaved changes.", classes="modal-hint")
+            with Horizontal(id="modal_buttons"):
+                yield Button("No & Exit", variant="error", id="no_exit")
+                yield Button("Cancel", variant="primary", id="cancel")
+
+    @on(Button.Pressed, "#cancel")
+    def cancel(self): self.dismiss(None)
+    @on(Button.Pressed, "#no_exit")
+    def no_exit(self): self.dismiss("exit")
+
+    def on_key(self, event: events.Key):
+        if event.key == "escape": self.dismiss(None)
+
 # --- BLOCKS ---
 
 class BlockEditor(TextArea):
@@ -597,6 +621,23 @@ class ClientApp(App):
         Binding("escape", "esc_pressed", "Back/Clear")
     ]
 
+    def action_quit(self):
+        container = self.query_one("#command_history")
+        blocks = [c for c in container.children if isinstance(c, BaseBlock)]
+        if not blocks:
+            self._do_shutdown()
+            return
+        seconds_since_export = time.time() - self.last_export_time
+        if seconds_since_export < 120:
+            self._do_shutdown()
+            return
+        minutes = int(seconds_since_export / 60)
+        self.push_screen(ExitConfirmModal(len(blocks), minutes), self._on_exit_confirm)
+
+    def _on_exit_confirm(self, result):
+        if result == "exit":
+            self._do_shutdown()
+
     def __init__(self, socket_path=DEFAULT_SOCKET_PATH):
         super().__init__()
         self.socket_path = socket_path
@@ -631,6 +672,7 @@ class ClientApp(App):
         self.last_remote_pty_uid = None
         self.bang_time = 0.0
         self.remote_hosts = self._load_remote_hosts()
+        self.last_export_time = time.time()
 
         self.available_commands = [
             {"name": "ptyman", "params": "", "desc": "Open PTY Manager overlay"},
@@ -700,6 +742,10 @@ class ClientApp(App):
         self.preferred_cols = max(40, self.screen.size.width - 10)
         self.preferred_rows = 24  # Standard fixed height for terminal blocks
 
+        # Register exception handler for crash autosave
+        loop = asyncio.get_event_loop()
+        loop.set_exception_handler(self._exception_handler)
+
         self.run_worker(self.connect_to_server(), group="server")
         self.enter_normal_mode()
 
@@ -707,6 +753,37 @@ class ClientApp(App):
         # Focus screen or bottom dock to allow immediate use of prefix keys (! : ;)
         # We use call_after_refresh to ensure the layout is settled
         self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
+
+    def _exception_handler(self, loop, context):
+        exc = context.get("exception")
+        if exc:
+            self._autosave_on_crash(exc)
+        loop.default_exception_handler(context)
+
+    def _autosave_on_crash(self, exc=None):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"autosave_crash_{timestamp}.md"
+        try:
+            md_output = [f"# Neptune Crash Recovery - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
+            md_output.append(f"\n_This is an automatic backup from an unexpected shutdown._\n")
+            if exc:
+                md_output.append(f"\n**Error:** `{type(exc).__name__}: {exc}`\n")
+            container = self.query_one("#command_history")
+            for block in container.children:
+                if isinstance(block, NoteBlock):
+                    md_output.append(f"{block.content}\n")
+                elif isinstance(block, CommandBlock):
+                    pty_uid_export = block.pty_uid if block.pty_uid is not None else 0
+                    md_output.append(f"```bash (uid:{pty_uid_export})\n{block.content}\n```\n")
+                    if block.output:
+                        clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.output)
+                        if clean.strip():
+                            md_output.append(f"```text\n{clean.rstrip()}\n```\n")
+            with open(filename, "w") as f:
+                f.write("\n".join(md_output))
+            self.notify(f"CRASH RECOVERY: Autosaved to {filename}", severity="warning")
+        except Exception as e:
+            self.notify(f"Autosave failed: {e}", severity="error")
 
     async def connect_to_server(self):
         logging.debug(f"Client: connect_to_server starting, socket={self.socket_path}")
@@ -1323,7 +1400,7 @@ class ClientApp(App):
             filename = args[0]
             include_output = "no-output" not in args
             await self.import_notebook((filename, include_output))
-        elif cmd == "exit": self.exit()
+        elif cmd == "exit": self.action_quit()
         elif cmd == "save_wf": self.action_save_workflow(self.query_one("#main_input").text)
         elif cmd == "clear": await self.send_message({"type": "clear_session"})
         elif cmd == "help": self.notify("Commands: pty [new|kill|list], spawnpty, export [file], import [file], exit, save_wf, clear, help")
@@ -1429,6 +1506,7 @@ class ClientApp(App):
                         md_output.append(f"```text\n{clean.rstrip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
+            self.last_export_time = time.time()
             self.notify(f"Notebook Saved: {filename}", severity="information")
         except Exception as e: self.notify(f"Save Error: {e}", severity="error")
 
@@ -1968,8 +2046,18 @@ class ClientApp(App):
             event.stop()
             event.prevent_default()
 
+    def _do_shutdown(self):
+        self.exit()
+
     def on_unmount(self):
-        if self.writer: self.writer.close()
+        self.history.save()
+        if self.writer:
+            try:
+                msg = json.dumps({"type": "shutdown"}).encode() + b"\n"
+                self.writer.write(msg)
+            except:
+                pass
+            self.writer.close()
 
 from branding import setup_parser
 

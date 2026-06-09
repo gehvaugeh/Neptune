@@ -46,8 +46,13 @@ def main():
             import client
             client.ClientApp(socket_path=socket_path).run()
         finally:
-            # Cleanup server when client closes
-            os.kill(server_proc.pid, signal.SIGTERM)
+            # Server was already notified via shutdown message from client.
+            # Wait for it to clean up, force kill if it hangs.
+            try:
+                server_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                server_proc.kill()
+                server_proc.wait()
 
 if __name__ == "__main__":
     main()

@@ -56,6 +56,7 @@ class HistoryManager:
         if not cmd.strip(): return
         if cmd in self.cache: self.cache.remove(cmd)
         self.cache.append(cmd)
+        self.save()
     def save(self):
         with open(HISTORY_FILE, "w") as f:
             for cmd in self.cache: f.write(f"{cmd}\n")

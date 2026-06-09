@@ -193,12 +193,17 @@ class RemotePTYAuthModal(ModalScreen):
 
     def on_key(self, event: events.Key):
         focused = self.screen.focused
-        host_input = self.query_one("#auth_host_user")
         key_input = self.query_one("#auth_key")
-        host_list = self.query_one("#host_history_list")
         key_list = self.query_one("#key_list")
-        host_list_visible = not host_list.has_class("hidden")
         key_list_visible = not key_list.has_class("hidden")
+
+        host_input = None
+        host_list = None
+        host_list_visible = False
+        if not self.host or not self.user:
+            host_input = self.query_one("#auth_host_user")
+            host_list = self.query_one("#host_history_list")
+            host_list_visible = not host_list.has_class("hidden")
 
         if event.key == "escape":
             if focused is host_list and host_list_visible:
