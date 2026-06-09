@@ -75,7 +75,7 @@ class RemotePTY(BasePTY):
         init_rc = f"[[ -f {neptunerc} ]] && source {neptunerc}\n"
 
         init_script = (
-            f"stty -echo opost onlcr\n"
+            f"stty -echo opost onlcr erase '^?'\n"
             f"export TERM=xterm-256color\n"
             f"export PS1=''; export PS2=''\n"
             f"{init_rc}"
@@ -86,7 +86,7 @@ class RemotePTY(BasePTY):
         )
         # Also initialize shadow shell
         # Set stty -echo to prevent command echoing in shadow shell
-        self.shadow_proc.stdin.write(f" stty -echo\n {init_rc}".encode())
+        self.shadow_proc.stdin.write(f" stty -echo erase '^?'\n {init_rc}".encode())
         await self.shadow_proc.stdin.drain()
         self.shell_proc.stdin.write(init_script.encode())
         await self.shell_proc.stdin.drain()
