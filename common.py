@@ -7,6 +7,7 @@ import re
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKFLOW_FILE = os.path.join(BASE_DIR, "termux_workflows.json")
 HISTORY_FILE = os.path.join(BASE_DIR, "history.txt")
+REMOTE_HOSTS_FILE = os.path.join(BASE_DIR, "remote_hosts.txt")
 THEME_FILE = os.path.join(BASE_DIR, "theme.css")
 
 _ANSI_STRIP = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')

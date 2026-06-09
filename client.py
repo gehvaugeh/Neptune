@@ -46,7 +46,7 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work, on, events, message
 
-from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE
+from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE
 from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider, LocalFileProvider, MD_PREFIX_RE
 from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
 
@@ -630,6 +630,7 @@ class ClientApp(App):
         self.default_pty_uid = 0
         self.last_remote_pty_uid = None
         self.bang_time = 0.0
+        self.remote_hosts = self._load_remote_hosts()
 
         self.available_commands = [
             {"name": "ptyman", "params": "", "desc": "Open PTY Manager overlay"},
@@ -645,6 +646,24 @@ class ClientApp(App):
             "CMD": CmdAutocompleteProvider(self.available_commands),
             "NOTE": MarkdownAutocompleteProvider()
         }
+
+    def _load_remote_hosts(self) -> List[str]:
+        if os.path.exists(REMOTE_HOSTS_FILE):
+            try:
+                with open(REMOTE_HOSTS_FILE) as f:
+                    return [l.strip() for l in f if l.strip()]
+            except:
+                pass
+        return []
+
+    def _save_remote_host(self, entry: str):
+        if entry not in self.remote_hosts:
+            self.remote_hosts.append(entry)
+            try:
+                with open(REMOTE_HOSTS_FILE, "a") as f:
+                    f.write(f"{entry}\n")
+            except:
+                pass
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="filter_bar", classes="hidden"):
@@ -1689,7 +1708,7 @@ class ClientApp(App):
                      self.enter_input_mode(prefix="!")
                      return
 
-            self.push_screen(RemotePTYAuthModal(host, user, port, key_path),
+            self.push_screen(RemotePTYAuthModal(host, user, port, key_path, host_history=self.remote_hosts),
                 lambda res: self.run_worker(self._finish_remote_pty_create(host, user, res)))
             return
 
@@ -1703,6 +1722,9 @@ class ClientApp(App):
 
         h = res.get("host", host)
         u = res.get("user", user)
+
+        entry = f"{u}@{h}"
+        self._save_remote_host(entry)
 
         msg = {
             "type": "pty.create.remote",

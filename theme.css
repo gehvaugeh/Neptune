@@ -259,6 +259,15 @@ NoteBlock {
     align: center middle;
 }
 
+#host_history_list, #key_list {
+    max-height: 10;
+    border: solid $primary;
+    background: $surface;
+}
+#host_history_list.hidden, #key_list.hidden {
+    display: none;
+}
+
 #pty_target_bar {
     height: 3;
     background: #0a1020;
