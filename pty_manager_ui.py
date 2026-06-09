@@ -1,5 +1,6 @@
 import asyncio
 from typing import Dict, List, Optional
+from pathlib import Path
 from textual.app import ComposeResult
 from textual.widgets import Label, Input, Button, OptionList, Static
 from textual.widgets.option_list import Option
@@ -9,20 +10,50 @@ from textual import on, events, message
 from common import fuzzy_match
 
 class RemotePTYAuthModal(ModalScreen):
-    def __init__(self, host: str = "", user: str = "", port: str = "22", key_path: str = "~/.ssh/id_rsa"):
+    def __init__(self, host: str = "", user: str = "", port: str = "22", key_path: str = "",
+                 host_history: Optional[List[str]] = None):
         super().__init__()
         self.host = host
         self.user = user
         self.port = port
-        self.key_path = key_path
+        self.host_history = host_history or []
+
+        # SSH-Key-Scan: alle .pub-Dateien in ~/.ssh/
+        ssh_dir = Path.home() / ".ssh"
+        self.available_keys: List[str] = []
+        if ssh_dir.is_dir():
+            for p in sorted(ssh_dir.glob("*.pub")):
+                key_name = p.stem
+                key_full = str(p.with_name(key_name))
+                self.available_keys.append(key_full)
+        if not key_path and self.available_keys:
+            self.key_path = self.available_keys[0]
+        elif not key_path:
+            self.key_path = "~/.ssh/id_rsa"
+        else:
+            self.key_path = key_path
 
     def on_mount(self):
         if not self.host or not self.user:
-            try: self.query_one("#auth_host_user").focus()
-            except: pass
+            inp = self.query_one("#auth_host_user")
+            inp.focus()
+            # Dropdown sofort füllen und zeigen
+            if self.host_history:
+                ol = self.query_one("#host_history_list")
+                ol.clear_options()
+                for h in self.host_history[:6]:
+                    ol.add_option(Option(h, id=h))
+                ol.remove_class("hidden")
         else:
-            try: self.query_one("#auth_key").focus()
-            except: pass
+            inp = self.query_one("#auth_key")
+            inp.focus()
+            # Key-Dropdown sofort füllen und zeigen
+            if self.available_keys:
+                ol = self.query_one("#key_list")
+                ol.clear_options()
+                for k in self.available_keys[:6]:
+                    ol.add_option(Option(k, id=k))
+                ol.remove_class("hidden")
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
@@ -31,6 +62,7 @@ class RemotePTYAuthModal(ModalScreen):
                 yield Label(f"Host: [white]{self.user}@{self.host}[/]")
             else:
                 yield Input(placeholder="user@host", id="auth_host_user")
+                yield OptionList(id="host_history_list", classes="hidden")
 
             with Horizontal(classes="modal-row"):
                 yield Label("Port: ")
@@ -40,19 +72,82 @@ class RemotePTYAuthModal(ModalScreen):
                 yield Label("Auth: ")
                 yield Button("Key", id="toggle_auth", variant="primary")
             yield Input(value=self.key_path, placeholder="Key path...", id="auth_key")
+            yield OptionList(id="key_list", classes="hidden")
             yield Input(placeholder="Password...", password=True, id="auth_pass", classes="hidden")
             with Horizontal(id="modal_buttons"):
                 yield Button("Cancel", variant="error", id="cancel")
                 yield Button("OK", variant="success", id="ok")
 
+    # --- Host History Dropdown ---
+
+    @on(Input.Changed, "#auth_host_user")
+    def on_host_changed(self, event: Input.Changed):
+        val = event.value.lower()
+        ol = self.query_one("#host_history_list")
+        ol.clear_options()
+        matching = [h for h in self.host_history if val in h.lower()]
+        for h in matching[:6]:
+            ol.add_option(Option(h, id=h))
+        if matching and self.query_one("#auth_host_user").has_focus:
+            ol.remove_class("hidden")
+        elif not matching or not self.query_one("#auth_host_user").has_focus:
+            ol.add_class("hidden")
+
+    @on(OptionList.OptionSelected, "#host_history_list")
+    def on_host_selected(self, event: OptionList.OptionSelected):
+        self.query_one("#auth_host_user").value = event.option.id
+        self.query_one("#host_history_list").add_class("hidden")
+        self.query_one("#auth_port").focus()
+
+    # --- SSH Key Dropdown ---
+
+    @on(Input.Changed, "#auth_key")
+    def on_key_changed(self, event: Input.Changed):
+        val = event.value.lower()
+        ol = self.query_one("#key_list")
+        ol.clear_options()
+        matching = [k for k in self.available_keys if val in k.lower()]
+        for k in matching[:6]:
+            ol.add_option(Option(k, id=k))
+        if matching and self.query_one("#auth_key").has_focus:
+            ol.remove_class("hidden")
+        elif not matching or not self.query_one("#auth_key").has_focus:
+            ol.add_class("hidden")
+
+    @on(OptionList.OptionSelected, "#key_list")
+    def on_key_selected(self, event: OptionList.OptionSelected):
+        self.query_one("#auth_key").value = event.option.id
+        self.query_one("#key_list").add_class("hidden")
+        self.query_one("#ok").focus()
+
+    @on(Input.Blurred, "#auth_host_user")
+    def on_host_blurred(self):
+        self.set_timer(0.15, self._hide_host_list_unless_focused)
+
+    def _hide_host_list_unless_focused(self):
+        ol = self.query_one("#host_history_list")
+        if self.screen.focused is not ol:
+            ol.add_class("hidden")
+
+    @on(Input.Blurred, "#auth_key")
+    def on_key_blurred(self):
+        self.set_timer(0.15, self._hide_key_list_unless_focused)
+
+    def _hide_key_list_unless_focused(self):
+        ol = self.query_one("#key_list")
+        if self.screen.focused is not ol:
+            ol.add_class("hidden")
+
     @on(Button.Pressed, "#toggle_auth")
     def toggle_auth(self):
         btn = self.query_one("#toggle_auth")
         key_inp = self.query_one("#auth_key")
+        key_list = self.query_one("#key_list")
         pass_inp = self.query_one("#auth_pass")
         if btn.label == "Key":
             btn.label = "Password"
             key_inp.add_class("hidden")
+            key_list.add_class("hidden")
             pass_inp.remove_class("hidden")
             pass_inp.focus()
         else:
@@ -60,6 +155,12 @@ class RemotePTYAuthModal(ModalScreen):
             key_inp.remove_class("hidden")
             pass_inp.add_class("hidden")
             key_inp.focus()
+            # Key-Dropdown bei Rückkehr zu Key zeigen
+            if self.available_keys:
+                key_list.clear_options()
+                for k in self.available_keys[:6]:
+                    key_list.add_option(Option(k, id=k))
+                key_list.remove_class("hidden")
 
     @on(Button.Pressed, "#cancel")
     def cancel(self): self.dismiss(None)
@@ -91,14 +192,73 @@ class RemotePTYAuthModal(ModalScreen):
     def on_submit(self): self.ok()
 
     def on_key(self, event: events.Key):
+        focused = self.screen.focused
+        key_input = self.query_one("#auth_key")
+        key_list = self.query_one("#key_list")
+        key_list_visible = not key_list.has_class("hidden")
+
+        host_input = None
+        host_list = None
+        host_list_visible = False
+        if not self.host or not self.user:
+            host_input = self.query_one("#auth_host_user")
+            host_list = self.query_one("#host_history_list")
+            host_list_visible = not host_list.has_class("hidden")
+
         if event.key == "escape":
-            self.dismiss(None)
+            if focused is host_list and host_list_visible:
+                host_list.add_class("hidden")
+                host_input.focus()
+            elif focused is key_list and key_list_visible:
+                key_list.add_class("hidden")
+                key_input.focus()
+            elif host_list_visible:
+                host_list.add_class("hidden")
+            elif key_list_visible:
+                key_list.add_class("hidden")
+            else:
+                self.dismiss(None)
+            event.stop(); event.prevent_default()
+
         elif event.key == "tab":
-            self.focus_next()
+            if focused is host_list and host_list_visible:
+                # Tab im Host-Dropdown → Eintrag übernehmen, zu Port springen
+                if host_list.highlighted is not None:
+                    opt = host_list.get_option_at_index(host_list.highlighted)
+                    host_input.value = opt.id
+                    host_list.add_class("hidden")
+                    self.query_one("#auth_port").focus()
+            elif focused is key_list and key_list_visible:
+                # Tab im Key-Dropdown → Eintrag übernehmen, zu OK springen
+                if key_list.highlighted is not None:
+                    opt = key_list.get_option_at_index(key_list.highlighted)
+                    key_input.value = opt.id
+                    key_list.add_class("hidden")
+                    self.query_one("#ok").focus()
+            elif focused is host_input and host_list_visible:
+                host_list.focus()
+            elif focused is key_input and key_list_visible:
+                key_list.focus()
+            else:
+                self.focus_next()
             event.stop(); event.prevent_default()
+
         elif event.key == "shift+tab":
-            self.focus_previous()
+            if focused is host_list and host_list_visible:
+                host_input.focus()
+            elif focused is key_list and key_list_visible:
+                key_input.focus()
+            else:
+                self.focus_previous()
             event.stop(); event.prevent_default()
+
+        elif event.key == "down":
+            if focused is host_input and host_list_visible and host_list.option_count > 0:
+                host_list.focus()
+                event.stop(); event.prevent_default()
+            elif focused is key_input and key_list_visible and key_list.option_count > 0:
+                key_list.focus()
+                event.stop(); event.prevent_default()
 
 class ConfirmKillModal(ModalScreen):
     def __init__(self, pty_name: str):
@@ -283,5 +443,8 @@ class PTYManagerModal(ModalScreen):
         self.app.run_worker(self.app.send_message({"type": "pty.create.local"}))
 
     def _do_new_remote(self):
-        self.app.push_screen(RemotePTYAuthModal("", ""),
-            lambda res: self.app.run_worker(self.app._finish_remote_pty_create("", "", res)) if res else None)
+        host_history = getattr(self.app, 'remote_hosts', [])
+        self.app.push_screen(
+            RemotePTYAuthModal("", "", host_history=host_history),
+            lambda res: self.app.run_worker(self.app._finish_remote_pty_create("", "", res)) if res else None
+        )

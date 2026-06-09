@@ -46,8 +46,8 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work, on, events, message
 
-from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE
-from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider
+from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE
+from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider, LocalFileProvider, MD_PREFIX_RE
 from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
 
 # Setup client logging
@@ -154,6 +154,30 @@ class SaveWorkflowModal(ModalScreen):
         n, c = self.query_one("#wf_name").value, self.query_one("#wf_cmd").text
         if n and c:
             self.dismiss((n, c))
+
+class ExitConfirmModal(ModalScreen):
+    def __init__(self, block_count: int, minutes_since_export: int):
+        super().__init__()
+        self.block_count = block_count
+        self.minutes_since_export = minutes_since_export
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal_dialog"):
+            yield Label("[bold yellow]Unsaved Changes?[/]")
+            yield Label(f"Blocks: [bold]{self.block_count}[/]")
+            yield Label(f"Last export: [bold]{self.minutes_since_export}[/] minute(s) ago")
+            yield Label("Your notebook may have unsaved changes.", classes="modal-hint")
+            with Horizontal(id="modal_buttons"):
+                yield Button("No & Exit", variant="error", id="no_exit")
+                yield Button("Cancel", variant="primary", id="cancel")
+
+    @on(Button.Pressed, "#cancel")
+    def cancel(self): self.dismiss(None)
+    @on(Button.Pressed, "#no_exit")
+    def no_exit(self): self.dismiss("exit")
+
+    def on_key(self, event: events.Key):
+        if event.key == "escape": self.dismiss(None)
 
 # --- BLOCKS ---
 
@@ -597,6 +621,23 @@ class ClientApp(App):
         Binding("escape", "esc_pressed", "Back/Clear")
     ]
 
+    def action_quit(self):
+        container = self.query_one("#command_history")
+        blocks = [c for c in container.children if isinstance(c, BaseBlock)]
+        if not blocks:
+            self._do_shutdown()
+            return
+        seconds_since_export = time.time() - self.last_export_time
+        if seconds_since_export < 120:
+            self._do_shutdown()
+            return
+        minutes = int(seconds_since_export / 60)
+        self.push_screen(ExitConfirmModal(len(blocks), minutes), self._on_exit_confirm)
+
+    def _on_exit_confirm(self, result):
+        if result == "exit":
+            self._do_shutdown()
+
     def __init__(self, socket_path=DEFAULT_SOCKET_PATH):
         super().__init__()
         self.socket_path = socket_path
@@ -620,6 +661,8 @@ class ClientApp(App):
         self.insert_after_id = None
         self.count_str = ""
         self.last_escape_time = 0
+        self._autocomplete_futures = {}
+        self._last_suggestions = []
 
         # PTY State
         self.ptys: Dict[int, Dict] = {
@@ -628,6 +671,8 @@ class ClientApp(App):
         self.default_pty_uid = 0
         self.last_remote_pty_uid = None
         self.bang_time = 0.0
+        self.remote_hosts = self._load_remote_hosts()
+        self.last_export_time = time.time()
 
         self.available_commands = [
             {"name": "ptyman", "params": "", "desc": "Open PTY Manager overlay"},
@@ -644,6 +689,24 @@ class ClientApp(App):
             "NOTE": MarkdownAutocompleteProvider()
         }
 
+    def _load_remote_hosts(self) -> List[str]:
+        if os.path.exists(REMOTE_HOSTS_FILE):
+            try:
+                with open(REMOTE_HOSTS_FILE) as f:
+                    return [l.strip() for l in f if l.strip()]
+            except:
+                pass
+        return []
+
+    def _save_remote_host(self, entry: str):
+        if entry not in self.remote_hosts:
+            self.remote_hosts.append(entry)
+            try:
+                with open(REMOTE_HOSTS_FILE, "a") as f:
+                    f.write(f"{entry}\n")
+            except:
+                pass
+
     def compose(self) -> ComposeResult:
         with Horizontal(id="filter_bar", classes="hidden"):
             yield Label(" 🔍 Filter: ", id="filter_label")
@@ -659,9 +722,11 @@ class ClientApp(App):
         with Vertical(id="bottom_dock") as dock:
             dock.can_focus = True
             yield OptionList(id="palette")
-            self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
-            self.mode_label.tooltip = "Current interaction mode (NORMAL, BASH, CMD, NOTE, SELECTION, BLOCKEDIT)"
-            yield self.mode_label
+            with Horizontal(id="dock_status_bar"):
+                self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
+                self.mode_label.tooltip = "Current interaction mode (NORMAL, BASH, CMD, NOTE, SELECTION, BLOCKEDIT)"
+                yield self.mode_label
+                yield Label("⟳", id="autocomplete_spinner", classes="hidden")
             with Horizontal(id="input_container"):
                 yield Label("", id="mode_prefix")
                 self.user_label = Label(f"User: [bold {self.user_color}]Me[/]", id="user_indicator")
@@ -677,7 +742,11 @@ class ClientApp(App):
         self.preferred_cols = max(40, self.screen.size.width - 10)
         self.preferred_rows = 24  # Standard fixed height for terminal blocks
 
-        self.run_worker(self.connect_to_server())
+        # Register exception handler for crash autosave
+        loop = asyncio.get_event_loop()
+        loop.set_exception_handler(self._exception_handler)
+
+        self.run_worker(self.connect_to_server(), group="server")
         self.enter_normal_mode()
 
     def on_ready(self):
@@ -685,11 +754,44 @@ class ClientApp(App):
         # We use call_after_refresh to ensure the layout is settled
         self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
 
+    def _exception_handler(self, loop, context):
+        exc = context.get("exception")
+        if exc:
+            self._autosave_on_crash(exc)
+        loop.default_exception_handler(context)
+
+    def _autosave_on_crash(self, exc=None):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"autosave_crash_{timestamp}.md"
+        try:
+            md_output = [f"# Neptune Crash Recovery - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
+            md_output.append(f"\n_This is an automatic backup from an unexpected shutdown._\n")
+            if exc:
+                md_output.append(f"\n**Error:** `{type(exc).__name__}: {exc}`\n")
+            container = self.query_one("#command_history")
+            for block in container.children:
+                if isinstance(block, NoteBlock):
+                    md_output.append(f"{block.content}\n")
+                elif isinstance(block, CommandBlock):
+                    pty_uid_export = block.pty_uid if block.pty_uid is not None else 0
+                    md_output.append(f"```bash (uid:{pty_uid_export})\n{block.content}\n```\n")
+                    if block.output:
+                        clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.output)
+                        if clean.strip():
+                            md_output.append(f"```text\n{clean.rstrip()}\n```\n")
+            with open(filename, "w") as f:
+                f.write("\n".join(md_output))
+            self.notify(f"CRASH RECOVERY: Autosaved to {filename}", severity="warning")
+        except Exception as e:
+            self.notify(f"Autosave failed: {e}", severity="error")
+
     async def connect_to_server(self):
+        logging.debug(f"Client: connect_to_server starting, socket={self.socket_path}")
         try:
             self.reader, self.writer = await asyncio.open_unix_connection(
                 self.socket_path, limit=10 * 1024 * 1024
             )
+            logging.debug(f"Client: connected ok, writer={id(self.writer) if self.writer else 'None'}")
             await self.send_message({
                 "type": "connect",
                 "color": self.user_color,
@@ -706,17 +808,41 @@ class ClientApp(App):
             self.notify(f"Could not connect to server: {e}", severity="error")
 
     async def listen_to_server(self):
+        reader_id = id(self.reader)
+        logging.debug(f"Client: listen_to_server STARTING reader={reader_id}")
         while self.reader and not self.reader.at_eof():
             try:
-                line = await self.reader.readline()
-                if not line: break
+                raw = await self.reader.readline()
+                if not raw:
+                    logging.debug("Client: listen_to_server got empty line (EOF)")
+                    break
+                decoded = raw.decode("utf-8", errors="replace")
+                data = decoded.strip()
+                if not data:
+                    logging.debug("Client: listen_to_server got blank line")
+                    continue
+                logging.debug(f"Client: listen_to_server packet: {decoded[:300]!r}")
                 try:
-                    data = line.decode().strip()
-                    if not data: continue
                     msg = json.loads(data)
+                except json.JSONDecodeError as e:
+                    logging.error(f"Client: listen_to_server JSON error: {e}")
+                    continue
+                # Resolve autocomplete futures directly
+                if msg.get("type") == "autocomplete_response":
+                    rid = msg.get("request_id")
+                    results = msg.get("results", [])
+                    logging.debug(f"Client: listen_to_server got autocomplete_response RID={rid}, {len(results)} items")
+                    if rid in self._autocomplete_futures:
+                        self._autocomplete_futures[rid].set_result(results)
+                        logging.debug(f"Client: Future set for RID {rid}")
+                    else:
+                        logging.warning(f"Client: No future found for RID {rid}")
+                else:
                     self.post_message(ServerMessage(msg))
-                except: continue
-            except: break
+            except Exception as e:
+                logging.error(f"Client: listen_to_server read error: {type(e).__name__}: {e}")
+                break
+        logging.debug(f"Client: listen_to_server STOPPED reader={reader_id} at_eof={self.reader and self.reader.at_eof() or 'N/A'}")
 
     async def send_message(self, msg):
         if self.writer:
@@ -728,6 +854,8 @@ class ClientApp(App):
     async def on_server_message(self, event: ServerMessage):
         msg = event.data
         msg_type = msg.get("type")
+        if msg_type not in ("output", "queue_status", "pty.list"):
+            logging.debug(f"Client: Received server message type: {msg_type}")
 
         if msg_type == "init":
             focused_id, editing_id, editing_content, cursor_pos = None, None, None, None
@@ -968,6 +1096,16 @@ class ClientApp(App):
                 if isinstance(screen, PTYManagerModal):
                     screen.update_list()
 
+        elif msg_type == "autocomplete_response":
+            rid = msg.get("request_id")
+            results = msg.get("results", [])
+            logging.debug(f"Client: Received autocomplete_response for RID {rid}, {len(results)} items")
+            if rid in self._autocomplete_futures:
+                logging.debug(f"Client: Setting future result for RID {rid}")
+                self._autocomplete_futures[rid].set_result(results)
+            else:
+                logging.warning(f"Client: No future found for RID {rid}")
+
     async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
         b_id = data.get("id")
         if not b_id or b_id in self.blocks: return
@@ -1183,52 +1321,64 @@ class ClientApp(App):
         asyncio.create_task(self.send_message({"type": "control_start", "block_id": block.block_id}))
 
     async def action_submit(self):
-        ta = self.query_one("#main_input"); text = ta.text
-        if not text.strip(): self.enter_normal_mode(); return
-        ta.text = ""; self.query_one("#palette").remove_class("visible")
+        try:
+            ta = self.query_one("#main_input")
+            text = ta.text
+            if not text.strip():
+                self.enter_normal_mode()
+                return
 
-        target_pty_uid = getattr(self, "current_pty_uid", self.default_pty_uid)
+            ta.text = ""
+            self.query_one("#palette").remove_class("visible")
+            self.query_one("#palette").styles.height = 0
 
-        if self.input_mode == "CMD":
-            await self.handle_internal_command(text.strip())
+            target_pty_uid = getattr(self, "current_pty_uid", self.default_pty_uid)
+
+            if self.input_mode == "CMD":
+                await self.handle_internal_command(text.strip())
+                if self.was_in_selection_mode:
+                    self.enter_selection_mode()
+                else:
+                    self.enter_normal_mode()
+                return
+
+            if self.input_mode == "BASH":
+                content = text.strip()
+                logging.debug(f"Client: Submitting BASH command: '{content}' to UID {target_pty_uid}")
+                self.history.add(content)
+
+                if target_pty_uid not in self.ptys:
+                    self.notify(f"Selected PTY (ID:{target_pty_uid}) no longer exists. Resetting to default.", severity="error")
+                    self.default_pty_uid = 0
+                    self.current_pty_uid = 0
+                    self.action_spawn_pty_manager()
+                    return
+
+                # No longer intercepting 'cd' here; it will be handled by the server's master shell.
+                await self.send_message({
+                    "type": "submit",
+                    "mode": "CMD",
+                    "content": content,
+                    "cwd": os.getcwd(),
+                    "insert_after": self.insert_after_id,
+                    "pty_uid": target_pty_uid
+                })
+            elif self.input_mode == "NOTE":
+                await self.send_message({
+                    "type": "submit",
+                    "mode": "NOTE",
+                    "content": text.strip(),
+                    "cwd": os.getcwd(),
+                    "insert_after": self.insert_after_id
+                })
+
             if self.was_in_selection_mode:
                 self.enter_selection_mode()
             else:
                 self.enter_normal_mode()
-            return
-
-        if self.input_mode == "BASH":
-            content = text.strip()
-            self.history.add(content)
-
-            if target_pty_uid not in self.ptys:
-                self.notify(f"Selected PTY (ID:{target_pty_uid}) no longer exists. Resetting to default.", severity="error")
-                self.default_pty_uid = 0
-                self.current_pty_uid = 0
-                self.action_spawn_pty_manager()
-                return
-
-            # No longer intercepting 'cd' here; it will be handled by the server's master shell.
-            await self.send_message({
-                "type": "submit",
-                "mode": "CMD",
-                "content": content,
-                "cwd": os.getcwd(),
-                "insert_after": self.insert_after_id,
-                "pty_uid": target_pty_uid
-            })
-        elif self.input_mode == "NOTE":
-            await self.send_message({
-                "type": "submit",
-                "mode": "NOTE",
-                "content": text.strip(),
-                "cwd": os.getcwd(),
-                "insert_after": self.insert_after_id
-            })
-
-        if self.was_in_selection_mode:
-            self.enter_selection_mode()
-        else:
+        except Exception as e:
+            logging.exception(f"Error in action_submit: {e}")
+            self.notify(f"Submit error: {e}", severity="error")
             self.enter_normal_mode()
 
     async def handle_internal_command(self, cmd_line):
@@ -1250,7 +1400,7 @@ class ClientApp(App):
             filename = args[0]
             include_output = "no-output" not in args
             await self.import_notebook((filename, include_output))
-        elif cmd == "exit": self.exit()
+        elif cmd == "exit": self.action_quit()
         elif cmd == "save_wf": self.action_save_workflow(self.query_one("#main_input").text)
         elif cmd == "clear": await self.send_message({"type": "clear_session"})
         elif cmd == "help": self.notify("Commands: pty [new|kill|list], spawnpty, export [file], import [file], exit, save_wf, clear, help")
@@ -1356,6 +1506,7 @@ class ClientApp(App):
                         md_output.append(f"```text\n{clean.rstrip()}\n```\n")
         try:
             with open(filename, "w") as f: f.write("\n".join(md_output))
+            self.last_export_time = time.time()
             self.notify(f"Notebook Saved: {filename}", severity="information")
         except Exception as e: self.notify(f"Save Error: {e}", severity="error")
 
@@ -1419,57 +1570,150 @@ class ClientApp(App):
         parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
         return parts[-1] if parts else ""
 
-    def update_palette(self, val: str):
-        p = self.query_one("#palette"); p.clear_options()
+    @work(exclusive=True)
+    async def update_palette(self, val: str):
+        logging.debug(f"Client: update_palette called with val='{val}' len={len(val)} input_mode={self.input_mode}")
+        try:
+            p = self.query_one("#palette")
+            spinner = self.query_one("#autocomplete_spinner")
+        except: return
+        self._last_suggestions = []
+        if self.input_mode == "CONTROL":
+             p.clear_options()
+             p.remove_class("visible")
+             p.styles.height = 0
+             return
+
         provider = self.providers.get(self.input_mode)
         if not provider:
+            p.clear_options()
             p.remove_class("visible"); return
 
+        # Show and animate loading indicator
+        spinner.remove_class("hidden")
+        # Unicode spinner frames
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+        async def animate_spinner():
+            i = 0
+            while not spinner.has_class("hidden"):
+                try:
+                    spinner.update(frames[i % len(frames)])
+                    i += 1
+                    await asyncio.sleep(0.08)
+                except asyncio.CancelledError:
+                    break
+                except:
+                    break
+
+        anim_task = asyncio.create_task(animate_spinner())
+
         context = {
+            "app": self,
             "history": self.history.cache,
             "workflows": self.workflows,
-            "cwd": os.getcwd()
+            "cwd": os.getcwd(),
+            "pty_uid": getattr(self, "current_pty_uid", self.default_pty_uid)
         }
-        suggestions = provider.get_suggestions(val, context)
 
-        type_colors = {"path": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252"}
+        try:
+            suggestions = await provider.get_suggestions(val, context)
+            self._last_suggestions = suggestions
+            logging.debug(f"Client: update_palette got {len(suggestions)} suggestions for input_mode={self.input_mode}")
+            if suggestions:
+                logging.debug(f"Client: First suggestion: {suggestions[0]}")
+        finally:
+            spinner.add_class("hidden")
+            anim_task.cancel()
+
+        p.clear_options()
+        type_colors = {"shell": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252", "path": "green"}
 
         for s in suggestions:
             color = type_colors.get(s['type'], "white")
-            p.add_option(Option(f"[{color}]{s['type'].upper()}:[/] {s['display']} [dim]{s['description']}[/]", id=s['value']))
+            display = escape(str(s.get('display', '')))
+            desc = escape(str(s.get('description', '')))
+            p.add_option(Option(f"[{color}]{s['type'].upper()}:[/] {display} [dim]{desc}[/]", id=f"{s['type']}___{s['value']}"))
 
-        if p.option_count > 0: p.add_class("visible")
-        else: p.remove_class("visible")
+        if p.option_count > 0:
+            p.add_class("visible")
+            if p.highlighted is None:
+                p.highlighted = 0
+            # Dynamic resizing of palette height (max 5 items)
+            # Each item is roughly 1 line high.
+            # Add 1 to account for border-bottom on .visible, so content isn't clipped.
+            p.styles.height = min(p.option_count, 5) + 1
+        else:
+            p.remove_class("visible")
+            p.styles.height = 0
 
     def sync_input(self):
         p = self.query_one("#palette")
         if p.highlighted is None: return
         opt = p.get_option_at_index(p.highlighted)
-        val = opt.id
+        raw_id = opt.id
+        val = raw_id.split("___", 1)[1] if "___" in raw_id else raw_id
         inp = self.query_one("#main_input"); self._suppress_search = True
 
         if self.input_mode in ("BASH", "CMD"):
             provider = self.providers[self.input_mode]
             bash_prov = provider if self.input_mode == "BASH" else provider.bash_provider
 
-            # Check if selection is a path. Path completion uses token replacement.
-            # History, Workflow, and Cmd types use full replacement.
-            is_path = False
+            is_token_replace = False
             try:
-                # Retrieve the actual suggestion object to check its type
-                context = {"history": self.history.cache, "workflows": self.workflows, "cwd": os.getcwd()}
-                sugs = provider.get_suggestions(inp.text, context)
-                for s in sugs:
-                    if s.get("value") == val and s.get("type") == "path":
-                        is_path = True; break
+                for s in self._last_suggestions:
+                    if s.get("value") == val and s.get("type") in ("shell", "path"):
+                        is_token_replace = True; break
             except: pass
 
             token = bash_prov._get_current_token(inp.text)
-            if is_path and token:
+            if is_token_replace and token:
                 idx = inp.text.rfind(token)
                 inp.text = inp.text[:idx] + val
+            elif is_token_replace and inp.text.endswith(" "):
+                inp.text = inp.text + val
             else:
-                inp.text = val # Full replacement for history/workflows
+                inp.text = val
+        elif self.input_mode == "NOTE":
+            ctype = None
+            for s in self._last_suggestions:
+                if s.get("value") == val:
+                    ctype = s.get("type"); break
+
+            if ctype == "md":
+                if inp.selection is not None and inp.selected_text:
+                    placeholder = None
+                    for s in self._last_suggestions:
+                        if s.get("value") == val:
+                            placeholder = s.get("placeholder")
+                            break
+                    start_idx = inp.document.get_index_from_location(inp.selection.start)
+                    end_idx = inp.document.get_index_from_location(inp.selection.end)
+                    if placeholder and placeholder in val:
+                        wrapped = val.replace(placeholder, inp.selected_text, 1)
+                    else:
+                        wrapped = val
+                    inp.text = inp.text[:start_idx] + wrapped + inp.text[end_idx:]
+                else:
+                    provider = self.providers["NOTE"]
+                    token = provider._get_current_token(inp.text)
+                    if token:
+                        idx = inp.text.rfind(token)
+                        inp.text = inp.text[:idx] + val
+                    elif inp.text.endswith(" "):
+                        inp.text = inp.text + val
+                    else:
+                        inp.text = val
+            elif ctype == "path":
+                parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', inp.text)
+                token = parts[-1] if parts and not inp.text.endswith(" ") else ""
+                if token:
+                    idx = inp.text.rfind(token)
+                    inp.text = inp.text[:idx] + val
+                else:
+                    inp.text = inp.text + val
+            else:
+                inp.text = val
         else:
             inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
@@ -1477,7 +1721,9 @@ class ClientApp(App):
     @on(OptionList.OptionSelected, "#palette")
     def opt_sel(self, event):
         self.sync_input()
-        self.query_one("#palette").remove_class("visible")
+        p = self.query_one("#palette")
+        p.remove_class("visible")
+        p.styles.height = 0
         self.query_one("#main_input").focus()
         if self.input_mode == "BASH":
             self.update_palette(self.query_one("#main_input").text)
@@ -1540,7 +1786,7 @@ class ClientApp(App):
                      self.enter_input_mode(prefix="!")
                      return
 
-            self.push_screen(RemotePTYAuthModal(host, user, port, key_path),
+            self.push_screen(RemotePTYAuthModal(host, user, port, key_path, host_history=self.remote_hosts),
                 lambda res: self.run_worker(self._finish_remote_pty_create(host, user, res)))
             return
 
@@ -1554,6 +1800,9 @@ class ClientApp(App):
 
         h = res.get("host", host)
         u = res.get("user", user)
+
+        entry = f"{u}@{h}"
+        self._save_remote_host(entry)
 
         msg = {
             "type": "pty.create.remote",
@@ -1658,16 +1907,32 @@ class ClientApp(App):
         elif self.input_mode in ("BASH", "CMD", "NOTE", "INPUT"):
             vis = p.has_class("visible")
             if event.key == "ctrl+p" and self.query_one("#pty_target_bar").has_class("hidden"):
-                # Don't trigger autocomplete if we are in PTY target input
                 event.prevent_default()
-                if vis: p.remove_class("visible")
-                else: p.add_class("visible"); self.update_palette(inp.text)
+                if vis:
+                    p.remove_class("visible")
+                    p.styles.height = 0
+                else:
+                    query = "" if (self.input_mode == "NOTE" and inp.selection is not None) else inp.text
+                    self.update_palette(query)
             elif event.key in ("up", "down") and vis:
-                event.prevent_default(); p.highlighted = max(0, min(p.option_count-1, (p.highlighted or 0) + (-1 if event.key == "up" else 1))); self.sync_input()
+                event.prevent_default()
+                p.highlighted = max(0, min(p.option_count-1, (p.highlighted or 0) + (-1 if event.key == "up" else 1)))
+                if not (self.input_mode == "NOTE" and inp.selection is not None):
+                    self.sync_input()
             elif event.key == "tab":
                 event.prevent_default()
-                if not vis: p.add_class("visible"); self.update_palette(inp.text)
-                else: self.sync_input(); p.remove_class("visible")
+                if not vis:
+                    # In NOTE mode with selection, show all md elements (empty query)
+                    if self.input_mode == "NOTE" and inp.selection is not None:
+                        query = ""
+                    else:
+                        query = inp.text
+                    logging.debug(f"Client: tab pressed, inp.text={inp.text!r}, cursor={inp.cursor_location}")
+                    self.update_palette(query)
+                else:
+                    self.sync_input()
+                    p.remove_class("visible")
+                    p.styles.height = 0
         elif self.input_mode == "SELECTION":
             focused = self.focused; blocks = [c for c in self.query_one("#command_history").children if isinstance(c, BaseBlock) and not c.has_class("filtered-out")]
             if event.key == "ctrl+p":
@@ -1756,6 +2021,7 @@ class ClientApp(App):
 
     @on(TextArea.Changed, "#main_input")
     def in_ch(self, event):
+        logging.debug(f"Client: TextArea.Changed text={event.text_area.text!r} cursor={event.text_area.cursor_location} suppress={self._suppress_search} palette_visible={self.query_one('#palette').has_class('visible')}")
         if not self._suppress_search and self.query_one("#palette").has_class("visible"): self.update_palette(event.text_area.text)
         self._suppress_search = False
 
@@ -1780,8 +2046,18 @@ class ClientApp(App):
             event.stop()
             event.prevent_default()
 
+    def _do_shutdown(self):
+        self.exit()
+
     def on_unmount(self):
-        if self.writer: self.writer.close()
+        self.history.save()
+        if self.writer:
+            try:
+                msg = json.dumps({"type": "shutdown"}).encode() + b"\n"
+                self.writer.write(msg)
+            except:
+                pass
+            self.writer.close()
 
 from branding import setup_parser
 

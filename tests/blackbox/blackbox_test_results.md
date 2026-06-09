@@ -1,6 +1,6 @@
 # Neptune Blackbox Test Results
 
-**Automated Verification Run:** Tue Jun  2 06:42:37 2026
+**Automated Verification Run:** Wed Jun  3 21:50:05 2026
 
 | Feature Test | Result | Details |
 |--------------|--------|---------|
@@ -13,6 +13,6 @@
 | Delete block via Selection Mode | ✅ PASS |  |
 | Setup MoveMe | ✅ PASS |  |
 | Reorder block (Ctrl+Up) | ✅ PASS |  |
-| Path Autocomplete Visibility | ✅ PASS |  |
-| Setup YankMe | ✅ PASS |  |
-| Yank and Paste block | ✅ PASS |  |
+| Path Autocomplete Visibility | ❌ FAIL | Expected 'SHELL:' not found |
+| Setup YankMe | ❌ FAIL | Expected 'YankMe' not found |
+| Yank and Paste block | ❌ FAIL | Duplicated content not found |

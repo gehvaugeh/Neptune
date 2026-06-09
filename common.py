@@ -2,11 +2,18 @@ import os
 import json
 import random
 import shutil
+import re
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKFLOW_FILE = os.path.join(BASE_DIR, "termux_workflows.json")
 HISTORY_FILE = os.path.join(BASE_DIR, "history.txt")
+REMOTE_HOSTS_FILE = os.path.join(BASE_DIR, "remote_hosts.txt")
 THEME_FILE = os.path.join(BASE_DIR, "theme.css")
+
+_ANSI_STRIP = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
+def strip_ansi(text: str) -> str:
+    """Strip ANSI escape sequences from a string."""
+    return _ANSI_STRIP.sub('', text)
 
 def get_shell():
     env_shell = os.environ.get("SHELL")
@@ -49,6 +56,7 @@ class HistoryManager:
         if not cmd.strip(): return
         if cmd in self.cache: self.cache.remove(cmd)
         self.cache.append(cmd)
+        self.save()
     def save(self):
         with open(HISTORY_FILE, "w") as f:
             for cmd in self.cache: f.write(f"{cmd}\n")

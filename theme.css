@@ -71,11 +71,21 @@ ModalScreen {
 }
 
 #mode_indicator {
-    width: 1fr;
+    width: auto;
     padding: 0 1;
     height: 1;
     text-style: bold;
     color: $neptune-primary;
+}
+
+#dock_status_bar {
+    height: 1;
+    width: 100%;
+}
+
+#autocomplete_spinner {
+    color: $success;
+    text-style: bold;
 }
 
 /* Block-Struktur für Notebook-Feeling */
@@ -185,15 +195,17 @@ NoteBlock {
 /* Autocomplete Palette - Expanding Upwards */
 #palette {
     display: none;
-    max-height: 12;
+    height: 0;
+    max-height: 6;
     background: $bg-block;
-    border-top: solid $border;
+    border: none;
     color: $text-main;
     scrollbar-gutter: stable;
 }
 
 #palette.visible {
     display: block;
+    border-bottom: solid $border;
 }
 
 #bottom_dock {
@@ -201,7 +213,7 @@ NoteBlock {
 }
 
 #palette {
-    dock: top;
+    /* No dock: top; let it be part of the vertical flow */
 }
 
 #palette > .option-list--option {
@@ -211,6 +223,8 @@ NoteBlock {
 #palette > .option-list--option.-highlighted {
     background: $neptune-dim;
 }
+
+
 
 /* Modals */
 
@@ -243,6 +257,15 @@ NoteBlock {
     width: 80;
     height: auto;
     align: center middle;
+}
+
+#host_history_list, #key_list {
+    max-height: 10;
+    border: solid $primary;
+    background: $surface;
+}
+#host_history_list.hidden, #key_list.hidden {
+    display: none;
 }
 
 #pty_target_bar {

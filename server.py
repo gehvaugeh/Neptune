@@ -39,6 +39,14 @@ class Server:
             if b.get("id") == block_id: return b
         return None
 
+    async def shutdown(self):
+        print("Server: shutting down...")
+        for pty in list(self.pty_manager.ptys.values()):
+            await pty.kill()
+        if os.path.exists(self.socket_path):
+            os.remove(self.socket_path)
+        asyncio.get_running_loop().stop()
+
     async def handle_client(self, reader, writer):
         user_id = str(uuid.uuid4())
         self.session_manager.clients[writer] = {"id": user_id, "color": "white"}
@@ -241,6 +249,36 @@ class Server:
                         await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                 elif msg_type == "pty.list":
                     await self.session_manager.send_to_client(writer, json.dumps({"type":"pty.list", "ptys":self.pty_manager.list_ptys()}).encode()+b"\n", user_id)
+                elif msg_type == "shutdown":
+                    await self.shutdown()
+                    return
+                elif msg_type == "autocomplete_query":
+                    _msg, _writer, _uid = msg, writer, user_id
+                    async def handle_autocomplete():
+                        try:
+                            uid = _msg.get("pty_uid", 0)
+                            query = _msg.get("query", "")
+                            request_id = _msg.get("request_id")
+                            logging.debug(f"Server: Received autocomplete_query for UID {uid}, query: '{query}' rid={request_id}")
+
+                            uid = int(uid) if uid else 0
+
+                            results = []
+                            if uid in self.pty_manager.ptys:
+                                results = await self.pty_manager.ptys[uid].get_completions(query)
+                                logging.debug(f"Server: get_completions returned {len(results)} items")
+                            else:
+                                logging.warning(f"Server: UID {uid} not found in ptys")
+
+                            resp = {"type": "autocomplete_response", "results": results, "request_id": request_id}
+                            resp_str = json.dumps(resp)
+                            logging.debug(f"Server: Sending autocomplete_response rid={request_id}, {len(results)} items")
+                            await self.session_manager.send_to_client(_writer, resp_str.encode() + b"\n", _uid)
+                            logging.debug(f"Server: Sent autocomplete_response rid={request_id}")
+                        except Exception as e:
+                            logging.error(f"Server: autocomplete error: {type(e).__name__}: {e}")
+
+                    asyncio.create_task(handle_autocomplete())
         except: pass
         finally:
             if writer in self.session_manager.clients: del self.session_manager.clients[writer]
@@ -256,9 +294,27 @@ class Server:
 
     async def start(self):
         await self.pty_manager.create_local("local-0")
+        # Remove stale SSH ControlMaster sockets from previous runs
+        cwd = os.getcwd()
+        cleaned = []
+        for f in os.listdir(cwd):
+            if f.startswith("neptune-") and f.endswith(".sock"):
+                try:
+                    os.remove(os.path.join(cwd, f))
+                    cleaned.append(f)
+                except:
+                    pass
+        if cleaned:
+            print(f"Recovery: removed stale socket(s): {', '.join(cleaned)}")
         if os.path.exists(self.socket_path): os.remove(self.socket_path)
         s = await asyncio.start_unix_server(self.handle_client, self.socket_path, limit=10*1024*1024)
         print(f"Server started on {self.socket_path}")
+
+        # Signal-Handler für graceful shutdown
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
+
         async with s:
             try: await s.serve_forever()
             finally:
