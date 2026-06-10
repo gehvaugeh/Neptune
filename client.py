@@ -46,8 +46,9 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work, on, events, message
 
-from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE
-from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider, LocalFileProvider, MD_PREFIX_RE
+from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE, get_current_token
+from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, LocalFileProvider
+from markdown_toolbox import MarkdownToolboxPanel, MdElementSelected
 from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
 
 # Setup client logging
@@ -686,7 +687,6 @@ class ClientApp(App):
         self.providers = {
             "BASH": BashAutocompleteProvider(),
             "CMD": CmdAutocompleteProvider(self.available_commands),
-            "NOTE": MarkdownAutocompleteProvider()
         }
 
     def _load_remote_hosts(self) -> List[str]:
@@ -721,6 +721,7 @@ class ClientApp(App):
             yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]", id="notebook_header")
         with Vertical(id="bottom_dock") as dock:
             dock.can_focus = True
+            yield MarkdownToolboxPanel(id="md_toolbox")
             yield OptionList(id="palette")
             with Horizontal(id="dock_status_bar"):
                 self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
@@ -1175,6 +1176,7 @@ class ClientApp(App):
         self.update_mode_label()
         self.query_one("#mode_prefix").update("")
         self.query_one("#palette").remove_class("visible")
+        self.query_one("#md_toolbox").hide()
         inp = self.query_one("#main_input")
         inp.text = ""
         inp.disabled = True
@@ -1331,6 +1333,7 @@ class ClientApp(App):
             ta.text = ""
             self.query_one("#palette").remove_class("visible")
             self.query_one("#palette").styles.height = 0
+            self.query_one("#md_toolbox").hide()
 
             target_pty_uid = getattr(self, "current_pty_uid", self.default_pty_uid)
 
@@ -1565,11 +1568,6 @@ class ClientApp(App):
         with open(os.path.join(os.path.dirname(__file__), "termux_workflows.json"), "w") as f: json.dump(wfs, f, indent=4)
         self.workflows = load_workflows()
 
-    def _get_current_token(self, text: str) -> str:
-        if not text or text.endswith(" "): return ""
-        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
-        return parts[-1] if parts else ""
-
     @work(exclusive=True)
     async def update_palette(self, val: str):
         logging.debug(f"Client: update_palette called with val='{val}' len={len(val)} input_mode={self.input_mode}")
@@ -1627,7 +1625,7 @@ class ClientApp(App):
             anim_task.cancel()
 
         p.clear_options()
-        type_colors = {"shell": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252", "path": "green"}
+        type_colors = {"shell": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "path": "green"}
 
         for s in suggestions:
             color = type_colors.get(s['type'], "white")
@@ -1674,46 +1672,6 @@ class ClientApp(App):
                 inp.text = inp.text + val
             else:
                 inp.text = val
-        elif self.input_mode == "NOTE":
-            ctype = None
-            for s in self._last_suggestions:
-                if s.get("value") == val:
-                    ctype = s.get("type"); break
-
-            if ctype == "md":
-                if inp.selection is not None and inp.selected_text:
-                    placeholder = None
-                    for s in self._last_suggestions:
-                        if s.get("value") == val:
-                            placeholder = s.get("placeholder")
-                            break
-                    start_idx = inp.document.get_index_from_location(inp.selection.start)
-                    end_idx = inp.document.get_index_from_location(inp.selection.end)
-                    if placeholder and placeholder in val:
-                        wrapped = val.replace(placeholder, inp.selected_text, 1)
-                    else:
-                        wrapped = val
-                    inp.text = inp.text[:start_idx] + wrapped + inp.text[end_idx:]
-                else:
-                    provider = self.providers["NOTE"]
-                    token = provider._get_current_token(inp.text)
-                    if token:
-                        idx = inp.text.rfind(token)
-                        inp.text = inp.text[:idx] + val
-                    elif inp.text.endswith(" "):
-                        inp.text = inp.text + val
-                    else:
-                        inp.text = val
-            elif ctype == "path":
-                parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', inp.text)
-                token = parts[-1] if parts and not inp.text.endswith(" ") else ""
-                if token:
-                    idx = inp.text.rfind(token)
-                    inp.text = inp.text[:idx] + val
-                else:
-                    inp.text = inp.text + val
-            else:
-                inp.text = val
         else:
             inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
@@ -1727,6 +1685,41 @@ class ClientApp(App):
         self.query_one("#main_input").focus()
         if self.input_mode == "BASH":
             self.update_palette(self.query_one("#main_input").text)
+
+    @on(MdElementSelected)
+    def handle_md_selected(self, event: MdElementSelected):
+        toolbox = self.query_one("#md_toolbox")
+        toolbox.hide()
+        inp = self.query_one("#main_input")
+
+        sel = inp.selection
+        sel_text = inp.selected_text if sel else ""
+        has_sel = sel is not None and sel_text
+
+        inp.focus()
+
+        el = event.element
+        val = el["value"]
+        placeholder = el.get("placeholder")
+
+        if has_sel:
+            if placeholder and placeholder in val:
+                wrapped = val.replace(placeholder, sel_text, 1)
+            else:
+                wrapped = val
+            # Need to check which index is smaller to be independent of user selectiondirection
+            start = inp.document.get_index_from_location(sel.start)
+            end = inp.document.get_index_from_location(sel.end)
+            first = min(start, end)
+            last = max(start,end)
+            inp.text = inp.text[:first] + wrapped + inp.text[last:]
+
+        else:
+            clean = val.replace(placeholder, "").strip() if placeholder else val
+            inp.text = inp.text + clean
+
+        self._suppress_search = True
+        inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
 
     @on(Input.Submitted, "#pty_target_input")
     async def pty_target_submitted(self, event: Input.Submitted):
@@ -1834,6 +1827,12 @@ class ClientApp(App):
                 self.last_escape_time = now
 
         if event.key == "escape" and self.input_mode != "CONTROL":
+            toolbox = self.query_one("#md_toolbox")
+            if toolbox.has_class("-visible"):
+                toolbox.hide()
+                self.query_one("#main_input").focus()
+                event.prevent_default()
+                return
             self.action_esc_pressed()
             return
 
@@ -1905,6 +1904,40 @@ class ClientApp(App):
             elif event.character == ";": self.enter_input_mode(prefix=";"); event.stop(); event.prevent_default()
             elif event.character == "s": self.enter_selection_mode(); event.stop(); event.prevent_default()
         elif self.input_mode in ("BASH", "CMD", "NOTE", "INPUT"):
+            toolbox = self.query_one("#md_toolbox")
+
+            if self.input_mode == "NOTE":
+                tb_vis = toolbox.has_class("-visible")
+                if tb_vis:
+                    if event.key in ("up", "down"):
+                        event.prevent_default()
+                        ol = toolbox.query_one("#md_list")
+                        idx = ol.highlighted if ol.highlighted is not None else 0
+                        delta = -1 if event.key == "up" else 1
+                        ol.highlighted = max(0, min(ol.option_count - 1, idx + delta))
+                    elif event.key == "enter":
+                        event.prevent_default()
+                        ol = toolbox.query_one("#md_list")
+                        if ol.highlighted is not None:
+                            toolbox._select(ol.get_option_at_index(ol.highlighted).id)
+                    elif event.key == "tab":
+                        event.prevent_default()
+                        ol = toolbox.query_one("#md_list")
+                        if ol.highlighted is not None:
+                            toolbox._select(ol.get_option_at_index(ol.highlighted).id)
+                        else:
+                            toolbox.hide()
+                            self.query_one("#main_input").focus()
+                    return
+                elif event.key == "tab":
+                    event.prevent_default()
+                    toolbox.show()
+                    return
+                elif event.key == "ctrl+p" and self.query_one("#pty_target_bar").has_class("hidden"):
+                    event.prevent_default()
+                    toolbox.show()
+                    return
+
             vis = p.has_class("visible")
             if event.key == "ctrl+p" and self.query_one("#pty_target_bar").has_class("hidden"):
                 event.prevent_default()
@@ -1912,23 +1945,16 @@ class ClientApp(App):
                     p.remove_class("visible")
                     p.styles.height = 0
                 else:
-                    query = "" if (self.input_mode == "NOTE" and inp.selection is not None) else inp.text
-                    self.update_palette(query)
+                    self.update_palette(inp.text)
             elif event.key in ("up", "down") and vis:
                 event.prevent_default()
                 p.highlighted = max(0, min(p.option_count-1, (p.highlighted or 0) + (-1 if event.key == "up" else 1)))
-                if not (self.input_mode == "NOTE" and inp.selection is not None):
-                    self.sync_input()
+                self.sync_input()
             elif event.key == "tab":
                 event.prevent_default()
                 if not vis:
-                    # In NOTE mode with selection, show all md elements (empty query)
-                    if self.input_mode == "NOTE" and inp.selection is not None:
-                        query = ""
-                    else:
-                        query = inp.text
                     logging.debug(f"Client: tab pressed, inp.text={inp.text!r}, cursor={inp.cursor_location}")
-                    self.update_palette(query)
+                    self.update_palette(inp.text)
                 else:
                     self.sync_input()
                     p.remove_class("visible")

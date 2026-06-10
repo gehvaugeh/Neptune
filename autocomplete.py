@@ -1,17 +1,18 @@
 import os
-import re
 import asyncio
 import logging
 from typing import List, Dict, Any
-from common import fuzzy_match
+from common import fuzzy_match, get_current_token
 
-# Regex to detect markdown syntax prefixes in text for NOTE mode autocomplete
-MD_PREFIX_RE = re.compile(r'(#{1,3}\s|-\s|\*\s|\*\*|```|\[)')
+
 
 class AutocompleteProvider:
     async def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
         """Returns a list of suggestion objects: {'value': str, 'display': str, 'description': str, 'type': str}"""
         return []
+
+    def _get_current_token(self, text: str) -> str:
+        return get_current_token(text)
 
 class HistoryProvider(AutocompleteProvider):
     async def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -122,10 +123,7 @@ class BashAutocompleteProvider(AutocompleteProvider):
         return all_suggestions[:5]
 
     def _get_current_token(self, text: str) -> str:
-        if not text or text.endswith(" "): return ""
-        # Improved tokenization to handle quotes and spaces correctly
-        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
-        return parts[-1] if parts else ""
+        return get_current_token(text)
 
 class LocalFileProvider(AutocompleteProvider):
     async def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -166,11 +164,6 @@ class LocalFileProvider(AutocompleteProvider):
         except (PermissionError, FileNotFoundError):
             return []
 
-    def _get_current_token(self, text: str) -> str:
-        if not text or text.endswith(" "): return ""
-        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
-        return parts[-1] if parts else ""
-
 class CmdAutocompleteProvider(AutocompleteProvider):
     def __init__(self, commands: List[Dict[str, str]]):
         self.commands = commands
@@ -195,26 +188,3 @@ class CmdAutocompleteProvider(AutocompleteProvider):
                 })
         return suggestions[:5]
 
-class MarkdownAutocompleteProvider(AutocompleteProvider):
-    SYNTAX = [
-        {"value": "# Header 1", "display": "# Header 1", "description": "H1 title", "type": "md"},
-        {"value": "## Header 2", "display": "## Header 2", "description": "H2 title", "type": "md"},
-        {"value": "### Header 3", "display": "### Header 3", "description": "H3 title", "type": "md"},
-        {"value": "**Bold**", "display": "**Bold**", "description": "Bold text", "type": "md", "placeholder": "Bold"},
-        {"value": "*Italic*", "display": "*Italic*", "description": "Italic text", "type": "md", "placeholder": "Italic"},
-        {"value": "```bash\n\n```", "display": "``` Code Block", "description": "Bash code block", "type": "md"},
-        {"value": "- List Item", "display": "- List Item", "description": "Unordered list item", "type": "md"},
-        {"value": "[label](url)", "display": "[Link]", "description": "Markdown link", "type": "md", "placeholder": "label"},
-    ]
-
-    async def get_suggestions(self, query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
-        if not query: return self.SYNTAX[:5]
-        token = self._get_current_token(query)
-        if not token:
-            return self.SYNTAX[:5]
-        return [s for s in self.SYNTAX if fuzzy_match(token, s['display'])][:5]
-
-    def _get_current_token(self, text: str) -> str:
-        if not text or text.endswith(" "): return ""
-        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
-        return parts[-1] if parts else ""

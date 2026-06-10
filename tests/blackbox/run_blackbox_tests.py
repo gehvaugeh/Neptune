@@ -166,50 +166,47 @@ def run_tests():
         oracle.send_input("<esc><esc>")
         oracle.wait_for_idle(0.5)
 
-        # 13. NOTE Markdown Autocomplete
-        print("Testing NOTE Markdown Autocomplete...")
+        # 13. NOTE Markdown Toolbox — open, filter empty, select first
+        print("Testing NOTE Markdown Toolbox...")
         oracle.send_input("<esc><esc>:clear <return>")
         oracle.wait_for_idle(3.0)
-        oracle.send_input(";# He<tab>")
+        oracle.send_input(";<tab>")
         oracle.wait_for_idle(2.0)
-        assert_screen("MD:", "NOTE Markdown - MD entries visible")
-        oracle.send_input("<tab>")
+        assert_screen("H1:", "NOTE Toolbox - entries visible")
+        oracle.send_input("<enter>")
         oracle.wait_for_idle(1.0)
-        assert_not_on_screen("MD:", "NOTE Markdown - palette closes after selection")
+        assert_not_on_screen("H1:", "NOTE Toolbox - closes after selection")
         oracle.send_input("<esc><esc>")
         oracle.wait_for_idle(0.5)
 
-        # 14. NOTE Markdown — last-word replacement and text verification
-        print("Testing NOTE Markdown last-word replacement...")
+        # 14. NOTE Toolbox — filter text, select, submit preserves existing input
+        print("Testing NOTE Toolbox with existing text...")
         oracle.send_input("<esc><esc>:clear <return>")
         oracle.wait_for_idle(3.0)
-        oracle.send_input(";some text ##<tab>")
+        oracle.send_input(";some text <tab>")
         oracle.wait_for_idle(2.0)
-        assert_screen("MD:", "NOTE last-word - MD entries visible")
-        oracle.send_input("<tab>")
+        assert_screen("H1:", "NOTE Toolbox with text - entries visible")
+        oracle.send_input("##<enter>")
         oracle.wait_for_idle(1.0)
-        assert_not_on_screen("MD:", "NOTE last-word - palette closes")
-        # Submit and verify the note content preserves the original prefix
+        assert_not_on_screen("H1:", "NOTE Toolbox with text - closes")
         oracle.send_input("<return>")
         oracle.wait_for_idle(2.0)
-        assert_screen("some text", "NOTE last-word - original text preserved")
+        assert_screen("some text", "NOTE Toolbox - original text preserved")
         oracle.send_input("<esc><esc>")
         oracle.wait_for_idle(0.5)
 
-        # 15. NOTE Markdown — arrow navigation (no selection), then select
-        print("Testing NOTE Markdown arrow navigation...")
+        # 15. NOTE Toolbox — arrow navigation, then select
+        print("Testing NOTE Toolbox arrow navigation...")
         oracle.send_input("<esc><esc>:clear <return>")
         oracle.wait_for_idle(3.0)
-        oracle.send_input(";##<tab>")
+        oracle.send_input(";<tab>")
         oracle.wait_for_idle(2.0)
-        assert_screen("MD:", "NOTE arrows - MD entries visible")
-        # Navigate with down arrow twice
+        assert_screen("H1:", "NOTE Toolbox arrows - entries visible")
         oracle.send_input("<down><down>")
         oracle.wait_for_idle(1.0)
-        # Select with tab
-        oracle.send_input("<tab>")
+        oracle.send_input("<enter>")
         oracle.wait_for_idle(1.0)
-        assert_not_on_screen("MD:", "NOTE arrows - palette closes after navigation")
+        assert_not_on_screen("H1:", "NOTE Toolbox arrows - toolbox closes after navigation")
         oracle.send_input("<esc><esc>")
         oracle.wait_for_idle(0.5)
 
