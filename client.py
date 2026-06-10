@@ -46,8 +46,9 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work, on, events, message
 
-from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE
-from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, MarkdownAutocompleteProvider, LocalFileProvider, MD_PREFIX_RE
+from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE, get_current_token
+from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, LocalFileProvider
+from markdown_toolbox import MarkdownToolboxPanel, MdElementSelected
 from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
 
 # Setup client logging
@@ -339,6 +340,8 @@ class CommandBlock(BaseBlock):
         self._style_cache = {}
         self._color_error = False
         self._last_status_text = "Ready"
+        self.zoomed = False
+        self._spinner_task = None
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -356,8 +359,21 @@ class CommandBlock(BaseBlock):
         yield Label(f"[grey44]Ready[/] [cyan][{self.pty_name} (ID:{pty_id_display})][/]", id="info", classes="block-info")
 
     def on_resize(self, event: events.Resize) -> None:
-        # Fixed size TTY, no automatic resizing to match widget size
-        pass
+        try:
+            out = self.query_one("#output")
+            new_cols = out.content_region.width
+            if new_cols >= 40 and new_cols != self.terminal_screen.columns:
+                self.terminal_screen.resize(self.terminal_screen.lines, new_cols)
+                self.render_terminal()
+                if self.pty_uid is not None:
+                    asyncio.create_task(self.app.send_message({
+                        "type": "terminal_resize",
+                        "pty_uid": self.pty_uid,
+                        "rows": self.terminal_screen.lines,
+                        "cols": new_cols,
+                    }))
+        except:
+            pass
 
     def append_output(self, text: str):
         if not isinstance(text, str):
@@ -523,15 +539,52 @@ class CommandBlock(BaseBlock):
         header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
         label.update(f"{header_text}\n[white]{escape(self.content)}[/]")
 
+    def _build_info_text(self, icon="") -> str:
+        pty_id_display = str(self.pty_uid) if self.pty_uid is not None else "???"
+        pty_info = f" [cyan][{self.pty_name} (ID:{pty_id_display})][/]"
+        text = f"{self._last_status_text}{icon}{pty_info}"
+        if self._color_error:
+            text += " [dim]⚠ color error[/]"
+        return text
+
+    def _start_spinner(self):
+        if self._spinner_task:
+            return
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        async def _animate():
+            i = 0
+            try:
+                while True:
+                    icon = f" {frames[i % len(frames)]}"
+                    if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
+                        icon += " [interactive] TUI"
+                    try:
+                        self.query_one("#info").update(self._build_info_text(icon))
+                    except:
+                        break
+                    i += 1
+                    await asyncio.sleep(0.08)
+            except asyncio.CancelledError:
+                pass
+            except:
+                pass
+        self._spinner_task = asyncio.create_task(_animate())
+
+    def _stop_spinner(self):
+        if self._spinner_task:
+            self._spinner_task.cancel()
+            self._spinner_task = None
+
     def update_status(self, status):
         if not self.is_mounted: return
+        self._stop_spinner()
         info = self.query_one("#info")
 
-        icon = ""
         if status == "running":
             self._last_status_text = "[yellow]Running...[/]"
             self.add_class("running")
-            icon = " ⟳"
+            self._start_spinner()
+            return
         elif "queued" in status:
             num = status.split("(")[1].split(")")[0]
             self._last_status_text = f"[blue]⏳ In Queue (#{num})[/]"
@@ -547,19 +600,12 @@ class CommandBlock(BaseBlock):
             icon = " ✗"
         else:
             self._last_status_text = f"[grey44]{status.capitalize()}[/]"
+            icon = ""
 
         if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
             icon += " [interactive] TUI"
 
-        # Show PTY Name and UID in info bar
-        pty_id_display = str(self.pty_uid) if self.pty_uid is not None else "???"
-        pty_info = f" [cyan][{self.pty_name} (ID:{pty_id_display})][/]"
-        display_text = f"{self._last_status_text}{icon}{pty_info}"
-
-        if self._color_error:
-            info.update(f"{display_text} [dim]⚠ color error[/]")
-        else:
-            info.update(display_text)
+        info.update(self._build_info_text(icon))
 
     async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
@@ -686,7 +732,6 @@ class ClientApp(App):
         self.providers = {
             "BASH": BashAutocompleteProvider(),
             "CMD": CmdAutocompleteProvider(self.available_commands),
-            "NOTE": MarkdownAutocompleteProvider()
         }
 
     def _load_remote_hosts(self) -> List[str]:
@@ -721,6 +766,7 @@ class ClientApp(App):
             yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]", id="notebook_header")
         with Vertical(id="bottom_dock") as dock:
             dock.can_focus = True
+            yield MarkdownToolboxPanel(id="md_toolbox")
             yield OptionList(id="palette")
             with Horizontal(id="dock_status_bar"):
                 self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
@@ -737,10 +783,8 @@ class ClientApp(App):
                 yield m_inp
 
     def on_mount(self):
-        # Establish fixed TTY dimensions based on initial screen size
-        # Margin for borders, padding, scrollbars and locking bars
-        self.preferred_cols = max(40, self.screen.size.width - 10)
-        self.preferred_rows = 24  # Standard fixed height for terminal blocks
+        self.preferred_cols = max(40, self.screen.size.width - 14)
+        self.preferred_rows = 24
 
         # Register exception handler for crash autosave
         loop = asyncio.get_event_loop()
@@ -750,10 +794,7 @@ class ClientApp(App):
         self.enter_normal_mode()
 
     def on_ready(self):
-        # Focus screen or bottom dock to allow immediate use of prefix keys (! : ;)
-        # We use call_after_refresh to ensure the layout is settled
         self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
-
     def _exception_handler(self, loop, context):
         exc = context.get("exception")
         if exc:
@@ -970,6 +1011,29 @@ class ClientApp(App):
                     if "pty_uid" in data or "pty_name" in data:
                          block.update_status(getattr(block, "_last_status", "ready"))
 
+                    if "zoomed" in data:
+                        if data["zoomed"] and not block.zoomed:
+                            rows = data.get("zoom_rows", self.preferred_rows)
+                            cols = data.get("zoom_cols", self.preferred_cols)
+                            block.zoomed = True
+                            block.styles.height = rows
+                            block.query_one("#output").styles.height = rows - 3
+                            block.query_one("#output").styles.max_height = rows - 3
+                            block.add_class("-zoomed")
+                            block.terminal_screen.resize(rows, cols)
+                            block.render_terminal()
+                            block.scroll_visible()
+                        elif not data["zoomed"] and block.zoomed:
+                            rows, cols = self.preferred_rows, self.preferred_cols
+                            block.zoomed = False
+                            block.terminal_screen.resize(rows, cols)
+                            block.styles.height = None
+                            block.query_one("#output").styles.height = None
+                            block.query_one("#output").styles.max_height = rows
+                            block.remove_class("-zoomed")
+                            block.render_terminal()
+                            block.scroll_visible()
+
                     # Auto-exit CONTROL mode if block finishes
                     if self.input_mode == "CONTROL" and self.focused == block:
                         if old_status == "running" and data.get("status") != "running":
@@ -1130,6 +1194,17 @@ class ClientApp(App):
             user_info = self.users.get(locked_by, {})
             new_block.update_lock(locked_by, user_info.get("color", "white"))
 
+        if data.get("zoomed") and isinstance(new_block, CommandBlock):
+            rows = data.get("zoom_rows", self.preferred_rows)
+            cols = data.get("zoom_cols", self.preferred_cols)
+            new_block.zoomed = True
+            new_block.styles.height = rows
+            new_block.query_one("#output").styles.height = rows - 3
+            new_block.query_one("#output").styles.max_height = rows - 3
+            new_block.add_class("-zoomed")
+            new_block.terminal_screen.resize(rows, cols)
+            new_block.render_terminal()
+
         # Apply current filter to the new block
         inp = self.query_one("#filter_input")
         self._filter_single_block(new_block, inp.value)
@@ -1175,6 +1250,7 @@ class ClientApp(App):
         self.update_mode_label()
         self.query_one("#mode_prefix").update("")
         self.query_one("#palette").remove_class("visible")
+        self.query_one("#md_toolbox").hide()
         inp = self.query_one("#main_input")
         inp.text = ""
         inp.disabled = True
@@ -1331,6 +1407,7 @@ class ClientApp(App):
             ta.text = ""
             self.query_one("#palette").remove_class("visible")
             self.query_one("#palette").styles.height = 0
+            self.query_one("#md_toolbox").hide()
 
             target_pty_uid = getattr(self, "current_pty_uid", self.default_pty_uid)
 
@@ -1469,6 +1546,45 @@ class ClientApp(App):
     def action_clear_session(self):
         asyncio.create_task(self.send_message({"type": "clear_session"}))
 
+    def _zoom_block(self, block: CommandBlock) -> None:
+        container = self.query_one("#command_history")
+        visible_height = container.size.height
+        target_rows = max(self.preferred_rows, visible_height - 3)
+        target_cols = self.preferred_cols
+        if target_rows <= block.terminal_screen.lines:
+            return
+        block.zoomed = True
+        block.styles.height = target_rows
+        block.query_one("#output").styles.height = target_rows - 3
+        block.query_one("#output").styles.max_height = target_rows - 3
+        block.add_class("-zoomed")
+        block.terminal_screen.resize(target_rows, target_cols)
+        asyncio.create_task(self.send_message({
+            "type": "block_zoom",
+            "block_id": block.block_id,
+            "rows": target_rows,
+            "cols": target_cols,
+        }))
+        block.render_terminal()
+        block.scroll_visible()
+
+    def _unzoom_block(self, block: CommandBlock) -> None:
+        rows, cols = self.preferred_rows, self.preferred_cols
+        block.zoomed = False
+        block.terminal_screen.resize(rows, cols)
+        block.styles.height = None
+        block.query_one("#output").styles.height = None
+        block.query_one("#output").styles.max_height = rows
+        block.remove_class("-zoomed")
+        asyncio.create_task(self.send_message({
+            "type": "block_unzoom",
+            "block_id": block.block_id,
+            "rows": rows,
+            "cols": cols,
+        }))
+        block.render_terminal()
+        block.scroll_visible()
+
     async def _rerun_block(self, block):
         if not isinstance(block, CommandBlock): return
 
@@ -1565,11 +1681,6 @@ class ClientApp(App):
         with open(os.path.join(os.path.dirname(__file__), "termux_workflows.json"), "w") as f: json.dump(wfs, f, indent=4)
         self.workflows = load_workflows()
 
-    def _get_current_token(self, text: str) -> str:
-        if not text or text.endswith(" "): return ""
-        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
-        return parts[-1] if parts else ""
-
     @work(exclusive=True)
     async def update_palette(self, val: str):
         logging.debug(f"Client: update_palette called with val='{val}' len={len(val)} input_mode={self.input_mode}")
@@ -1627,7 +1738,7 @@ class ClientApp(App):
             anim_task.cancel()
 
         p.clear_options()
-        type_colors = {"shell": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "md": "bold #ff5252", "path": "green"}
+        type_colors = {"shell": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "path": "green"}
 
         for s in suggestions:
             color = type_colors.get(s['type'], "white")
@@ -1674,46 +1785,6 @@ class ClientApp(App):
                 inp.text = inp.text + val
             else:
                 inp.text = val
-        elif self.input_mode == "NOTE":
-            ctype = None
-            for s in self._last_suggestions:
-                if s.get("value") == val:
-                    ctype = s.get("type"); break
-
-            if ctype == "md":
-                if inp.selection is not None and inp.selected_text:
-                    placeholder = None
-                    for s in self._last_suggestions:
-                        if s.get("value") == val:
-                            placeholder = s.get("placeholder")
-                            break
-                    start_idx = inp.document.get_index_from_location(inp.selection.start)
-                    end_idx = inp.document.get_index_from_location(inp.selection.end)
-                    if placeholder and placeholder in val:
-                        wrapped = val.replace(placeholder, inp.selected_text, 1)
-                    else:
-                        wrapped = val
-                    inp.text = inp.text[:start_idx] + wrapped + inp.text[end_idx:]
-                else:
-                    provider = self.providers["NOTE"]
-                    token = provider._get_current_token(inp.text)
-                    if token:
-                        idx = inp.text.rfind(token)
-                        inp.text = inp.text[:idx] + val
-                    elif inp.text.endswith(" "):
-                        inp.text = inp.text + val
-                    else:
-                        inp.text = val
-            elif ctype == "path":
-                parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', inp.text)
-                token = parts[-1] if parts and not inp.text.endswith(" ") else ""
-                if token:
-                    idx = inp.text.rfind(token)
-                    inp.text = inp.text[:idx] + val
-                else:
-                    inp.text = inp.text + val
-            else:
-                inp.text = val
         else:
             inp.text = val
         inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
@@ -1727,6 +1798,41 @@ class ClientApp(App):
         self.query_one("#main_input").focus()
         if self.input_mode == "BASH":
             self.update_palette(self.query_one("#main_input").text)
+
+    @on(MdElementSelected)
+    def handle_md_selected(self, event: MdElementSelected):
+        toolbox = self.query_one("#md_toolbox")
+        toolbox.hide()
+        inp = self.query_one("#main_input")
+
+        sel = inp.selection
+        sel_text = inp.selected_text if sel else ""
+        has_sel = sel is not None and sel_text
+
+        inp.focus()
+
+        el = event.element
+        val = el["value"]
+        placeholder = el.get("placeholder")
+
+        if has_sel:
+            if placeholder and placeholder in val:
+                wrapped = val.replace(placeholder, sel_text, 1)
+            else:
+                wrapped = val
+            # Need to check which index is smaller to be independent of user selectiondirection
+            start = inp.document.get_index_from_location(sel.start)
+            end = inp.document.get_index_from_location(sel.end)
+            first = min(start, end)
+            last = max(start,end)
+            inp.text = inp.text[:first] + wrapped + inp.text[last:]
+
+        else:
+            clean = val.replace(placeholder, "").strip() if placeholder else val
+            inp.text = inp.text + clean
+
+        self._suppress_search = True
+        inp.cursor_location = (len(inp.document.lines)-1, len(inp.document.lines[-1]))
 
     @on(Input.Submitted, "#pty_target_input")
     async def pty_target_submitted(self, event: Input.Submitted):
@@ -1834,6 +1940,12 @@ class ClientApp(App):
                 self.last_escape_time = now
 
         if event.key == "escape" and self.input_mode != "CONTROL":
+            toolbox = self.query_one("#md_toolbox")
+            if toolbox.has_class("-visible"):
+                toolbox.hide()
+                self.query_one("#main_input").focus()
+                event.prevent_default()
+                return
             self.action_esc_pressed()
             return
 
@@ -1905,6 +2017,40 @@ class ClientApp(App):
             elif event.character == ";": self.enter_input_mode(prefix=";"); event.stop(); event.prevent_default()
             elif event.character == "s": self.enter_selection_mode(); event.stop(); event.prevent_default()
         elif self.input_mode in ("BASH", "CMD", "NOTE", "INPUT"):
+            toolbox = self.query_one("#md_toolbox")
+
+            if self.input_mode == "NOTE":
+                tb_vis = toolbox.has_class("-visible")
+                if tb_vis:
+                    if event.key in ("up", "down"):
+                        event.prevent_default()
+                        ol = toolbox.query_one("#md_list")
+                        idx = ol.highlighted if ol.highlighted is not None else 0
+                        delta = -1 if event.key == "up" else 1
+                        ol.highlighted = max(0, min(ol.option_count - 1, idx + delta))
+                    elif event.key == "enter":
+                        event.prevent_default()
+                        ol = toolbox.query_one("#md_list")
+                        if ol.highlighted is not None:
+                            toolbox._select(ol.get_option_at_index(ol.highlighted).id)
+                    elif event.key == "tab":
+                        event.prevent_default()
+                        ol = toolbox.query_one("#md_list")
+                        if ol.highlighted is not None:
+                            toolbox._select(ol.get_option_at_index(ol.highlighted).id)
+                        else:
+                            toolbox.hide()
+                            self.query_one("#main_input").focus()
+                    return
+                elif event.key == "tab":
+                    event.prevent_default()
+                    toolbox.show()
+                    return
+                elif event.key == "ctrl+p" and self.query_one("#pty_target_bar").has_class("hidden"):
+                    event.prevent_default()
+                    toolbox.show()
+                    return
+
             vis = p.has_class("visible")
             if event.key == "ctrl+p" and self.query_one("#pty_target_bar").has_class("hidden"):
                 event.prevent_default()
@@ -1912,23 +2058,16 @@ class ClientApp(App):
                     p.remove_class("visible")
                     p.styles.height = 0
                 else:
-                    query = "" if (self.input_mode == "NOTE" and inp.selection is not None) else inp.text
-                    self.update_palette(query)
+                    self.update_palette(inp.text)
             elif event.key in ("up", "down") and vis:
                 event.prevent_default()
                 p.highlighted = max(0, min(p.option_count-1, (p.highlighted or 0) + (-1 if event.key == "up" else 1)))
-                if not (self.input_mode == "NOTE" and inp.selection is not None):
-                    self.sync_input()
+                self.sync_input()
             elif event.key == "tab":
                 event.prevent_default()
                 if not vis:
-                    # In NOTE mode with selection, show all md elements (empty query)
-                    if self.input_mode == "NOTE" and inp.selection is not None:
-                        query = ""
-                    else:
-                        query = inp.text
                     logging.debug(f"Client: tab pressed, inp.text={inp.text!r}, cursor={inp.cursor_location}")
-                    self.update_palette(query)
+                    self.update_palette(inp.text)
                 else:
                     self.sync_input()
                     p.remove_class("visible")
@@ -1961,6 +2100,11 @@ class ClientApp(App):
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "after", "yank_data": self.yank_buffer}))
             elif event.key == "P":
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "before", "yank_data": self.yank_buffer}))
+            elif event.key == "z" and isinstance(focused, CommandBlock):
+                if focused.zoomed:
+                    self._unzoom_block(focused)
+                else:
+                    self._zoom_block(focused)
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
             elif event.key == "ctrl+s" and isinstance(focused, CommandBlock): self.action_save_workflow(focused.content)
             elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)

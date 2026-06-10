@@ -28,6 +28,15 @@ def get_random_bright_color():
     colors = ["cyan", "magenta", "yellow", "green", "blue", "red", "orange", "springgreen"]
     return random.choice(colors)
 
+def get_current_token(text: str) -> str:
+    if not text or text.endswith(" "):
+        return ""
+    try:
+        parts = re.findall(r'(?:[^\s"\']|"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\')+', text)
+        return parts[-1] if parts else ""
+    except Exception:
+        return ""
+
 def fuzzy_match(query: str, target: str) -> bool:
     if not query: return True
     query, target = query.lower(), target.lower()

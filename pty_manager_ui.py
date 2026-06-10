@@ -333,6 +333,8 @@ class PTYManagerModal(ModalScreen):
 
     def __init__(self, ptys: Dict[int, Dict], default_pty_uid: int):
         super().__init__()
+        self._spinner_task = None
+        self._frame = "⠋"
         self.ptys = ptys
         self.default_pty_uid = default_pty_uid
         self.search_query = ""
@@ -344,9 +346,39 @@ class PTYManagerModal(ModalScreen):
             yield OptionList(id="pty_list")
             yield Label("[dim]Enter: Select | x: Delete | r: Rename | n: New Local | N: New Remote | /: Search | Esc: Close[/]", classes="modal-footer")
 
+    def _start_spinner(self):
+        if self._spinner_task:
+            return
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        async def _animate():
+            i = 0
+            try:
+                while True:
+                    running = any(p.get("status") == "running" for p in self.ptys.values())
+                    if running:
+                        self._frame = frames[i % len(frames)]
+                        self.update_list()
+                        i += 1
+                    await asyncio.sleep(0.3)
+            except asyncio.CancelledError:
+                pass
+            except:
+                pass
+        self._spinner_task = asyncio.create_task(_animate())
+
+    def _stop_spinner(self):
+        if self._spinner_task:
+            self._spinner_task.cancel()
+            self._spinner_task = None
+
     def on_mount(self):
+        self._start_spinner()
         self.update_list()
         self.query_one("#pty_list").focus()
+
+    def dismiss(self, result):
+        self._stop_spinner()
+        return super().dismiss(result)
 
     def update_list(self):
         ol = self.query_one("#pty_list")
@@ -363,7 +395,7 @@ class PTYManagerModal(ModalScreen):
             name = info.get("name", f"pty-{uid}")
 
             icon = "●" if is_default else "○"
-            if status == "running": icon = "⟳"
+            if status == "running": icon = self._frame
 
             display = f"{icon} [bold]ID:{uid:<2}[/] {name:<15} ({status:<8}) {blocks} blocks"
             if is_default: display += " [dim](default)[/]"

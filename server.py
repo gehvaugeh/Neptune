@@ -29,7 +29,7 @@ class Server:
         else:
             pty_name = self.pty_manager.names.get(uid, "unknown")
 
-        block = {"id":str(uuid.uuid4()), "type":block_type, "content":content, "cwd":cwd or os.getcwd(), "output":"", "status":"ready", "locked_by":None, "pty_uid":uid, "pty_name": pty_name}
+        block = {"id":str(uuid.uuid4()), "type":block_type, "content":content, "cwd":cwd or os.getcwd(), "output":"", "status":"ready", "locked_by":None, "pty_uid":uid, "pty_name": pty_name, "zoomed":False, "zoom_rows":None, "zoom_cols":None}
         if index is not None and 0 <= index <= len(self.blocks): self.blocks.insert(index, block)
         else: self.blocks.append(block)
         return block
@@ -204,6 +204,32 @@ class Server:
                     rows, cols = msg.get("rows"), msg.get("cols")
                     self.pty_manager.terminal_size = (rows, cols)
                     if uid in self.pty_manager.ptys: await self.pty_manager.ptys[uid].resize(rows, cols)
+                elif msg_type == "block_zoom":
+                    bid = msg.get("block_id")
+                    block = self.get_block(bid) if bid else None
+                    if block:
+                        rows, cols = msg.get("rows"), msg.get("cols")
+                        block["zoomed"] = True
+                        block["zoom_rows"] = rows
+                        block["zoom_cols"] = cols
+                        await self.session_manager.broadcast({"type": "update_block", "block": block})
+                        uid = block.get("pty_uid")
+                        if uid in self.pty_manager.ptys:
+                            self.pty_manager.terminal_size = (rows, cols)
+                            await self.pty_manager.ptys[uid].resize(rows, cols)
+                elif msg_type == "block_unzoom":
+                    bid = msg.get("block_id")
+                    block = self.get_block(bid) if bid else None
+                    if block:
+                        rows, cols = msg.get("rows"), msg.get("cols")
+                        block["zoomed"] = False
+                        block["zoom_rows"] = None
+                        block["zoom_cols"] = None
+                        await self.session_manager.broadcast({"type": "update_block", "block": block})
+                        uid = block.get("pty_uid")
+                        if uid in self.pty_manager.ptys:
+                            self.pty_manager.terminal_size = (rows, cols)
+                            await self.pty_manager.ptys[uid].resize(rows, cols)
                 elif msg_type == "terminal_set_echo":
                     uid = msg.get("pty_uid") if msg.get("pty_uid") is not None else 0
                     try: uid = int(uid)
