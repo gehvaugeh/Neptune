@@ -397,4 +397,10 @@ class RemotePTY(BasePTY):
             await asyncio.sleep(0.05)
 
     async def resize(self, r: int, c: int):
-        await self.send_input(f"stty rows {r} cols {c}\n")
+        cmd = self._get_ssh_base(use_socket=True)
+        cmd.extend(["stty", "-F", self.remote_tty, "rows", str(r), "cols", str(c)])
+        try:
+            p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await asyncio.wait_for(p.wait(), timeout=5.0)
+        except:
+            pass

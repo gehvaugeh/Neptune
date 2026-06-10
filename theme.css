@@ -2,7 +2,7 @@
 
 $bg-dark: #02040a;
 $bg-input: #050a15;
-$bg-block: #030712;
+$bg-block: #1F2D57;
 $bg-focus: #081225;
 $neptune-primary: #2196f3;
 $neptune-dim: #0d47a1;
@@ -24,8 +24,8 @@ ModalScreen {
 
 #command_history {
     height: 1fr;
-    scrollbar-gutter: stable;
-    padding: 0 1;
+    scrollbar-gutter: auto;
+    padding: 0;
 }
 
 /* Fixierte Eingabe-Zone unten */
@@ -90,8 +90,8 @@ ModalScreen {
 
 /* Block-Struktur für Notebook-Feeling */
 CommandBlock, NoteBlock {
-    margin: 0 0 1 0;
-    padding: 0 1;
+    margin-bottom: 1;
+    padding-left: 1;
     height: auto;
     min-height: 1;
     width: 100%;
@@ -127,23 +127,35 @@ NoteBlock {
 
 .block-output {
     color: $text-dim;
-    max-height: 24; /* Cap height to match preferred_rows but allow shrinking */
-    margin: 0 0 0 3;
+    max-height: 24; /* Set dynamically when zoomed */
+    padding: 0;
     background: transparent;
     overflow: auto;
+    width: 100%;
+}
+
+CommandBlock.-zoomed {
+    border-left: solid $neptune-bright;
+    margin: 0;
+}
+CommandBlock.-zoomed > .block-output {
+    border-top: solid $border;
+    border-bottom: solid $border;
+    padding: 0;
 }
 
 .block-info {
     text-align: right;
     color: $text-dim;
     height: 1;
-    margin-right: 1;
+    padding: 0;
+    margin-right: 0;
     text-style: dim;
 }
 
 .markdown-content {
     background: transparent;
-    padding: 0 1;
+    padding: 0;
 }
 
 /* Editor innerhalb eines Blocks */

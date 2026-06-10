@@ -340,6 +340,8 @@ class CommandBlock(BaseBlock):
         self._style_cache = {}
         self._color_error = False
         self._last_status_text = "Ready"
+        self.zoomed = False
+        self._spinner_task = None
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -357,8 +359,21 @@ class CommandBlock(BaseBlock):
         yield Label(f"[grey44]Ready[/] [cyan][{self.pty_name} (ID:{pty_id_display})][/]", id="info", classes="block-info")
 
     def on_resize(self, event: events.Resize) -> None:
-        # Fixed size TTY, no automatic resizing to match widget size
-        pass
+        try:
+            out = self.query_one("#output")
+            new_cols = out.content_region.width
+            if new_cols >= 40 and new_cols != self.terminal_screen.columns:
+                self.terminal_screen.resize(self.terminal_screen.lines, new_cols)
+                self.render_terminal()
+                if self.pty_uid is not None:
+                    asyncio.create_task(self.app.send_message({
+                        "type": "terminal_resize",
+                        "pty_uid": self.pty_uid,
+                        "rows": self.terminal_screen.lines,
+                        "cols": new_cols,
+                    }))
+        except:
+            pass
 
     def append_output(self, text: str):
         if not isinstance(text, str):
@@ -524,15 +539,52 @@ class CommandBlock(BaseBlock):
         header_text = f"[bold cyan][{escape(self.pty_name)}][/] {header_text}"
         label.update(f"{header_text}\n[white]{escape(self.content)}[/]")
 
+    def _build_info_text(self, icon="") -> str:
+        pty_id_display = str(self.pty_uid) if self.pty_uid is not None else "???"
+        pty_info = f" [cyan][{self.pty_name} (ID:{pty_id_display})][/]"
+        text = f"{self._last_status_text}{icon}{pty_info}"
+        if self._color_error:
+            text += " [dim]⚠ color error[/]"
+        return text
+
+    def _start_spinner(self):
+        if self._spinner_task:
+            return
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        async def _animate():
+            i = 0
+            try:
+                while True:
+                    icon = f" {frames[i % len(frames)]}"
+                    if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
+                        icon += " [interactive] TUI"
+                    try:
+                        self.query_one("#info").update(self._build_info_text(icon))
+                    except:
+                        break
+                    i += 1
+                    await asyncio.sleep(0.08)
+            except asyncio.CancelledError:
+                pass
+            except:
+                pass
+        self._spinner_task = asyncio.create_task(_animate())
+
+    def _stop_spinner(self):
+        if self._spinner_task:
+            self._spinner_task.cancel()
+            self._spinner_task = None
+
     def update_status(self, status):
         if not self.is_mounted: return
+        self._stop_spinner()
         info = self.query_one("#info")
 
-        icon = ""
         if status == "running":
             self._last_status_text = "[yellow]Running...[/]"
             self.add_class("running")
-            icon = " ⟳"
+            self._start_spinner()
+            return
         elif "queued" in status:
             num = status.split("(")[1].split(")")[0]
             self._last_status_text = f"[blue]⏳ In Queue (#{num})[/]"
@@ -548,19 +600,12 @@ class CommandBlock(BaseBlock):
             icon = " ✗"
         else:
             self._last_status_text = f"[grey44]{status.capitalize()}[/]"
+            icon = ""
 
         if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
             icon += " [interactive] TUI"
 
-        # Show PTY Name and UID in info bar
-        pty_id_display = str(self.pty_uid) if self.pty_uid is not None else "???"
-        pty_info = f" [cyan][{self.pty_name} (ID:{pty_id_display})][/]"
-        display_text = f"{self._last_status_text}{icon}{pty_info}"
-
-        if self._color_error:
-            info.update(f"{display_text} [dim]⚠ color error[/]")
-        else:
-            info.update(display_text)
+        info.update(self._build_info_text(icon))
 
     async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
@@ -738,10 +783,8 @@ class ClientApp(App):
                 yield m_inp
 
     def on_mount(self):
-        # Establish fixed TTY dimensions based on initial screen size
-        # Margin for borders, padding, scrollbars and locking bars
-        self.preferred_cols = max(40, self.screen.size.width - 10)
-        self.preferred_rows = 24  # Standard fixed height for terminal blocks
+        self.preferred_cols = max(40, self.screen.size.width - 14)
+        self.preferred_rows = 24
 
         # Register exception handler for crash autosave
         loop = asyncio.get_event_loop()
@@ -751,10 +794,7 @@ class ClientApp(App):
         self.enter_normal_mode()
 
     def on_ready(self):
-        # Focus screen or bottom dock to allow immediate use of prefix keys (! : ;)
-        # We use call_after_refresh to ensure the layout is settled
         self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
-
     def _exception_handler(self, loop, context):
         exc = context.get("exception")
         if exc:
@@ -971,6 +1011,29 @@ class ClientApp(App):
                     if "pty_uid" in data or "pty_name" in data:
                          block.update_status(getattr(block, "_last_status", "ready"))
 
+                    if "zoomed" in data:
+                        if data["zoomed"] and not block.zoomed:
+                            rows = data.get("zoom_rows", self.preferred_rows)
+                            cols = data.get("zoom_cols", self.preferred_cols)
+                            block.zoomed = True
+                            block.styles.height = rows
+                            block.query_one("#output").styles.height = rows - 3
+                            block.query_one("#output").styles.max_height = rows - 3
+                            block.add_class("-zoomed")
+                            block.terminal_screen.resize(rows, cols)
+                            block.render_terminal()
+                            block.scroll_visible()
+                        elif not data["zoomed"] and block.zoomed:
+                            rows, cols = self.preferred_rows, self.preferred_cols
+                            block.zoomed = False
+                            block.terminal_screen.resize(rows, cols)
+                            block.styles.height = None
+                            block.query_one("#output").styles.height = None
+                            block.query_one("#output").styles.max_height = rows
+                            block.remove_class("-zoomed")
+                            block.render_terminal()
+                            block.scroll_visible()
+
                     # Auto-exit CONTROL mode if block finishes
                     if self.input_mode == "CONTROL" and self.focused == block:
                         if old_status == "running" and data.get("status") != "running":
@@ -1130,6 +1193,17 @@ class ClientApp(App):
         if locked_by:
             user_info = self.users.get(locked_by, {})
             new_block.update_lock(locked_by, user_info.get("color", "white"))
+
+        if data.get("zoomed") and isinstance(new_block, CommandBlock):
+            rows = data.get("zoom_rows", self.preferred_rows)
+            cols = data.get("zoom_cols", self.preferred_cols)
+            new_block.zoomed = True
+            new_block.styles.height = rows
+            new_block.query_one("#output").styles.height = rows - 3
+            new_block.query_one("#output").styles.max_height = rows - 3
+            new_block.add_class("-zoomed")
+            new_block.terminal_screen.resize(rows, cols)
+            new_block.render_terminal()
 
         # Apply current filter to the new block
         inp = self.query_one("#filter_input")
@@ -1471,6 +1545,45 @@ class ClientApp(App):
 
     def action_clear_session(self):
         asyncio.create_task(self.send_message({"type": "clear_session"}))
+
+    def _zoom_block(self, block: CommandBlock) -> None:
+        container = self.query_one("#command_history")
+        visible_height = container.size.height
+        target_rows = max(self.preferred_rows, visible_height - 3)
+        target_cols = self.preferred_cols
+        if target_rows <= block.terminal_screen.lines:
+            return
+        block.zoomed = True
+        block.styles.height = target_rows
+        block.query_one("#output").styles.height = target_rows - 3
+        block.query_one("#output").styles.max_height = target_rows - 3
+        block.add_class("-zoomed")
+        block.terminal_screen.resize(target_rows, target_cols)
+        asyncio.create_task(self.send_message({
+            "type": "block_zoom",
+            "block_id": block.block_id,
+            "rows": target_rows,
+            "cols": target_cols,
+        }))
+        block.render_terminal()
+        block.scroll_visible()
+
+    def _unzoom_block(self, block: CommandBlock) -> None:
+        rows, cols = self.preferred_rows, self.preferred_cols
+        block.zoomed = False
+        block.terminal_screen.resize(rows, cols)
+        block.styles.height = None
+        block.query_one("#output").styles.height = None
+        block.query_one("#output").styles.max_height = rows
+        block.remove_class("-zoomed")
+        asyncio.create_task(self.send_message({
+            "type": "block_unzoom",
+            "block_id": block.block_id,
+            "rows": rows,
+            "cols": cols,
+        }))
+        block.render_terminal()
+        block.scroll_visible()
 
     async def _rerun_block(self, block):
         if not isinstance(block, CommandBlock): return
@@ -1987,6 +2100,11 @@ class ClientApp(App):
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "after", "yank_data": self.yank_buffer}))
             elif event.key == "P":
                  if self.yank_buffer and focused in blocks: asyncio.create_task(self.send_message({"type": "paste_block", "target_id": focused.block_id, "position": "before", "yank_data": self.yank_buffer}))
+            elif event.key == "z" and isinstance(focused, CommandBlock):
+                if focused.zoomed:
+                    self._unzoom_block(focused)
+                else:
+                    self._zoom_block(focused)
             elif event.key == "e" and isinstance(focused, BaseBlock): asyncio.create_task(focused.toggle_edit())
             elif event.key == "ctrl+s" and isinstance(focused, CommandBlock): self.action_save_workflow(focused.content)
             elif event.key == "i" and isinstance(focused, CommandBlock): self.enter_control_mode(focused)
