@@ -59,7 +59,8 @@ def run_tests():
         oracle.wait_for_idle(5.0)
 
         # 1. Startup
-        assert_screen("Neptune Multi-User", "Verify Startup Header")
+        oracle.send_input("<esc><esc>!echo hello neptune <return>")
+        assert_screen("hello neptune", "Verify Startup via Echo")
 
         # 2. BASH Echo
         print("Testing BASH Echo...")

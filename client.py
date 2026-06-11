@@ -762,8 +762,9 @@ class ClientApp(App):
             yield Label(" 🌐 PTY Target: ", id="pty_target_label")
             p_inp = Input(placeholder="local | user@host | user@host:key | pty_id", id="pty_target_input")
             yield p_inp
-        with ScrollableContainer(id="command_history"):
-            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]", id="notebook_header")
+##        with ScrollableContainer(id="command_history"):
+        yield ScrollableContainer(id="command_history")
+#            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]", id="notebook_header")
         with Vertical(id="bottom_dock") as dock:
             dock.can_focus = True
             yield MarkdownToolboxPanel(id="md_toolbox")
@@ -977,14 +978,14 @@ class ClientApp(App):
                     self.blocks[b_id].remove()
                     del self.blocks[b_id]
 
-            # Re-order logic while respecting the header
-            header = container.query_one("#notebook_header")
-            prev_widget = header
+            prev_widget = None
             for b_data in new_blocks_data:
                 b_id = b_data.get("id")
-                if b_id not in self.blocks: await self.create_block(b_data)
+                if b_id not in self.blocks:
+                    await self.create_block(b_data)
                 block = self.blocks[b_id]
-                container.move_child(block, after=prev_widget)
+                if prev_widget is not None:
+                    container.move_child(block, after=prev_widget)
                 prev_widget = block
             self.refresh()
 
