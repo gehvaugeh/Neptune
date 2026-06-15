@@ -57,7 +57,7 @@ class RemotePTYAuthModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
-            yield Label(f"[bold cyan]New Remote PTY[/]")
+            yield Label("New Remote PTY", classes="modal-title")
             if self.host and self.user:
                 yield Label(f"Host: [white]{self.user}@{self.host}[/]")
             else:
@@ -295,7 +295,7 @@ class RenamePTYModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
-            yield Label("[bold cyan]Rename PTY[/]")
+            yield Label("Rename PTY", classes="modal-title")
             yield Input(value=self.old_name, id="new_name")
             with Horizontal(id="modal_buttons"):
                 yield Button("Cancel", variant="error", id="cancel")
@@ -341,10 +341,10 @@ class PTYManagerModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog", classes="pty-manager-modal"):
-            yield Label("[bold cyan]PTY Manager[/]")
+            yield Label("PTY Manager", classes="modal-title")
             yield Input(placeholder="Search PTYs (Press '/' to focus)...", id="manager_search")
             yield OptionList(id="pty_list")
-            yield Label("[dim]Enter: Select | x: Delete | r: Rename | n: New Local | N: New Remote | /: Search | Esc: Close[/]", classes="modal-footer")
+            yield Label("Enter: Select | x: Delete | r: Rename | n: New Local | N: New Remote | /: Search | Esc: Close", classes="modal-footer")
 
     def _start_spinner(self):
         if self._spinner_task:

@@ -13,6 +13,20 @@ $success: #00e676;
 $error: #ff5252;
 $border: #0d47a1;
 
+/* Modal titles */
+.modal-title { 
+    text-style: bold; 
+    margin-bottom: 1;
+}
+SaveNotebookModal .modal-title { color: $neptune-primary; }
+ImportNotebookModal .modal-title { color: $neptune-bright; }
+SaveWorkflowModal .modal-title { color: $neptune-bright; }
+ExitConfirmModal .modal-title { color: $error; }
+RemotePTYAuthModal .modal-title,
+RenamePTYModal .modal-title,
+PTYManagerModal .modal-title { color: $neptune-primary; }
+.modal-footer { color: $text-dim; }
+
 Screen {
     background: $bg-dark;
     color: $text-main;
@@ -32,7 +46,7 @@ ModalScreen {
 #bottom_dock {
     dock: bottom;
     height: auto;
-    max-height: 12;
+    max-height: 20;
     background: $bg-input;
     border-top: solid $border;
     padding-bottom: 0;
@@ -90,7 +104,7 @@ ModalScreen {
 
 /* Block-Struktur für Notebook-Feeling */
 CommandBlock, NoteBlock {
-    margin-bottom: 1;
+    padding-bottom: 1;
     padding-left: 1;
     height: auto;
     min-height: 1;
@@ -139,8 +153,6 @@ CommandBlock.-zoomed {
     margin: 0;
 }
 CommandBlock.-zoomed > .block-output {
-    border-top: solid $border;
-    border-bottom: solid $border;
     padding: 0;
 }
 
@@ -205,14 +217,17 @@ CommandBlock.-zoomed > .block-output {
 }
 
 /* Autocomplete Palette - Expanding Upwards */
+
 #palette {
     display: none;
     height: 0;
     max-height: 6;
+    width: 100%;
     background: $bg-block;
     border: none;
     color: $text-main;
-    scrollbar-gutter: stable;
+    scrollbar-gutter: auto;
+    padding: 0;
 }
 
 #palette.visible {
@@ -222,21 +237,8 @@ CommandBlock.-zoomed > .block-output {
 
 #bottom_dock {
     layout: vertical;
+    padding: 0;
 }
-
-#palette {
-    /* No dock: top; let it be part of the vertical flow */
-}
-
-#palette > .option-list--option {
-    padding: 0 1;
-}
-
-#palette > .option-list--option.-highlighted {
-    background: $neptune-dim;
-}
-
-
 
 /* Modals */
 
@@ -273,8 +275,8 @@ CommandBlock.-zoomed > .block-output {
 
 #host_history_list, #key_list {
     max-height: 10;
-    border: solid $primary;
-    background: $surface;
+    border: solid $border;
+    background: $bg-input;
 }
 #host_history_list.hidden, #key_list.hidden {
     display: none;
@@ -292,4 +294,45 @@ CommandBlock.-zoomed > .block-output {
     width: 1fr;
     border: none;
     background: $bg-block;
+}
+
+/* Markdown Toolbox */
+
+MarkdownToolboxPanel {
+    display: none;
+    height: auto;
+    background: $bg-block;
+    border: none;
+    color: $text-main;
+    padding: 0;
+}
+
+MarkdownToolboxPanel.-visible {
+    display: block;
+    border-bottom: solid $border;
+}
+
+#md_filter {
+    width:          100%;
+    border:         none;
+    border-bottom:  solid $border;
+    padding:        0 1;
+    background:     transparent;
+}
+
+#md_list {
+    scrollbar-gutter:   auto;
+    width:              100%;
+    max-height:         6;
+    padding:            0;
+    border:             none;
+    background:         transparent;
+}
+
+#md_list > .option-list--option {
+    padding: 0 1;
+}
+
+#md_list > .option-list--option.-highlighted {
+    background: $neptune-dim;
 }
