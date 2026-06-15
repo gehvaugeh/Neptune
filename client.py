@@ -96,7 +96,7 @@ class NeptuneCommandProvider(Provider):
 class SaveNotebookModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
-            yield Label("[bold cyan]Notebook exportieren (.md)[/]")
+            yield Label("Notebook exportieren (.md)", classes="modal-title")
             yield Input(placeholder="dateiname.md", id="file_name", value=f"session_{int(time.time())}.md")
             yield Checkbox("Include Output", value=True, id="include_output")
             with Horizontal(id="modal_buttons"):
@@ -114,7 +114,7 @@ class SaveNotebookModal(ModalScreen):
 class ImportNotebookModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
-            yield Label("[bold magenta]Notebook importieren (.md)[/]")
+            yield Label("Notebook importieren (.md)", classes="modal-title")
             yield Input(placeholder="dateiname.md", id="file_name")
             yield Checkbox("Include Output", value=True, id="include_output")
             with Horizontal(id="modal_buttons"):
@@ -142,7 +142,7 @@ class SaveWorkflowModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
-            yield Label("[bold magenta]Save as Workflow[/]")
+            yield Label("Save as Workflow", classes="modal-title")
             yield Input(placeholder="Name...", id="wf_name")
             yield TextArea(self.text, id="wf_cmd", language="bash")
             with Horizontal(id="modal_buttons"):
@@ -164,7 +164,7 @@ class ExitConfirmModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
-            yield Label("[bold yellow]Unsaved Changes?[/]")
+            yield Label("Unsaved Changes?", classes="modal-title")
             yield Label(f"Blocks: [bold]{self.block_count}[/]")
             yield Label(f"Last export: [bold]{self.minutes_since_export}[/] minute(s) ago")
             yield Label("Your notebook may have unsaved changes.", classes="modal-hint")
@@ -252,7 +252,7 @@ class NoteBlock(BaseBlock):
 
         yield Markdown(self.content, id="md_render", classes=render_classes)
         yield BlockEditor(self.editing_content, id="block_text_edit", classes=edit_classes, language="markdown")
-        yield Label("[dim]Note (esc: leave edit | ctrl+j: save)[/]", classes="block-info")
+        yield Label("Note (esc: leave edit | ctrl+j: save)", classes="block-info")
 
     async def toggle_edit(self, remote=False, save=True, restore=False):
         if not remote and self.locked_by and self.locked_by != self.app_ref.user_id:
@@ -770,7 +770,7 @@ class ClientApp(App):
             yield MarkdownToolboxPanel(id="md_toolbox")
             yield OptionList(id="palette")
             with Horizontal(id="dock_status_bar"):
-                self.mode_label = Label("[bold #757575]MODE: NORMAL[/]", id="mode_indicator")
+                self.mode_label = Label("MODE: NORMAL", id="mode_indicator")
                 self.mode_label.tooltip = "Current interaction mode (NORMAL, BASH, CMD, NOTE, SELECTION, BLOCKEDIT)"
                 yield self.mode_label
                 yield Label("⟳", id="autocomplete_spinner", classes="hidden")
@@ -1015,13 +1015,14 @@ class ClientApp(App):
                     if "zoomed" in data:
                         if data["zoomed"] and not block.zoomed:
                             rows = data.get("zoom_rows", self.preferred_rows)
+                            pty_rows = data.get("zoom_pty_rows", rows)
                             cols = data.get("zoom_cols", self.preferred_cols)
                             block.zoomed = True
                             block.styles.height = rows
-                            block.query_one("#output").styles.height = rows - 3
-                            block.query_one("#output").styles.max_height = rows - 3
+                            block.query_one("#output").styles.height = pty_rows
+                            block.query_one("#output").styles.max_height = pty_rows
                             block.add_class("-zoomed")
-                            block.terminal_screen.resize(rows, cols)
+                            block.terminal_screen.resize(pty_rows, cols)
                             block.render_terminal()
                             block.scroll_visible()
                         elif not data["zoomed"] and block.zoomed:
@@ -1197,13 +1198,14 @@ class ClientApp(App):
 
         if data.get("zoomed") and isinstance(new_block, CommandBlock):
             rows = data.get("zoom_rows", self.preferred_rows)
+            pty_rows = data.get("zoom_pty_rows", rows)
             cols = data.get("zoom_cols", self.preferred_cols)
             new_block.zoomed = True
             new_block.styles.height = rows
-            new_block.query_one("#output").styles.height = rows - 3
-            new_block.query_one("#output").styles.max_height = rows - 3
+            new_block.query_one("#output").styles.height = pty_rows
+            new_block.query_one("#output").styles.max_height = pty_rows
             new_block.add_class("-zoomed")
-            new_block.terminal_screen.resize(rows, cols)
+            new_block.terminal_screen.resize(pty_rows, cols)
             new_block.render_terminal()
 
         # Apply current filter to the new block
@@ -1452,8 +1454,6 @@ class ClientApp(App):
 
             if self.was_in_selection_mode:
                 self.enter_selection_mode()
-            else:
-                self.enter_normal_mode()
         except Exception as e:
             logging.exception(f"Error in action_submit: {e}")
             self.notify(f"Submit error: {e}", severity="error")
@@ -1551,20 +1551,22 @@ class ClientApp(App):
         container = self.query_one("#command_history")
         visible_height = container.size.height
         target_rows = max(self.preferred_rows, visible_height - 3)
+        pty_rows = target_rows - 3
         target_cols = self.preferred_cols
-        if target_rows <= block.terminal_screen.lines:
+        if pty_rows <= block.terminal_screen.lines:
             return
         block.zoomed = True
         block.styles.height = target_rows
-        block.query_one("#output").styles.height = target_rows - 3
-        block.query_one("#output").styles.max_height = target_rows - 3
+        block.query_one("#output").styles.height = pty_rows
+        block.query_one("#output").styles.max_height = pty_rows
         block.add_class("-zoomed")
-        block.terminal_screen.resize(target_rows, target_cols)
+        block.terminal_screen.resize(pty_rows, target_cols)
         asyncio.create_task(self.send_message({
             "type": "block_zoom",
             "block_id": block.block_id,
             "rows": target_rows,
             "cols": target_cols,
+            "pty_rows": pty_rows,
         }))
         block.render_terminal()
         block.scroll_visible()

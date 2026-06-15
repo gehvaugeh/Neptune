@@ -209,14 +209,16 @@ class Server:
                     block = self.get_block(bid) if bid else None
                     if block:
                         rows, cols = msg.get("rows"), msg.get("cols")
+                        pty_rows = msg.get("pty_rows", rows)
                         block["zoomed"] = True
                         block["zoom_rows"] = rows
+                        block["zoom_pty_rows"] = pty_rows
                         block["zoom_cols"] = cols
                         await self.session_manager.broadcast({"type": "update_block", "block": block})
                         uid = block.get("pty_uid")
                         if uid in self.pty_manager.ptys:
-                            self.pty_manager.terminal_size = (rows, cols)
-                            await self.pty_manager.ptys[uid].resize(rows, cols)
+                            self.pty_manager.terminal_size = (pty_rows, cols)
+                            await self.pty_manager.ptys[uid].resize(pty_rows, cols)
                 elif msg_type == "block_unzoom":
                     bid = msg.get("block_id")
                     block = self.get_block(bid) if bid else None

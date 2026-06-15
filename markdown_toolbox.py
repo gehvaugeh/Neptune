@@ -1,4 +1,3 @@
-from textual.widget import Widget
 from textual.widgets import Input, OptionList
 from textual.widgets.option_list import Option
 from textual.containers import Vertical
@@ -27,40 +26,12 @@ class MdElementSelected(message.Message):
         super().__init__()
         self.element = element
 
-class MarkdownToolboxPanel(Widget):
-    DEFAULT_CSS = """
-    MarkdownToolboxPanel {
-        display: none;
-        height: auto;
-        max-height: 8;
-        background: #030712;
-        border-bottom: solid #0d47a1;
-    }
-    MarkdownToolboxPanel.-visible {
-        display: block;
-    }
-    #md_filter {
-        width: 1fr;
-        border: none;
-        border-bottom: solid #0d47a1;
-        background: #050a15;
-    }
-    #md_list {
-        max-height: 7;
-        background: #030712;
-    }
-    #md_list > .option-list--option {
-        padding: 0 1;
-    }
-    #md_list > .option-list--option.-highlighted {
-        background: #0d47a1;
-    }
-    """
+class MarkdownToolboxPanel(Vertical):
+    DEFAULT_CSS = ""
 
     def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Input(placeholder="Filter markdown...", id="md_filter")
-            yield OptionList(id="md_list")
+        yield Input(placeholder="Filter markdown...", id="md_filter")
+        yield OptionList(id="md_list")
 
     def on_mount(self):
         self._populate()
