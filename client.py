@@ -1740,6 +1740,23 @@ class ClientApp(App):
             spinner.add_class("hidden")
             anim_task.cancel()
 
+        # Auto-accept if exactly one unambiguous suggestion
+        if len(suggestions) == 1 and not p.has_class("visible"):
+            inp = self.query_one("#main_input")
+            self._suppress_search = True
+            val = suggestions[0]['value']
+            s_type = suggestions[0]['type']
+            is_token_replace = s_type in ("shell", "path")
+            token = get_current_token(inp.text)
+            if is_token_replace and token:
+                idx = inp.text.rfind(token)
+                inp.text = inp.text[:idx] + val
+            else:
+                inp.text = val
+            inp.cursor_location = (len(inp.document.lines)-1,
+                                   len(inp.document.lines[-1]))
+            return
+
         p.clear_options()
         type_colors = {"shell": "green", "history": "yellow", "workflow": "cyan", "cmd": "bold magenta", "path": "green"}
 

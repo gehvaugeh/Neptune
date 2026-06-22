@@ -87,7 +87,8 @@ def run_tests():
         print("Testing Selection Mode...")
         oracle.send_input("<esc><esc>!echo AAA <return>")
         assert_screen("AAA", "Setup AAA")
-        oracle.send_input("s")
+        oracle.send_input("<esc><esc>s")
+        oracle.wait_for_idle(0.5)
         assert_screen("MODE: SELECTION", "Enter Selection Mode")
         oracle.send_input("x")
         assert_not_on_screen("AAA", "Delete block via Selection Mode")
@@ -96,7 +97,7 @@ def run_tests():
         print("Testing Reordering...")
         oracle.send_input("<esc><esc>!echo MoveMe <return>")
         assert_screen("MoveMe", "Setup MoveMe")
-        oracle.send_input("s")
+        oracle.send_input("<esc><esc>s")
         oracle.wait_for_idle(0.5)
         oracle.send_input("<ctrl+up>")
         oracle.wait_for_idle(2.0)
@@ -222,7 +223,7 @@ def run_tests():
         oracle.wait_for_idle(5.0)
         # Now type ls + space and open the palette.
         # Before the fix, the duplicate id="ls -lah ./" crashed with DuplicateID.
-        oracle.send_input("!ls <tab>")
+        oracle.send_input("ls <tab>")
         oracle.wait_for_idle(3.0)
         # Palette should open without crash (SHELL: visible means providers ran)
         assert_screen("SHELL:", "Duplicate ID - palette opens without crash")
