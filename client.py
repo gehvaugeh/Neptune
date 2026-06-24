@@ -983,15 +983,27 @@ class ClientApp(App):
                 try: self.blocks[b_id].remove()
                 except: pass
             self.blocks = {}
-            for block_data in msg.get("blocks", []):
+            blocks_data = msg.get("blocks", [])
+            to_mount = []
+            for block_data in blocks_data:
                 b_id = block_data.get("id")
                 is_editing = (b_id == editing_id)
-                await self.create_block(
+                block = await self.create_block(
                     block_data,
                     is_editing=is_editing,
                     editing_content=editing_content if is_editing else None,
-                    cursor_pos=cursor_pos if is_editing else None
+                    cursor_pos=cursor_pos if is_editing else None,
+                    mount=False
                 )
+                if block:
+                    to_mount.append(block)
+            if to_mount:
+                container = self.query_one("#command_history")
+                await container.mount(*to_mount)
+                inp = self.query_one("#filter_input")
+                for block in to_mount:
+                    self._filter_single_block(block, inp.value)
+                self.call_after_refresh(to_mount[-1].scroll_visible)
             if focused_id == "main_input":
                 self.query_one("#main_input").focus()
             elif focused_id and focused_id in self.blocks:
@@ -1036,15 +1048,24 @@ class ClientApp(App):
                     self.blocks[b_id].remove()
                     del self.blocks[b_id]
 
+            to_mount = []
             prev_widget = None
             for b_data in new_blocks_data:
                 b_id = b_data.get("id")
                 if b_id not in self.blocks:
-                    await self.create_block(b_data)
-                block = self.blocks[b_id]
-                if prev_widget is not None:
+                    block = await self.create_block(b_data, mount=False)
+                    if block:
+                        to_mount.append(block)
+                block = self.blocks.get(b_id)
+                if block and prev_widget is not None and block.parent is not None:
                     container.move_child(block, after=prev_widget)
                 prev_widget = block
+            if to_mount:
+                await container.mount(*to_mount)
+                inp = self.query_one("#filter_input")
+                for block in to_mount:
+                    self._filter_single_block(block, inp.value)
+                self.call_after_refresh(to_mount[-1].scroll_visible)
             self.refresh()
 
         elif msg_type == "update_block":
@@ -1230,9 +1251,9 @@ class ClientApp(App):
             else:
                 logging.warning(f"Client: No future found for RID {rid}")
 
-    async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
+    async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None, mount=True):
         b_id = data.get("id")
-        if not b_id or b_id in self.blocks: return
+        if not b_id or b_id in self.blocks: return None
         b_type = data.get("type", "CMD")
         b_content = data.get("content", "")
         if b_type == "NOTE":
@@ -1243,8 +1264,6 @@ class ClientApp(App):
             b_pty_name = data.get("pty_name", f"pty-{b_pty_uid}")
             new_block = CommandBlock(b_id, b_content, b_cwd, self, is_editing=is_editing, editing_content=editing_content, cursor_pos=cursor_pos, pty_uid=b_pty_uid, pty_name=b_pty_name)
         self.blocks[b_id] = new_block
-        container = self.query_one("#command_history")
-        await container.mount(new_block)
 
         if b_type == "CMD":
             new_block.append_output(data.get("output", ""))
@@ -1254,23 +1273,27 @@ class ClientApp(App):
             user_info = self.users.get(locked_by, {})
             new_block.update_lock(locked_by, user_info.get("color", "white"))
 
-        if data.get("zoomed") and isinstance(new_block, CommandBlock):
-            rows = data.get("zoom_rows", self.preferred_rows)
-            pty_rows = data.get("zoom_pty_rows", rows)
-            cols = data.get("zoom_cols", self.preferred_cols)
-            new_block.zoomed = True
-            new_block.styles.height = rows
-            new_block.query_one("#output").styles.height = pty_rows
-            new_block.query_one("#output").styles.max_height = pty_rows
-            new_block.add_class("-zoomed")
-            new_block.terminal_screen.resize(pty_rows, cols)
-            new_block.render_terminal()
+        if mount:
+            container = self.query_one("#command_history")
+            await container.mount(new_block)
 
-        # Apply current filter to the new block
-        inp = self.query_one("#filter_input")
-        self._filter_single_block(new_block, inp.value)
+            if data.get("zoomed") and isinstance(new_block, CommandBlock):
+                rows = data.get("zoom_rows", self.preferred_rows)
+                pty_rows = data.get("zoom_pty_rows", rows)
+                cols = data.get("zoom_cols", self.preferred_cols)
+                new_block.zoomed = True
+                new_block.styles.height = rows
+                new_block.query_one("#output").styles.height = pty_rows
+                new_block.query_one("#output").styles.max_height = pty_rows
+                new_block.add_class("-zoomed")
+                new_block.terminal_screen.resize(pty_rows, cols)
+                new_block.render_terminal()
 
-        self.call_after_refresh(new_block.scroll_visible)
+            inp = self.query_one("#filter_input")
+            self._filter_single_block(new_block, inp.value)
+            self.call_after_refresh(new_block.scroll_visible)
+
+        return new_block
 
     def action_esc_pressed(self):
         bar = self.query_one("#filter_bar")
