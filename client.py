@@ -682,6 +682,26 @@ class CommandBlock(BaseBlock):
 
 # --- APP ---
 
+class CommandHistoryContainer(ScrollableContainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._scroll_timer = None
+
+    def watch_scroll_y(self, old, new):
+        if old != new:
+            self._debounce_scroll()
+
+    def _debounce_scroll(self):
+        if self._scroll_timer is not None:
+            self._scroll_timer.reset(0.1)
+        else:
+            self._scroll_timer = self.set_timer(0.1, self._on_scroll_stopped)
+
+    def _on_scroll_stopped(self):
+        self._scroll_timer = None
+        if hasattr(self.app, '_render_visible_blocks'):
+            self.app._render_visible_blocks()
+
 class ClientApp(App):
     CSS_PATH = THEME_FILE
     COMMANDS = {NeptuneCommandProvider}
@@ -793,8 +813,7 @@ class ClientApp(App):
             yield Label(" 🌐 PTY Target: ", id="pty_target_label")
             p_inp = Input(placeholder="local | user@host | user@host:key | pty_id", id="pty_target_input")
             yield p_inp
-##        with ScrollableContainer(id="command_history"):
-        yield ScrollableContainer(id="command_history")
+        yield CommandHistoryContainer(id="command_history")
 #            yield Static("[bold #81d4fa]Neptune Multi-User | Collaborative Notebook[/]", id="notebook_header")
         with Vertical(id="bottom_dock") as dock:
             dock.can_focus = True
@@ -822,7 +841,6 @@ class ClientApp(App):
         loop = asyncio.get_event_loop()
         loop.set_exception_handler(self._exception_handler)
 
-        self.set_interval(0.2, self._render_visible_blocks)
         self.run_worker(self.connect_to_server(), group="server")
         self.enter_normal_mode()
 
