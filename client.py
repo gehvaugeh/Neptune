@@ -1003,6 +1003,8 @@ class ClientApp(App):
                 inp = self.query_one("#filter_input")
                 for block in to_mount:
                     self._filter_single_block(block, inp.value)
+                    if isinstance(block, CommandBlock):
+                        block.render_terminal()
                 self.call_after_refresh(to_mount[-1].scroll_visible)
             if focused_id == "main_input":
                 self.query_one("#main_input").focus()
@@ -1065,6 +1067,8 @@ class ClientApp(App):
                 inp = self.query_one("#filter_input")
                 for block in to_mount:
                     self._filter_single_block(block, inp.value)
+                    if isinstance(block, CommandBlock):
+                        block.render_terminal()
                 self.call_after_refresh(to_mount[-1].scroll_visible)
             self.refresh()
 
