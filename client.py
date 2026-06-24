@@ -342,6 +342,7 @@ class CommandBlock(BaseBlock):
         self._last_status_text = "Ready"
         self.zoomed = False
         self._spinner_task = None
+        self._render_pending = False
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -385,7 +386,17 @@ class CommandBlock(BaseBlock):
 
         self.stream.feed(text)
         if self.is_mounted:
-            self.render_terminal()
+            self._schedule_render()
+
+    def _schedule_render(self):
+        if not self._render_pending:
+            self._render_pending = True
+            delay = 0.016 if self.app_ref.input_mode == "CONTROL" else 0.05
+            self.set_timer(delay, self._flush_render)
+
+    def _flush_render(self):
+        self._render_pending = False
+        self.render_terminal()
 
     def render_terminal(self):
         if not self.is_mounted: return
@@ -468,7 +479,7 @@ class CommandBlock(BaseBlock):
 
         # Optimize: Only update if content or cursor changed
         out_widget = self.query_one("#output")
-        cache_key = (str(rich_text), cursor_x, cursor_y, show_cursor)
+        cache_key = (hash(rich_text.plain), cursor_x, cursor_y, show_cursor)
         if getattr(out_widget, "_last_render_key", None) != cache_key:
             out_widget.update(rich_text)
             out_widget._last_render_key = cache_key
@@ -1257,9 +1268,6 @@ class ClientApp(App):
         inp = self.query_one("#main_input")
         inp.text = ""
         inp.disabled = True
-        # For non-interactive commands, trigger re-render to only show occupied space?
-        for b in self.blocks.values():
-             if isinstance(b, CommandBlock): b.render_terminal()
         try:
             self.query_one("#bottom_dock").focus()
         except:

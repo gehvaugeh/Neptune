@@ -193,7 +193,7 @@ class RemotePTY(BasePTY):
             while True:
                 # 1. Prioritize reading output
                 try:
-                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
+                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(65536), 0.05)
                     if not chunk: break
                     buf += chunk.decode(errors="replace")
                 except asyncio.TimeoutError:
@@ -216,8 +216,9 @@ class RemotePTY(BasePTY):
                             await asyncio.sleep(0.5)
                             # One last read attempt
                             try:
-                                chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
-                                if chunk: buf += chunk.decode(errors="replace")
+                                chunk = await asyncio.wait_for(self.shell_proc.stdout.read(65536), 0.1)
+                                if chunk:
+                                    buf += chunk.decode(errors="replace")
                             except: pass
                             break
                     except: pass
@@ -387,14 +388,11 @@ class RemotePTY(BasePTY):
             except: pass
 
     async def drain_output(self):
-        # Read from shell_proc until it would block, with a slight persistence
-        for _ in range(5):
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(self.shell_proc.stdout.read(4096), 0.1)
-                    if not chunk: break
-                except: break
-            await asyncio.sleep(0.05)
+        for _ in range(2):
+            try:
+                await asyncio.wait_for(self.shell_proc.stdout.read(65536), 0.1)
+            except:
+                pass
 
     async def resize(self, r: int, c: int):
         cmd = self._get_ssh_base(use_socket=True)

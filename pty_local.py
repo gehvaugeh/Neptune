@@ -100,7 +100,7 @@ class LocalPTY(BasePTY):
         loop = asyncio.get_running_loop()
         try:
             while True:
-                data = await loop.run_in_executor(None, os.read, self.master_fd, 4096)
+                data = await loop.run_in_executor(None, os.read, self.master_fd, 65536)
                 if not data: break
                 self._reader_buf += data.decode(errors="replace")
 
