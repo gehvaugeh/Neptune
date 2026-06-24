@@ -343,6 +343,7 @@ class CommandBlock(BaseBlock):
         self.zoomed = False
         self._spinner_task = None
         self._render_pending = False
+        self._needs_render = False
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -396,7 +397,26 @@ class CommandBlock(BaseBlock):
 
     def _flush_render(self):
         self._render_pending = False
-        self.render_terminal()
+        if self._is_visible():
+            self._needs_render = False
+            self.render_terminal()
+        else:
+            self._needs_render = True
+
+    def _is_visible(self):
+        if self.zoomed:
+            return True
+        try:
+            parent = self.parent
+            if parent is None:
+                return True
+            scroll_y = parent.scroll_y
+            view_height = parent.content_region.height
+            y = self.region.y
+            h = self.region.height
+            return y + h > scroll_y and y < scroll_y + view_height
+        except:
+            return True
 
     def render_terminal(self):
         if not self.is_mounted: return
@@ -802,11 +822,21 @@ class ClientApp(App):
         loop = asyncio.get_event_loop()
         loop.set_exception_handler(self._exception_handler)
 
+        self.set_interval(0.2, self._render_visible_blocks)
         self.run_worker(self.connect_to_server(), group="server")
         self.enter_normal_mode()
 
     def on_ready(self):
         self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
+
+    def _render_visible_blocks(self):
+        container = self.query_one("#command_history")
+        for block in container.children:
+            if isinstance(block, CommandBlock) and block._needs_render:
+                if block._is_visible():
+                    block._needs_render = False
+                    block.render_terminal()
+
     def _exception_handler(self, loop, context):
         exc = context.get("exception")
         if exc:
