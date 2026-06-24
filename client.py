@@ -693,9 +693,8 @@ class CommandHistoryContainer(ScrollableContainer):
 
     def _debounce_scroll(self):
         if self._scroll_timer is not None:
-            self._scroll_timer.reset(0.1)
-        else:
-            self._scroll_timer = self.set_timer(0.1, self._on_scroll_stopped)
+            self._scroll_timer.stop()
+        self._scroll_timer = self.set_timer(0.1, self._on_scroll_stopped)
 
     def _on_scroll_stopped(self):
         self._scroll_timer = None
