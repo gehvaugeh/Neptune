@@ -983,15 +983,21 @@ class ClientApp(App):
                 try: self.blocks[b_id].remove()
                 except: pass
             self.blocks = {}
-            for block_data in msg.get("blocks", []):
+            blocks = msg.get("blocks", [])
+            BATCH_SIZE = 10
+            for i, block_data in enumerate(blocks):
                 b_id = block_data.get("id")
                 is_editing = (b_id == editing_id)
                 await self.create_block(
                     block_data,
                     is_editing=is_editing,
                     editing_content=editing_content if is_editing else None,
-                    cursor_pos=cursor_pos if is_editing else None
+                    cursor_pos=cursor_pos if is_editing else None,
+                    scroll_to=(i == len(blocks) - 1)
                 )
+                if (i + 1) % BATCH_SIZE == 0 and i + 1 < len(blocks):
+                    self.notify(f"Importing... ({i+1}/{len(blocks)} blocks)")
+                    await asyncio.sleep(0)
             if focused_id == "main_input":
                 self.query_one("#main_input").focus()
             elif focused_id and focused_id in self.blocks:
@@ -1036,15 +1042,24 @@ class ClientApp(App):
                     self.blocks[b_id].remove()
                     del self.blocks[b_id]
 
+            BATCH_SIZE = 10
+            total_new = sum(1 for b in new_blocks_data if b.get("id") not in self.blocks)
+            created = 0
             prev_widget = None
             for b_data in new_blocks_data:
                 b_id = b_data.get("id")
                 if b_id not in self.blocks:
-                    await self.create_block(b_data)
+                    await self.create_block(b_data, scroll_to=False)
+                    created += 1
+                    if created % BATCH_SIZE == 0 and created < total_new:
+                        self.notify(f"Importing... ({created}/{total_new} blocks)")
+                        await asyncio.sleep(0)
                 block = self.blocks[b_id]
                 if prev_widget is not None:
                     container.move_child(block, after=prev_widget)
                 prev_widget = block
+            if total_new > BATCH_SIZE:
+                self.notify(f"Import complete: {total_new} blocks")
             self.refresh()
 
         elif msg_type == "update_block":
@@ -1230,7 +1245,7 @@ class ClientApp(App):
             else:
                 logging.warning(f"Client: No future found for RID {rid}")
 
-    async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None):
+    async def create_block(self, data, is_editing=False, editing_content=None, cursor_pos=None, scroll_to=True):
         b_id = data.get("id")
         if not b_id or b_id in self.blocks: return
         b_type = data.get("type", "CMD")
@@ -1270,7 +1285,8 @@ class ClientApp(App):
         inp = self.query_one("#filter_input")
         self._filter_single_block(new_block, inp.value)
 
-        self.call_after_refresh(new_block.scroll_visible)
+        if scroll_to:
+            self.call_after_refresh(new_block.scroll_visible)
 
     def action_esc_pressed(self):
         bar = self.query_one("#filter_bar")
