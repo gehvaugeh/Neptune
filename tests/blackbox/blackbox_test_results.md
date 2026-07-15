@@ -1,6 +1,6 @@
 # Neptune Blackbox Test Results
 
-**Automated Verification Run:** Mon Jun 15 14:34:02 2026
+**Automated Verification Run:** Wed Jul 15 13:44:00 2026
 
 | Feature Test | Result | Details |
 |--------------|--------|---------|
@@ -29,6 +29,6 @@
 | NOTE Toolbox - original text preserved | ✅ PASS |  |
 | NOTE Toolbox arrows - entries visible | ✅ PASS |  |
 | NOTE Toolbox arrows - toolbox closes after navigation | ✅ PASS |  |
-| Duplicate ID - palette opens without crash | ❌ FAIL | Expected 'SHELL:' not found |
+| Duplicate ID - palette opens without crash | ✅ PASS |  |
 | Duplicate ID - history entry visible | ✅ PASS |  |
-| Duplicate ID - workflow entry visible | ✅ PASS |  |
+| Duplicate ID - workflow entry visible | ❌ FAIL | Expected 'WORKFLOW:' not found |

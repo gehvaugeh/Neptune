@@ -7,6 +7,7 @@ from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual import on, events, message
+from textual.keys import Keys
 from common import fuzzy_match
 
 class RemotePTYAuthModal(ModalScreen):
@@ -61,22 +62,24 @@ class RemotePTYAuthModal(ModalScreen):
             if self.host and self.user:
                 yield Label(f"Host: [white]{self.user}@{self.host}[/]")
             else:
-                yield Input(placeholder="user@host", id="auth_host_user")
+                with Horizontal(classes="modal-row"):
+                    yield Label("user@host")
+                    yield Input(placeholder="user@host", id="auth_host_user")
                 yield OptionList(id="host_history_list", classes="hidden")
 
             with Horizontal(classes="modal-row"):
-                yield Label("Port: ")
-                yield Input(value=self.port, placeholder="22", id="auth_port")
+                yield Label("Port")
+                yield Input(value=self.port, id="auth_port")
 
-            with Horizontal(id="auth_type_row", classes="modal-row"):
-                yield Label("Auth: ")
-                yield Button("Key", id="toggle_auth", variant="primary")
-            yield Input(value=self.key_path, placeholder="Key path...", id="auth_key")
+            with Horizontal(classes="modal-row"):
+                yield Label("Auth")
+                yield Button("Key", id="auth_toggle")
+            yield Input(value=self.key_path, id="auth_key")
             yield OptionList(id="key_list", classes="hidden")
             yield Input(placeholder="Password...", password=True, id="auth_pass", classes="hidden")
             with Horizontal(id="modal_buttons"):
-                yield Button("Cancel", variant="error", id="cancel")
-                yield Button("OK", variant="success", id="ok")
+                yield Button("Cancel", id="cancel")
+                yield Button("OK", id="ok")
 
     # --- Host History Dropdown ---
 
@@ -138,9 +141,9 @@ class RemotePTYAuthModal(ModalScreen):
         if self.screen.focused is not ol:
             ol.add_class("hidden")
 
-    @on(Button.Pressed, "#toggle_auth")
-    def toggle_auth(self):
-        btn = self.query_one("#toggle_auth")
+    @on(Button.Pressed, "#auth_toggle")
+    def on_auth_toggle(self):
+        btn = self.query_one("#auth_toggle")
         key_inp = self.query_one("#auth_key")
         key_list = self.query_one("#key_list")
         pass_inp = self.query_one("#auth_pass")
@@ -155,7 +158,6 @@ class RemotePTYAuthModal(ModalScreen):
             key_inp.remove_class("hidden")
             pass_inp.add_class("hidden")
             key_inp.focus()
-            # Key-Dropdown bei Rückkehr zu Key zeigen
             if self.available_keys:
                 key_list.clear_options()
                 for k in self.available_keys[:6]:
@@ -167,7 +169,7 @@ class RemotePTYAuthModal(ModalScreen):
 
     @on(Button.Pressed, "#ok")
     def ok(self):
-        is_key = self.query_one("#toggle_auth").label == "Key"
+        is_key = self.query_one("#auth_toggle").label == "Key"
         val = self.query_one("#auth_key").value if is_key else self.query_one("#auth_pass").value
         port = self.query_one("#auth_port").value or "22"
 
@@ -267,11 +269,11 @@ class ConfirmKillModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
-            yield Label(f"[bold red]WARNING: Kill PTY '{self.pty_name}'?[/]")
+            yield Label(f"Kill PTY '{self.pty_name}'?", classes="modal-title")
             yield Label("This PTY has running blocks. Killing it will stop all processes.")
             with Horizontal(id="modal_buttons"):
-                yield Button("Cancel", variant="primary", id="cancel")
-                yield Button("Kill All", variant="error", id="kill")
+                yield Button("Cancel", id="cancel")
+                yield Button("Kill All", id="kill")
 
     @on(Button.Pressed, "#cancel")
     def cancel(self): self.dismiss(False)
@@ -296,10 +298,12 @@ class RenamePTYModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
             yield Label("Rename PTY", classes="modal-title")
-            yield Input(value=self.old_name, id="new_name")
+            with Horizontal(classes="modal-row"):
+                yield Label("Name")
+                yield Input(value=self.old_name, id="new_name")
             with Horizontal(id="modal_buttons"):
-                yield Button("Cancel", variant="error", id="cancel")
-                yield Button("Rename", variant="success", id="rename")
+                yield Button("Cancel", id="cancel")
+                yield Button("Rename", id="rename")
 
     def on_mount(self):
         self.query_one("#new_name").focus()
@@ -342,9 +346,11 @@ class PTYManagerModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog", classes="pty-manager-modal"):
             yield Label("PTY Manager", classes="modal-title")
-            yield Input(placeholder="Search PTYs (Press '/' to focus)...", id="manager_search")
+            with Horizontal(classes="modal-row"):
+                yield Label("Search")
+                yield Input(placeholder="Press '/' to focus...", id="manager_search")
             yield OptionList(id="pty_list")
-            yield Label("Enter: Select | x: Delete | r: Rename | n: New Local | N: New Remote | /: Search | Esc: Close", classes="modal-footer")
+            yield Label("n:New | N:New Remote | x:Delete | r:Rename | /:Search | Esc:Close", classes="modal-footer")
 
     def _start_spinner(self):
         if self._spinner_task:
@@ -472,6 +478,7 @@ class PTYManagerModal(ModalScreen):
         self.app.run_worker(self.app.send_message({"type": "pty.rename", "pty_uid": int(uid), "name": new_name}))
 
     def _do_new_local(self):
+        self.app._pending_pty_switch = "!"
         self.app.run_worker(self.app.send_message({"type": "pty.create.local"}))
 
     def _do_new_remote(self):

@@ -38,7 +38,7 @@ from rich.text import Text
 from rich.style import Style
 from rich.markup import escape
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input, Checkbox
+from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
 from textual.command import Provider, Hit
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, ScrollableContainer
@@ -46,7 +46,7 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work, on, events, message
 
-from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE, get_current_token
+from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE, get_current_token, TUI_CMDS
 from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, LocalFileProvider
 from markdown_toolbox import MarkdownToolboxPanel, MdElementSelected
 from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
@@ -97,36 +97,52 @@ class SaveNotebookModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
             yield Label("Notebook exportieren (.md)", classes="modal-title")
-            yield Input(placeholder="dateiname.md", id="file_name", value=f"session_{int(time.time())}.md")
-            yield Checkbox("Include Output", value=True, id="include_output")
+            with Horizontal(classes="modal-row"):
+                yield Label("Filename")
+                yield Input(placeholder="dateiname.md", id="file_name", value=f"session_{int(time.time())}.md")
+            with Horizontal(classes="modal-row"):
+                yield Label("Include Output")
+                yield Button("Yes", id="include_toggle")
             with Horizontal(id="modal_buttons"):
-                yield Button("Abbrechen", variant="error", id="cancel")
-                yield Button("Exportieren", variant="success", id="export")
+                yield Button("Abbrechen", id="cancel")
+                yield Button("Exportieren", id="export")
     @on(Button.Pressed, "#cancel")
     def cancel(self): self.dismiss(None)
     @on(Button.Pressed, "#export")
     def export(self):
         name = self.query_one("#file_name").value
         if not name.endswith(".md"): name += ".md"
-        include_output = self.query_one("#include_output").value
+        include_output = self.query_one("#include_toggle").label == "Yes"
         self.dismiss((name, include_output))
+    @on(Button.Pressed, "#include_toggle")
+    def toggle_output(self):
+        btn = self.query_one("#include_toggle")
+        btn.label = "No" if btn.label == "Yes" else "Yes"
 
 class ImportNotebookModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
             yield Label("Notebook importieren (.md)", classes="modal-title")
-            yield Input(placeholder="dateiname.md", id="file_name")
-            yield Checkbox("Include Output", value=True, id="include_output")
+            with Horizontal(classes="modal-row"):
+                yield Label("Filename")
+                yield Input(placeholder="dateiname.md", id="file_name")
+            with Horizontal(classes="modal-row"):
+                yield Label("Include Output")
+                yield Button("Yes", id="include_toggle")
             with Horizontal(id="modal_buttons"):
-                yield Button("Abbrechen", variant="error", id="cancel")
-                yield Button("Importieren", variant="success", id="import")
+                yield Button("Abbrechen", id="cancel")
+                yield Button("Importieren", id="import")
     @on(Button.Pressed, "#cancel")
     def cancel(self): self.dismiss(None)
     @on(Button.Pressed, "#import")
     def import_nb(self):
         name = self.query_one("#file_name").value
-        include_output = self.query_one("#include_output").value
+        include_output = self.query_one("#include_toggle").label == "Yes"
         self.dismiss((name, include_output))
+    @on(Button.Pressed, "#include_toggle")
+    def toggle_output(self):
+        btn = self.query_one("#include_toggle")
+        btn.label = "No" if btn.label == "Yes" else "Yes"
 
 
 class SaveWorkflowModal(ModalScreen):
@@ -143,11 +159,13 @@ class SaveWorkflowModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal_dialog"):
             yield Label("Save as Workflow", classes="modal-title")
-            yield Input(placeholder="Name...", id="wf_name")
+            with Horizontal(classes="modal-row"):
+                yield Label("Name")
+                yield Input(placeholder="Name...", id="wf_name")
             yield TextArea(self.text, id="wf_cmd", language="bash")
             with Horizontal(id="modal_buttons"):
-                yield Button("Cancel", variant="error", id="cancel")
-                yield Button("Save", variant="success", id="save")
+                yield Button("Cancel", id="cancel")
+                yield Button("Save", id="save")
     @on(Button.Pressed, "#cancel")
     def cancel(self): self.dismiss(None)
     @on(Button.Pressed, "#save")
@@ -169,8 +187,8 @@ class ExitConfirmModal(ModalScreen):
             yield Label(f"Last export: [bold]{self.minutes_since_export}[/] minute(s) ago")
             yield Label("Your notebook may have unsaved changes.", classes="modal-hint")
             with Horizontal(id="modal_buttons"):
-                yield Button("No & Exit", variant="error", id="no_exit")
-                yield Button("Cancel", variant="primary", id="cancel")
+                yield Button("No & Exit", id="no_exit")
+                yield Button("Cancel", id="cancel")
 
     @on(Button.Pressed, "#cancel")
     def cancel(self): self.dismiss(None)
@@ -334,9 +352,9 @@ class CommandBlock(BaseBlock):
         self.pty_uid = pty_uid
         self.pty_name = pty_name
         self.output = ""
-        # Initialize with fixed TTY dimensions established by the app
-        self.terminal_screen = pyte.HistoryScreen(app_ref.preferred_cols, app_ref.preferred_rows, history=1000)
-        self.stream = pyte.Stream(self.terminal_screen)
+        self.terminal_screen = None
+        self.stream = None
+        self._using_pyte = False
         self._style_cache = {}
         self._color_error = False
         self._last_status_text = "Ready"
@@ -344,6 +362,23 @@ class CommandBlock(BaseBlock):
         self._spinner_task = None
         self._render_pending = False
         self._needs_render = False
+
+    def _init_pyte(self):
+        if self._using_pyte:
+            return
+        cols = self.app_ref.preferred_cols
+        rows = self.app_ref.preferred_rows
+        self.terminal_screen = pyte.HistoryScreen(cols, rows, history=1000)
+        self.stream = pyte.Stream(self.terminal_screen)
+        self._using_pyte = True
+        self.stream.feed(self.output)
+
+    def _teardown_pyte(self):
+        if not self._using_pyte:
+            return
+        self.terminal_screen = None
+        self.stream = None
+        self._using_pyte = False
 
     def compose(self) -> ComposeResult:
         label_classes = "" if not self.is_editing else "hidden"
@@ -364,7 +399,7 @@ class CommandBlock(BaseBlock):
         try:
             out = self.query_one("#output")
             new_cols = out.content_region.width
-            if new_cols >= 40 and new_cols != self.terminal_screen.columns:
+            if self._using_pyte and new_cols >= 40 and new_cols != self.terminal_screen.columns:
                 self.terminal_screen.resize(self.terminal_screen.lines, new_cols)
                 self.render_terminal()
                 if self.pty_uid is not None:
@@ -385,7 +420,8 @@ class CommandBlock(BaseBlock):
         if len(self.output) > 1_000_000:
             self.output = self.output[-1_000_000:]
 
-        self.stream.feed(text)
+        if self._using_pyte:
+            self.stream.feed(text)
         if self.is_mounted:
             self._schedule_render()
 
@@ -421,11 +457,26 @@ class CommandBlock(BaseBlock):
     def render_terminal(self):
         if not self.is_mounted: return
         self._color_error = False
-        # We always use the pyte screen for rendering to ensure consistent VT100 support
+
+        if not self._using_pyte:
+            output = self.output.replace("\r\n", "\n")
+            rich_text = Text.from_ansi(output)
+            if self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self:
+                rich_text.append(" ", style="reverse")
+            out_widget = self.query_one("#output")
+            cache_key = hash(self.output)
+            if getattr(out_widget, "_last_render_key", None) != cache_key:
+                out_widget.update(rich_text)
+                out_widget._last_render_key = cache_key
+            if self._color_error:
+                info = self.query_one("#info")
+                if "⚠" not in str(info.renderable):
+                    info.update(f"{self._last_status_text} [dim]⚠ color error[/]")
+            return
+
         rich_text = Text()
 
         cursor_x, cursor_y = self.terminal_screen.cursor.x, self.terminal_screen.cursor.y
-        # Only show cursor if in interactive mode, and respect cursor visibility mode from PTY
         show_cursor = (self.app_ref.input_mode == "CONTROL" and self.app_ref.focused == self) and not self.terminal_screen.cursor.hidden
 
         def append_line(y, line):
@@ -769,6 +820,8 @@ class ClientApp(App):
         self.bang_time = 0.0
         self.remote_hosts = self._load_remote_hosts()
         self.last_export_time = time.time()
+        self._pending_tui_block = False
+        self._pending_pty_switch = None  # prefix to switch to after pty.created
 
         self.available_commands = [
             {"name": "ptyman", "params": "", "desc": "Open PTY Manager overlay"},
@@ -1035,7 +1088,11 @@ class ClientApp(App):
 
         elif msg_type == "new_block":
             block_data = msg.get("block")
-            await self.create_block(block_data)
+            new_block = await self.create_block(block_data)
+            if new_block and isinstance(new_block, CommandBlock):
+                if self._pending_tui_block:
+                    self._pending_tui_block = False
+                    self.enter_control_mode(new_block)
             if block_data.get("type") == "CMD":
                 self.history.add(block_data.get("content", ""))
             self.refresh()
@@ -1105,13 +1162,15 @@ class ClientApp(App):
                             block.query_one("#output").styles.height = pty_rows
                             block.query_one("#output").styles.max_height = pty_rows
                             block.add_class("-zoomed")
-                            block.terminal_screen.resize(pty_rows, cols)
+                            if block._using_pyte:
+                                block.terminal_screen.resize(pty_rows, cols)
                             block.render_terminal()
                             block.scroll_visible()
                         elif not data["zoomed"] and block.zoomed:
                             rows, cols = self.preferred_rows, self.preferred_cols
                             block.zoomed = False
-                            block.terminal_screen.resize(rows, cols)
+                            if block._using_pyte:
+                                block.terminal_screen.resize(rows, cols)
                             block.styles.height = None
                             block.query_one("#output").styles.height = None
                             block.query_one("#output").styles.max_height = rows
@@ -1128,7 +1187,8 @@ class ClientApp(App):
                                 self.enter_normal_mode()
                     if "output" in data:
                         block.output = ""
-                        block.terminal_screen.reset()
+                        if block._using_pyte:
+                            block.terminal_screen.reset()
                         block.append_output(data.get("output", ""))
                 if not block.is_editing:
                    if isinstance(block, NoteBlock):
@@ -1183,6 +1243,15 @@ class ClientApp(App):
             if pty_type == "remote":
                 self.last_remote_pty_uid = uid
             self.notify(f"PTY created: {msg.get('name')} (UID:{uid})")
+            if self._pending_pty_switch:
+                prefix = self._pending_pty_switch
+                self._pending_pty_switch = None
+                self.default_pty_uid = uid
+                for screen in self.screen_stack:
+                    if isinstance(screen, PTYManagerModal):
+                        screen.dismiss(None)
+                        break
+                self.enter_input_mode(prefix=prefix, pty_uid=uid)
 
         elif msg_type == "pty.destroyed":
             uid = int(msg.get("uid"))
@@ -1202,6 +1271,7 @@ class ClientApp(App):
 
         elif msg_type == "pty.error":
             self.notify(f"PTY Error: {msg.get('message')}", severity="error")
+            self._pending_pty_switch = None
 
         elif msg_type == "pty.list":
             server_ptys = msg.get("ptys", [])
@@ -1290,7 +1360,8 @@ class ClientApp(App):
                 new_block.query_one("#output").styles.height = pty_rows
                 new_block.query_one("#output").styles.max_height = pty_rows
                 new_block.add_class("-zoomed")
-                new_block.terminal_screen.resize(pty_rows, cols)
+                if new_block._using_pyte:
+                    new_block.terminal_screen.resize(pty_rows, cols)
                 new_block.render_terminal()
 
             inp = self.query_one("#filter_input")
@@ -1474,11 +1545,12 @@ class ClientApp(App):
             return
         if self.input_mode == "SELECTION":
             self.was_in_selection_mode = True
+        block._init_pyte()
         self.input_mode = "CONTROL"
         self.update_mode_label()
         self.query_one("#main_input").disabled = True
         block.focus()
-        # Signal server to start streaming PTY output to this block
+        block.render_terminal()
         asyncio.create_task(self.send_message({"type": "control_start", "block_id": block.block_id}))
 
     async def action_submit(self):
@@ -1516,14 +1588,18 @@ class ClientApp(App):
                     self.action_spawn_pty_manager()
                     return
 
-                # No longer intercepting 'cd' here; it will be handled by the server's master shell.
+                first_word = content.split()[0] if content else ""
+                is_tui = first_word in TUI_CMDS
+                self._pending_tui_block = is_tui
+
                 await self.send_message({
                     "type": "submit",
                     "mode": "CMD",
                     "content": content,
                     "cwd": os.getcwd(),
                     "insert_after": self.insert_after_id,
-                    "pty_uid": target_pty_uid
+                    "pty_uid": target_pty_uid,
+                    "interactive": is_tui
                 })
             elif self.input_mode == "NOTE":
                 await self.send_message({
@@ -1961,8 +2037,8 @@ class ClientApp(App):
         # 3. "local" -> pty.create.local
         if target == "local":
             await self.send_message({"type": "pty.create.local"})
-            # We don't have the UID yet, server will broadcast pty.created
-            self.enter_input_mode(prefix="!")
+            self._pending_pty_switch = "!"
+            self.enter_normal_mode()
             return
 
         # 4. user@host[:port][:key] -> remote
@@ -1991,7 +2067,8 @@ class ClientApp(App):
                          "name": host,
                          "ssh_config": {"host": host, "user": user, "port": port, "key": key_path}
                      })
-                     self.enter_input_mode(prefix="!")
+                     self._pending_pty_switch = "!"
+                     self.enter_normal_mode()
                      return
 
             self.push_screen(RemotePTYAuthModal(host, user, port, key_path, host_history=self.remote_hosts),
@@ -2023,7 +2100,8 @@ class ClientApp(App):
             msg["ssh_config"]["password"] = res.get("value")
 
         await self.send_message(msg)
-        self.enter_input_mode(prefix="!")
+        self._pending_pty_switch = "!"
+        self.enter_normal_mode()
 
     def on_key(self, event: events.Key):
         # Allow Modals to handle their own keys (Tab, Esc, etc.) without interference
