@@ -333,6 +333,28 @@ def test_my_feature():
 # Yank + Paste (SELECTION mode)
 "y"                             # Yank
 "<esc><esc>p"                   # NORMAL → Paste
+
+# Remote PTY mit Passwort (via tmux, interaktiv)
+# Schritt 1: Agent bereitet alles vor
+# tmux send-keys -t neptune C-t && sleep 1
+# tmux send-keys -t neptune N && sleep 2
+# tmux send-keys -t neptune 'user@host' && sleep 0.5
+# tmux send-keys -t neptune Escape && sleep 0.4     # Dropdown schließen
+# tmux send-keys -t neptune Tab Tab && sleep 0.4     # Port → Auth Toggle
+# tmux send-keys -t neptune Enter && sleep 0.5       # Key → Password togglen
+# Cursor ist jetzt im Password-Input
+# Schritt 2: USER gibt Passwort ein und drückt Enter
+# (Enter submitet Input.Submitted → ok() wird aufgerufen)
+# ODER: User gibt Passwort ein, Agent macht weiter:
+# Schritt 3: Agent: Tab Tab Enter (Navigieren zu OK + submit)
+# tmux send-keys -t neptune Tab && sleep 0.3
+# tmux send-keys -t neptune Tab && sleep 0.3
+# tmux send-keys -t neptune Enter && sleep 2
+# Erwartet: "PTY created: <host>-<uid> (UID:<n>)" + Auto-Switch zu BASH
+
+# Direkter Remote-PTY-Spawn (mit Key, skip Modal)
+# !!user@host:port:/path/to/key  → erstellt sofort, kein Modal
+
 ```
 
 ## Wichtige Dateien
