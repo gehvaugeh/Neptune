@@ -47,6 +47,7 @@ from textual.screen import ModalScreen
 from textual import work, on, events, message
 
 from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE, get_current_token, TUI_CMDS
+from terminal_colors import detect_terminal_theme
 from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, LocalFileProvider
 from markdown_toolbox import MarkdownToolboxPanel, MdElementSelected
 from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
@@ -889,12 +890,39 @@ class ClientApp(App):
         self.preferred_cols = max(40, self.screen.size.width - 14)
         self.preferred_rows = 24
 
-        # Register exception handler for crash autosave
         loop = asyncio.get_event_loop()
         loop.set_exception_handler(self._exception_handler)
 
+        self.run_worker(self._apply_terminal_theme(), group="theme")
         self.run_worker(self.connect_to_server(), group="server")
         self.enter_normal_mode()
+
+    async def _apply_terminal_theme(self):
+        try:
+            colors = await detect_terminal_theme()
+            if not colors:
+                return
+
+            self.stylesheet.set_variables({
+                "bg-dark": colors['bg_dark'],
+                "bg-input": colors['bg_input'],
+                "bg-block": colors['bg_block'],
+                "bg-focus": colors['bg_focus'],
+                "neptune-primary": colors['neptune_primary'],
+                "neptune-dim": colors['neptune_dim'],
+                "neptune-bright": colors['neptune_bright'],
+                "text-main": colors['text_main'],
+                "text-dim": colors['text_dim'],
+                "success": colors['success'],
+                "error": colors['error'],
+                "border": colors['border'],
+            })
+            self.stylesheet.reparse()
+            self.stylesheet.apply(self.screen)
+            self.refresh()
+            logging.debug(f"Applied terminal theme: bg={colors['bg_dark']}, fg={colors['text_main']}, dark={colors['is_dark']}")
+        except Exception as e:
+            logging.debug(f"Terminal theme detection failed: {e}")
 
     def on_ready(self):
         self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
