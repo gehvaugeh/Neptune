@@ -79,7 +79,7 @@ class PTYManager:
                 pty.current_block_id = block.get("id")
                 try:
                     await pty.drain_output()
-                    # Mark block as running and clear output
+                    pty.mode = "interactive" if block.get("interactive") else "sentinel"
                     await self.broadcast({
                         "type": "update_block",
                         "block": {"id": block.get("id"), "status": "running", "pty_uid": uid, "pty_name": self.names.get(uid), "output": ""}
@@ -87,6 +87,7 @@ class PTYManager:
                     await self.broadcast_queues_status()
                     await pty.run_command(block)
                 finally:
+                    pty.mode = "sentinel"
                     pty.current_block_id = None
                     self.running_blocks.remove(block.get("id"))
                     pty.queue.task_done()

@@ -1,9 +1,7 @@
 import asyncio, os, pty, termios, struct, fcntl, signal, re, logging, shlex, time
 from typing import Optional, Callable, Awaitable
 from pty_base import BasePTY
-from common import HISTORY_FILE, get_shell, strip_ansi
-
-TUI_CMDS = {"vim", "vi", "nano", "htop", "top", "less", "more", "man", "tmux", "neptune"}
+from common import HISTORY_FILE, get_shell, strip_ansi, TUI_CMDS
 
 class LocalPTY(BasePTY):
     def __init__(self, pty_uid: int, pty_id: str, broadcast: Callable[[dict], Awaitable[None]], hist_exp: bool = False):
@@ -111,42 +109,42 @@ class LocalPTY(BasePTY):
                         self._init_done.set()
 
                 if self.current_block_id:
-                    # 1. Identify and handle ANY sentinel (\x1eNS_... \x1f)
-                    while True:
-                        sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', self._reader_buf)
-                        if not sent_match: break
-
-                        # Data before sentinel is real output
-                        pre_data = self._reader_buf[:sent_match.start()]
-                        if pre_data:
-                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":pre_data,"pty_uid":self.pty_uid})
-
-                        # Is this OUR sentinel?
-                        if self.current_sentinel and f"\x1e{self.current_sentinel}_" in sent_match.group(0):
-                            self.shell_cwd = sent_match.group(2).strip()
-                            await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok" if int(sent_match.group(1))==0 else f"error({sent_match.group(1)})","cwd":self.shell_cwd,"pty_uid":self.pty_uid}})
-                            self.finished.set()
-                        else:
-                            # Stale sentinel from previous command, just discard it
-                            logging.debug(f"[{self.pty_id}] Discarded stale sentinel: {sent_match.group(0)}")
-
-                        self._reader_buf = self._reader_buf[sent_match.end():]
-
-                    # 2. Broadcast remaining output, but stay clear of potential partial sentinel
-                    split_idx = self._reader_buf.find('\x1e')
-
-                    if split_idx != -1:
-                        if split_idx > 0:
-                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:split_idx],"pty_uid":self.pty_uid})
-                            self._reader_buf = self._reader_buf[split_idx:]
-
-                        # If it's not a sentinel prefix or it's too long, broadcast it
-                        if not self._reader_buf.startswith('\x1eNS_') or len(self._reader_buf) > 256:
-                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
-                            self._reader_buf = ""
-                    elif self._reader_buf:
+                    if self.mode == "interactive":
                         await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
                         self._reader_buf = ""
+                    else:
+                        # 1. Identify and handle ANY sentinel (\x1eNS_... \x1f)
+                        while True:
+                            sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', self._reader_buf)
+                            if not sent_match: break
+
+                            pre_data = self._reader_buf[:sent_match.start()]
+                            if pre_data:
+                                await self.broadcast({"type":"output","block_id":self.current_block_id,"data":pre_data,"pty_uid":self.pty_uid})
+
+                            if self.current_sentinel and f"\x1e{self.current_sentinel}_" in sent_match.group(0):
+                                self.shell_cwd = sent_match.group(2).strip()
+                                await self.broadcast({"type":"update_block","block":{"id":self.current_block_id,"status":"ok" if int(sent_match.group(1))==0 else f"error({sent_match.group(1)})","cwd":self.shell_cwd,"pty_uid":self.pty_uid}})
+                                self.finished.set()
+                            else:
+                                logging.debug(f"[{self.pty_id}] Discarded stale sentinel: {sent_match.group(0)}")
+
+                            self._reader_buf = self._reader_buf[sent_match.end():]
+
+                        # 2. Broadcast remaining output, but stay clear of potential partial sentinel
+                        split_idx = self._reader_buf.find('\x1e')
+
+                        if split_idx != -1:
+                            if split_idx > 0:
+                                await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf[:split_idx],"pty_uid":self.pty_uid})
+                                self._reader_buf = self._reader_buf[split_idx:]
+
+                            if not self._reader_buf.startswith('\x1eNS_') or len(self._reader_buf) > 256:
+                                await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
+                                self._reader_buf = ""
+                        elif self._reader_buf:
+                            await self.broadcast({"type":"output","block_id":self.current_block_id,"data":self._reader_buf,"pty_uid":self.pty_uid})
+                            self._reader_buf = ""
         except Exception as e:
             logging.error(f"Reader error in {self.pty_id}: {e}")
         finally:
@@ -160,25 +158,30 @@ class LocalPTY(BasePTY):
         self.finished.clear()
         self.current_pgid = None
 
-        # Inject into shadow shell if state-changing
-        await self.sync_shadow_state(cmd)
-
-        try:
-            h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
-            os.write(self.master_fd, f" history -s $'{h_cmd}'\n".encode())
-
-            sentinel = f"NS_{os.urandom(4).hex()}"
-            self.current_sentinel = sentinel
-
-            # Run command directly to preserve state (cd, variables)
-            wrapper = f" {cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
-            os.write(self.master_fd, wrapper.encode())
-
-            # Shared monitoring loop for both local and remote
-            await self._monitor_command(block_id, sentinel)
-        finally:
+        if self.mode == "interactive":
+            # Interactive mode: no sentinel, stream all output
+            # PGID-based monitoring detects when command finishes
             self.current_sentinel = None
-            self.current_pgid = None
+            os.write(self.master_fd, f" {cmd}\n".encode())
+            await self._monitor_command(block_id, None)
+        else:
+            # Inject into shadow shell if state-changing
+            await self.sync_shadow_state(cmd)
+
+            try:
+                h_cmd = cmd.replace('\\', '\\\\').replace("'", "'\\''")
+                os.write(self.master_fd, f" history -s $'{h_cmd}'\n".encode())
+
+                sentinel = f"NS_{os.urandom(4).hex()}"
+                self.current_sentinel = sentinel
+
+                wrapper = f" {cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"; history -a\n"
+                os.write(self.master_fd, wrapper.encode())
+
+                await self._monitor_command(block_id, sentinel)
+            finally:
+                self.current_sentinel = None
+                self.current_pgid = None
 
     def _is_state_changing(self, cmd: str) -> bool:
         cmd = cmd.strip()

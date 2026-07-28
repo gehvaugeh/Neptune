@@ -75,6 +75,8 @@ class Server:
                     except: pass
 
                     block = self.add_block(msg.get("mode"), msg.get("content"), index=idx, pty_uid=p_uid)
+                    if msg.get("interactive"):
+                        block["interactive"] = True
                     if idx is not None: await self.session_manager.broadcast({"type":"reorder", "blocks":self.blocks})
                     else: await self.session_manager.broadcast({"type":"new_block", "block":block})
                     b_type = block.get("type")

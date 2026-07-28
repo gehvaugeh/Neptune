@@ -1,9 +1,7 @@
 import asyncio, os, logging, shutil, time, re, shlex
 from typing import Optional, Callable, Awaitable, List, Dict
 from pty_base import BasePTY
-from common import strip_ansi
-
-TUI_COMMANDS = {"vim", "vi", "nano", "htop", "top", "less", "more", "man", "tmux", "neptune"}
+from common import strip_ansi, TUI_CMDS
 
 class RemotePTY(BasePTY):
     def __init__(self, pty_uid: int, pty_id: str, broadcast_func: Callable[[dict], Awaitable[None]]):
@@ -118,16 +116,20 @@ class RemotePTY(BasePTY):
         self.interrupted.clear()
         self.current_pgid = None
 
-        # Inject into shadow shell if state-changing
-        await self.sync_shadow_state(cmd)
+        if self.mode == "interactive":
+            wrapper = f" {cmd}\n"
+            self.shell_proc.stdin.write(wrapper.encode())
+            await self.shell_proc.stdin.drain()
+            await self._monitor_command(block_id, None)
+        else:
+            # Inject into shadow shell if state-changing
+            await self.sync_shadow_state(cmd)
 
-        sentinel = f"NS_{os.urandom(4).hex()}"
-        # Run command directly to preserve state
-        wrapper = f" {cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
-
-        self.shell_proc.stdin.write(wrapper.encode())
-        await self.shell_proc.stdin.drain()
-        await self._monitor_command(block_id, sentinel)
+            sentinel = f"NS_{os.urandom(4).hex()}"
+            wrapper = f" {cmd}; printf '\\x1e{sentinel}_%s_%s\\x1f' \"$?\" \"$(pwd)\"\n"
+            self.shell_proc.stdin.write(wrapper.encode())
+            await self.shell_proc.stdin.drain()
+            await self._monitor_command(block_id, sentinel)
 
     def _is_state_changing(self, cmd: str) -> bool:
         cmd = cmd.strip()
@@ -183,15 +185,15 @@ class RemotePTY(BasePTY):
 
             return sorted(list(set(results)))
 
-    async def _monitor_command(self, block_id: str, sentinel: str):
+    async def _monitor_command(self, block_id: str, sentinel: str | None):
         buf = ""
         start_time = asyncio.get_running_loop().time()
         last_poll_time = 0.0
-        poll_interval = 0.5 # More frequent polling for better responsiveness
+        poll_interval = 0.5
+        is_interactive = sentinel is None
 
         try:
             while True:
-                # 1. Prioritize reading output
                 try:
                     chunk = await asyncio.wait_for(self.shell_proc.stdout.read(65536), 0.05)
                     if not chunk: break
@@ -202,7 +204,6 @@ class RemotePTY(BasePTY):
                 now = asyncio.get_running_loop().time()
                 if now - last_poll_time >= poll_interval:
                     last_poll_time = now
-                    # Check ALL PGIDs on the TTY to see if user command is running
                     cmd = self._get_ssh_base(use_socket=True)
                     cmd.append(f"ps -t {self.remote_tty} -o pgid=")
                     try:
@@ -212,9 +213,7 @@ class RemotePTY(BasePTY):
                         is_user_cmd_running = any(pgid != self.shell_pgid for pgid in pgids)
 
                         if not is_user_cmd_running:
-                            # Command finished or killed, give a moment for sentinel to arrive
                             await asyncio.sleep(0.5)
-                            # One last read attempt
                             try:
                                 chunk = await asyncio.wait_for(self.shell_proc.stdout.read(65536), 0.1)
                                 if chunk:
@@ -223,32 +222,31 @@ class RemotePTY(BasePTY):
                             break
                     except: pass
 
-                try:
-                    # 2. Identify and handle ANY sentinel (\x1eNS_... \x1f)
+                if is_interactive:
+                    if buf:
+                        await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
+                        buf = ""
+                else:
                     while True:
                         sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', buf)
                         if not sent_match: break
 
-                        # Data before sentinel is real output
                         pre_data = buf[:sent_match.start()]
                         if pre_data:
                             await self.broadcast({"type": "output", "block_id": block_id, "data": pre_data, "pty_uid": self.pty_uid})
 
-                        # Is this OUR sentinel?
                         if f"\x1e{sentinel}_" in sent_match.group(0):
                             exit_code = int(sent_match.group(1))
                             self._cwd = sent_match.group(2).strip()
                             await self.broadcast({"type": "update_block", "block": {
                                 "id": block_id, "status": "ok" if exit_code == 0 else f"error({exit_code})", "pty_uid": self.pty_uid, "cwd": self._cwd
                             }})
-                            return # Done
+                            return
                         else:
-                            # Stale sentinel from previous command, just discard it
                             logging.debug(f"[{self.pty_id}] Discarded stale sentinel: {sent_match.group(0)}")
 
                         buf = buf[sent_match.end():]
 
-                    # 3. Broadcast remaining output, but stay clear of potential partial sentinel
                     split_idx = buf.find('\x1e')
 
                     if split_idx != -1:
@@ -256,18 +254,22 @@ class RemotePTY(BasePTY):
                             await self.broadcast({"type": "output", "block_id": block_id, "data": buf[:split_idx], "pty_uid": self.pty_uid})
                             buf = buf[split_idx:]
 
-                        # If it's not a sentinel prefix or it's too long, broadcast it
                         if not buf.startswith('\x1eNS_') or len(buf) > 256:
                             await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
                             buf = ""
                     elif buf:
                         await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
                         buf = ""
-                except asyncio.TimeoutError:
-                    continue
 
-            # If loop exited via PGID check, broadcast remaining data and final status
-            # But process one last time for sentinel to avoid leakage
+            if is_interactive:
+                if buf:
+                    await self.broadcast({"type": "output", "block_id": block_id, "data": buf, "pty_uid": self.pty_uid})
+                status = "killed" if self.interrupted.is_set() else "done"
+                await self.broadcast({"type": "update_block", "block": {
+                    "id": block_id, "status": status, "pty_uid": self.pty_uid, "cwd": self._cwd
+                }})
+                return
+
             while True:
                 sent_match = re.search(r'\x1eNS_[0-9a-fA-F]+_(-?\d+)_([^\x1f]*?)\x1f', buf)
                 if not sent_match: break
