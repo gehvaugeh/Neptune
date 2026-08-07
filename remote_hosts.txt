@@ -1,7 +1,0 @@
-vangegcz@localhost
-vangegcz@hio-worker.hio.rub.de
-vangegcz@cust-app.hio.rub.de
-vangegcz@prod-app-01.hio.rub.de
-vangegcz@qs-web.hio.rub.de
-vangegcz@127.0.0.1
-vangegcz@prod-app-03.hio.rub.de
