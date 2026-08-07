@@ -1,0 +1,13 @@
+echo hello neptune
+echo OracleEcho
+echo AAA
+echo MoveMe
+ls .git
+echo YankMe
+ls -lah ./
+compgen -f -- ''; echo COMP_87d237c5
+compgen -f -- ''; echo COMP_67cd7fe9
+compgen -f -- ''; echo COMP_d9e6349c
+cd ..
+sudo tail -F /var/lib/tomcat10/webapps/qisserver/WEB-INF/log/logdatei.log
+ls

@@ -37,7 +37,7 @@ from typing import List, Dict
 from rich.text import Text
 from rich.style import Style
 from rich.markup import escape
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, get_system_commands_provider
 from textual.widgets import Header, Footer, Static, OptionList, Label, TextArea, Markdown, Button, Input
 from textual.command import Provider, Hit
 from textual.widgets.option_list import Option
@@ -47,7 +47,8 @@ from textual.screen import ModalScreen
 from textual import work, on, events, message
 
 from common import HistoryManager, fuzzy_match, load_workflows, get_random_bright_color, THEME_FILE, REMOTE_HOSTS_FILE, get_current_token, TUI_CMDS
-from terminal_colors import detect_terminal_theme
+from terminal_colors import derive_theme_colors
+from textual.theme import Theme
 from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, LocalFileProvider
 from markdown_toolbox import MarkdownToolboxPanel, MdElementSelected
 from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
@@ -77,6 +78,7 @@ class NeptuneCommandProvider(Provider):
             ("Clear Session", "clear_session", "Remove all blocks and reset server state"),
             ("Exit", "quit", "Close Neptune"),
             ("Save Workflow", "save_workflow_from_input", "Save current input as workflow"),
+            ("Apply Terminal Colors", "apply_terminal_colors", "Re-detect terminal colors and apply theme"),
         ]
         for name, action, desc in commands:
             score = matcher.match(name)
@@ -755,7 +757,7 @@ class CommandHistoryContainer(ScrollableContainer):
 
 class ClientApp(App):
     CSS_PATH = THEME_FILE
-    COMMANDS = {NeptuneCommandProvider}
+    COMMANDS = {NeptuneCommandProvider, get_system_commands_provider}
 
     def _on_mouse_event(self, event: events.MouseEvent) -> None:
         event.stop()
@@ -786,7 +788,7 @@ class ClientApp(App):
         if result == "exit":
             self._do_shutdown()
 
-    def __init__(self, socket_path=DEFAULT_SOCKET_PATH):
+    def __init__(self, socket_path=DEFAULT_SOCKET_PATH, terminal_colors=None):
         super().__init__()
         self.socket_path = socket_path
         self.history = HistoryManager()
@@ -798,6 +800,50 @@ class ClientApp(App):
         self.user_id = None
         self.blocks = {}
         self.users = {}
+
+        neptune_dark = Theme(
+            name="neptune-dark",
+            primary="#2196f3",
+            background="#02040a",
+            foreground="#e1f5fe",
+            surface="#050a15",
+            panel="#020C2E",
+            success="#00e676",
+            error="#ff5252",
+            dark=True,
+            variables={
+                "block-cursor-foreground": "#e1f5fe",
+                "block-cursor-background": "#2196f3",
+                "input-selection-background": "#2196f366",
+            },
+        )
+        self.register_theme(neptune_dark)
+
+        if terminal_colors and terminal_colors.get("bg") and terminal_colors.get("fg"):
+            tc = derive_theme_colors(terminal_colors["bg"], terminal_colors["fg"])
+            terminal_theme = Theme(
+                name="terminal",
+                primary=tc["primary"],
+                background=tc["background"],
+                foreground=tc["foreground"],
+                surface=tc["surface"],
+                panel=tc["panel"],
+                success=tc["success"],
+                error=tc["error"],
+                dark=tc["is_dark"],
+                variables={
+                    "block-cursor-foreground": tc["foreground"],
+                    "block-cursor-background": tc["primary"],
+                    "input-selection-background": tc["primary"] + "66",
+                },
+            )
+            self.register_theme(terminal_theme)
+            self.theme = "terminal"
+            self._terminal_theme_detected = True
+            logging.debug(f"Terminal theme pre-detected: bg={tc['background']}, fg={tc['foreground']}, dark={tc['is_dark']}")
+        else:
+            self.theme = "neptune-dark"
+            self._terminal_theme_detected = False
         self.reader = None
         self.writer = None
         self.previous_filter = ""
@@ -893,39 +939,46 @@ class ClientApp(App):
         loop = asyncio.get_event_loop()
         loop.set_exception_handler(self._exception_handler)
 
-        self.run_worker(self._apply_terminal_theme(), group="theme")
         self.run_worker(self.connect_to_server(), group="server")
         self.enter_normal_mode()
 
-    async def _apply_terminal_theme(self):
-        try:
-            colors = await detect_terminal_theme()
-            if not colors:
-                return
-
-            self.stylesheet.set_variables({
-                "bg-dark": colors['bg_dark'],
-                "bg-input": colors['bg_input'],
-                "bg-block": colors['bg_block'],
-                "bg-focus": colors['bg_focus'],
-                "neptune-primary": colors['neptune_primary'],
-                "neptune-dim": colors['neptune_dim'],
-                "neptune-bright": colors['neptune_bright'],
-                "text-main": colors['text_main'],
-                "text-dim": colors['text_dim'],
-                "success": colors['success'],
-                "error": colors['error'],
-                "border": colors['border'],
-            })
-            self.stylesheet.reparse()
-            self.stylesheet.apply(self.screen)
-            self.refresh()
-            logging.debug(f"Applied terminal theme: bg={colors['bg_dark']}, fg={colors['text_main']}, dark={colors['is_dark']}")
-        except Exception as e:
-            logging.debug(f"Terminal theme detection failed: {e}")
-
     def on_ready(self):
         self.call_after_refresh(lambda: self.query_one("#bottom_dock").focus())
+        if hasattr(self, "_terminal_theme_detected"):
+            if self._terminal_theme_detected:
+                self.notify("Terminal colors detected ✓", timeout=3)
+            else:
+                self.notify("Terminal colors not detected. Using fallback theme.", timeout=5)
+
+    def action_apply_terminal_colors(self):
+        from terminal_colors import detect_terminal_theme
+        try:
+            tc = detect_terminal_theme()
+            if tc and tc.get("bg") and tc.get("fg"):
+                derived = derive_theme_colors(tc["bg"], tc["fg"])
+                theme = Theme(
+                    name="terminal",
+                    primary=derived["primary"],
+                    background=derived["background"],
+                    foreground=derived["foreground"],
+                    surface=derived["surface"],
+                    panel=derived["panel"],
+                    success=derived["success"],
+                    error=derived["error"],
+                    dark=derived["is_dark"],
+                    variables={
+                        "block-cursor-foreground": derived["foreground"],
+                        "block-cursor-background": derived["primary"],
+                        "input-selection-background": derived["primary"] + "66",
+                    },
+                )
+                self.register_theme(theme)
+                self.theme = "terminal"
+                self.notify(f"Terminal theme applied (dark={derived['is_dark']})", timeout=3)
+            else:
+                self.notify("Could not detect terminal colors. Try a terminal that supports OSC 10/11.", timeout=5)
+        except Exception as e:
+            self.notify(f"Theme detection error: {e}", timeout=5)
 
     def _render_visible_blocks(self):
         container = self.query_one("#command_history")
@@ -2414,7 +2467,9 @@ class ClientApp(App):
 from branding import setup_parser
 
 if __name__ == "__main__":
+    from terminal_colors import detect_terminal_theme
     parser = setup_parser("Neptune Client")
     parser.add_argument("-s", "--socket", default=DEFAULT_SOCKET_PATH, help="Path to the Unix Domain Socket")
     args = parser.parse_args()
-    ClientApp(socket_path=args.socket).run()
+    tc = detect_terminal_theme()
+    ClientApp(socket_path=args.socket, terminal_colors=tc).run()

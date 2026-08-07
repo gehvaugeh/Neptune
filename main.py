@@ -32,7 +32,9 @@ def main():
         server.asyncio.run(s.start())
     elif mode == "client":
         import client
-        client.ClientApp(socket_path=socket_path).run()
+        from terminal_colors import detect_terminal_theme
+        tc = detect_terminal_theme()
+        client.ClientApp(socket_path=socket_path, terminal_colors=tc).run()
     elif mode == "all":
         # Start server in background
         server_args = [sys.executable, "server.py", "-s", socket_path]
@@ -44,7 +46,9 @@ def main():
         try:
             # Start client
             import client
-            client.ClientApp(socket_path=socket_path).run()
+            from terminal_colors import detect_terminal_theme
+            tc = detect_terminal_theme()
+            client.ClientApp(socket_path=socket_path, terminal_colors=tc).run()
         finally:
             # Server was already notified via shutdown message from client.
             # Wait for it to clean up, force kill if it hangs.

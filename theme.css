@@ -1,35 +1,26 @@
-/* Unified Ultra Dark Theme - Neptune Collaborative */
+/* Neptune Theme - Textual Theme Variables */
 
-$bg-dark: #02040a;
-$bg-input: #050a15;
-$bg-block: #020C2E;
-$bg-focus: #081225;
-$neptune-primary: #2196f3;
-$neptune-dim: #0d47a1;
-$neptune-bright: #81d4fa;
-$text-main: #e1f5fe;
-$text-dim: #4fc3f7;
-$success: #00e676;
-$error: #ff5252;
-$border: #0d47a1;
+/* No variable declarations needed - Textual generates $primary, $background,
+   $foreground, $surface, $panel, $border, $success, $error, etc.
+   from the Theme object at runtime. */
 
 /* Modal titles */
 .modal-title { 
     text-style: bold; 
     margin-bottom: 1;
 }
-SaveNotebookModal .modal-title { color: $neptune-primary; }
-ImportNotebookModal .modal-title { color: $neptune-bright; }
-SaveWorkflowModal .modal-title { color: $neptune-bright; }
+SaveNotebookModal .modal-title { color: $primary; }
+ImportNotebookModal .modal-title { color: $primary-lighten-2; }
+SaveWorkflowModal .modal-title { color: $primary-lighten-2; }
 ExitConfirmModal .modal-title { color: $error; }
 RemotePTYAuthModal .modal-title,
 RenamePTYModal .modal-title,
-PTYManagerModal .modal-title { color: $neptune-primary; }
-.modal-footer { color: $text-dim; }
+PTYManagerModal .modal-title { color: $primary; }
+.modal-footer { color: $foreground-muted; }
 
 Screen {
-    background: $bg-dark;
-    color: $text-main;
+    background: $background;
+    color: $foreground;
 }
 
 ModalScreen {
@@ -47,21 +38,21 @@ ModalScreen {
     dock: bottom;
     height: auto;
     max-height: 20;
-    background: $bg-input;
+    background: $surface;
     border-top: solid $border;
     padding-bottom: 0;
 }
 
 #input_container {
     height: auto;
-    background: $bg-input;
+    background: $surface;
     align: left middle;
 }
 
 #mode_prefix {
     width: auto;
     padding: 0 1;
-    color: $neptune-primary;
+    color: $primary;
     text-style: bold;
 }
 
@@ -77,7 +68,7 @@ ModalScreen {
     max-height: 8;
     border: none;
     background: transparent;
-    color: $text-main;
+    color: $foreground;
 }
 
 #main_input:disabled {
@@ -89,7 +80,7 @@ ModalScreen {
     padding: 0 1;
     height: 1;
     text-style: bold;
-    color: $neptune-primary;
+    color: $primary;
 }
 
 #dock_status_bar {
@@ -102,26 +93,26 @@ ModalScreen {
     text-style: bold;
 }
 
-/* Block-Struktur für Notebook-Feeling */
+/* Block-Struktur */
 CommandBlock, NoteBlock {
     padding-bottom: 1;
     padding-left: 1;
     height: auto;
     min-height: 1;
     width: 100%;
-    border-left: solid $neptune-dim;
+    border-left: solid $primary-darken-2;
     border-right: none;
-    background: $bg-block;
+    background: $panel;
 }
 
 /* Visueller Fokus beim Editieren oder Auswählen */
 CommandBlock:focus, NoteBlock:focus {
-    background: #112244; /* Brighter background for selection indicator */
-    border-left: solid $neptune-primary;
+    background: $primary-darken-3;
+    border-left: solid $primary;
 }
 
 NoteBlock {
-    border-left: solid $neptune-dim;
+    border-left: solid $primary-darken-2;
 }
 
 .block-header {
@@ -140,8 +131,8 @@ NoteBlock {
 }
 
 .block-output {
-    color: $text-dim;
-    max-height: 24; /* Set dynamically when zoomed */
+    color: $foreground-muted;
+    max-height: 24;
     padding: 0;
     background: transparent;
     overflow: auto;
@@ -149,7 +140,7 @@ NoteBlock {
 }
 
 CommandBlock.-zoomed {
-    border-left: solid $neptune-bright;
+    border-left: solid $primary-lighten-2;
     margin: 0;
 }
 CommandBlock.-zoomed > .block-output {
@@ -158,7 +149,7 @@ CommandBlock.-zoomed > .block-output {
 
 .block-info {
     text-align: right;
-    color: $text-dim;
+    color: $foreground-muted;
     height: 1;
     padding: 0;
     margin-right: 0;
@@ -176,7 +167,7 @@ CommandBlock.-zoomed > .block-output {
     min-height: 1;
     max-height: 15;
     border: none;
-    background: $bg-input;
+    background: $surface;
     margin: 0;
     padding: 0;
     width: 100%;
@@ -191,16 +182,16 @@ CommandBlock.-zoomed > .block-output {
 }
 
 .locked-remote {
-    background: #1a1010;
+    background: $error-darken-3;
 }
 
 .locked-local {
-    background: #101a10;
+    background: $success-darken-3;
 }
 
 #filter_bar {
     height: 3;
-    background: #111;
+    background: $panel;
     border-bottom: solid $border;
     padding: 0 1;
     align: left middle;
@@ -209,23 +200,22 @@ CommandBlock.-zoomed > .block-output {
 #filter_input {
     width: 1fr;
     border: none;
-    background: $bg-block;
+    background: $panel;
 }
 
 .filtered-out {
     display: none;
 }
 
-/* Autocomplete Palette - Expanding Upwards */
-
+/* Autocomplete Palette */
 #palette {
     display: none;
     height: 0;
     max-height: 6;
     width: 100%;
-    background: $bg-block;
+    background: $panel;
     border: none;
-    color: $text-main;
+    color: $foreground;
     scrollbar-gutter: auto;
     padding: 0;
 }
@@ -241,7 +231,6 @@ CommandBlock.-zoomed > .block-output {
 }
 
 /* Modals - Flat Overlay Design */
-
 .modal-row {
     height: 1;
     align: left middle;
@@ -259,7 +248,7 @@ CommandBlock.-zoomed > .block-output {
     height: 1;
     min-height: 1;
     border: none;
-    background: $bg-input;
+    background: $surface;
     padding: 0 1;
 }
 
@@ -269,7 +258,7 @@ CommandBlock.-zoomed > .block-output {
     height: 1;
     min-height: 1;
     border: none;
-    background: $bg-input;
+    background: $surface;
     padding: 0 1;
     margin-bottom: 1;
 }
@@ -277,43 +266,43 @@ CommandBlock.-zoomed > .block-output {
 .modal-row > Input:focus,
 #auth_key:focus,
 #auth_pass:focus {
-    border-left: thick $neptune-primary;
-    background: $bg-focus;
+    border-left: thick $primary;
+    background: $boost;
 }
 
 #auth_toggle {
     width: auto;
     min-width: 8;
     border: none;
-    background: $bg-input;
+    background: $surface;
     padding: 0 1;
     min-height: 1;
 }
 
 #auth_toggle:focus {
-    border-left: thick $neptune-primary;
-    background: $bg-focus;
+    border-left: thick $primary;
+    background: $boost;
 }
 
 .modal-row > Button {
     width: auto;
     min-width: 10;
     border: none;
-    background: $bg-input;
+    background: $surface;
     padding: 0 1;
     height: 1;
     min-height: 1;
 }
 
 .modal-row > Button:focus {
-    border-left: thick $neptune-primary;
-    background: $bg-focus;
+    border-left: thick $primary;
+    background: $boost;
 }
 
 #key_list, #host_history_list {
     height: auto;
     max-height: 10;
-    background: $bg-input;
+    background: $surface;
     border: none;
     padding: 0;
 }
@@ -336,13 +325,13 @@ CommandBlock.-zoomed > .block-output {
     height: 1;
     min-height: 1;
     border: none;
-    background: $bg-input;
+    background: $surface;
     padding: 0 1;
 }
 
 #modal_buttons > Button:focus {
-    border-left: thick $neptune-primary;
-    background: $bg-focus;
+    border-left: thick $primary;
+    background: $boost;
 }
 
 .modal-footer {
@@ -352,12 +341,12 @@ CommandBlock.-zoomed > .block-output {
 
 .pty-manager-modal #pty_list {
     height: 10;
-    background: $bg-input;
+    background: $surface;
 }
 
 #modal_dialog {
     padding: 1 2;
-    background: $bg-block;
+    background: $panel;
     width: 80;
     height: auto;
     align: center middle;
@@ -365,7 +354,7 @@ CommandBlock.-zoomed > .block-output {
 
 #host_history_list, #key_list {
     max-height: 10;
-    background: $bg-input;
+    background: $surface;
 }
 #host_history_list.hidden, #key_list.hidden {
     display: none;
@@ -373,7 +362,7 @@ CommandBlock.-zoomed > .block-output {
 
 #pty_target_bar {
     height: 3;
-    background: #0a1020;
+    background: $surface;
     border-bottom: solid $border;
     padding: 0 1;
     align: left middle;
@@ -382,17 +371,16 @@ CommandBlock.-zoomed > .block-output {
 #pty_target_input {
     width: 1fr;
     border: none;
-    background: $bg-block;
+    background: $panel;
 }
 
 /* Markdown Toolbox */
-
 MarkdownToolboxPanel {
     display: none;
     height: auto;
-    background: $bg-block;
+    background: $panel;
     border: none;
-    color: $text-main;
+    color: $foreground;
     padding: 0;
 }
 
@@ -423,5 +411,5 @@ MarkdownToolboxPanel.-visible {
 }
 
 #md_list > .option-list--option.-highlighted {
-    background: $neptune-dim;
+    background: $primary-darken-2;
 }

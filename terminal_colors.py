@@ -4,6 +4,7 @@ import re
 import time
 import termios
 import tty
+import logging
 from typing import Optional, Tuple
 
 
@@ -20,43 +21,73 @@ def _rgb_to_hex(r: int, g: int, b: int) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def query_terminal_colors(timeout: float = 0.15) -> dict:
-    fd = sys.stdin.fileno()
-    
-    if not os.isatty(fd):
-        return {"bg": None, "fg": None, "bg_is_dark": None}
-    
+def query_terminal_colors(timeout: float = 0.5) -> dict:
+    result = {"bg": None, "fg": None, "bg_is_dark": None}
+
+    import select
+
+    tty_fd = None
+    try:
+        tty_fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+    except OSError:
+        pass
+
+    if tty_fd is None:
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            logging.debug("No TTY available for color query")
+            return result
+    else:
+        fd = tty_fd
+
     old = termios.tcgetattr(fd)
     new = old._replace(lflag=old.lflag & ~(termios.ECHO | termios.ICANON))
-    result = {"bg": None, "fg": None, "bg_is_dark": None}
 
     try:
         termios.tcsetattr(fd, termios.TCSADRAIN, list(new))
 
         os.write(fd, b"\x1b]11;?\x1b\\\x1b]10;?\x1b\\")
-        os.flush(sys.stdout)
 
-        import select
         response = b""
         deadline = time.time() + timeout
 
         while time.time() < deadline:
-            ready, _, _ = select.select([fd], [], [], 0.05)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.05))
             if ready:
-                chunk = os.read(fd, 4096)
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
                 if not chunk:
                     break
                 response += chunk
-                if b"\x07" in response or b"\x1b\\" in response:
-                    break
+                has_bel = b"\x07" in response
+                has_st = b"\x1b\\" in response
+                if has_bel or has_st:
+                    if response.count(b"\x07") + response.count(b"\x1b\\") >= 2:
+                        break
+                    if has_bel and has_st:
+                        break
 
-        pattern = re.compile(rb"\x1b\](\d+);rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)(?:\x1b\\\\|\x07)")
+        pattern = re.compile(rb"\x1b\](\d+);rgba?:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)(?:/[0-9a-fA-F]+)?(?:\x1b\\|\x07)")
         for match in pattern.finditer(response):
             code, r, g, b = match.groups()
             code = code.decode()
-            r_int = int(r, 16) >> 8
-            g_int = int(g, 16) >> 8
-            b_int = int(b, 16) >> 8
+
+            def _to_8bit(val: bytes) -> int:
+                v = int(val, 16)
+                if len(val) <= 2:
+                    return v
+                if len(val) == 3:
+                    return v >> 4
+                return v >> 8
+
+            r_int = _to_8bit(r)
+            g_int = _to_8bit(g)
+            b_int = _to_8bit(b)
             hex_color = _rgb_to_hex(r_int, g_int, b_int)
 
             if code == "11":
@@ -65,13 +96,19 @@ def query_terminal_colors(timeout: float = 0.15) -> dict:
             elif code == "10":
                 result["fg"] = hex_color
 
-    except Exception:
-        pass
+        logging.debug(f"OSC color query: bg={result['bg']}, fg={result['fg']} (from {len(response)}b response)")
+    except Exception as e:
+        logging.debug(f"OSC color query error: {e}")
     finally:
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, list(old))
         except Exception:
             pass
+        if tty_fd is not None:
+            try:
+                os.close(tty_fd)
+            except OSError:
+                pass
 
     return result
 
@@ -90,50 +127,35 @@ def derive_theme_colors(bg: str, fg: str) -> dict:
         return _rgb_to_hex(r, g, b)
 
     if is_dark:
-        surface = blend(bg, fg, 0.05)
-        panel = blend(bg, fg, 0.08)
-        primary = blend(bg, fg, 0.25)
-        secondary = blend(bg, fg, 0.18)
-        accent = blend(bg, fg, 0.35)
-        success = "#00e676" if fg_r < 200 else "#00c853"
-        error = "#ff5252" if fg_r < 200 else "#d32f2f"
-        warning = "#ffab40" if fg_r < 200 else "#ff8f00"
-    else:
-        surface = blend(bg, fg, 0.08)
-        panel = blend(bg, fg, 0.12)
         primary = blend(bg, fg, 0.30)
-        secondary = blend(bg, fg, 0.22)
-        accent = blend(bg, fg, 0.40)
-        success = "#2e7d32" if fg_r > 100 else "#388e3c"
-        error = "#c62828" if fg_r > 100 else "#d32f2f"
-        warning = "#e65100" if fg_r > 100 else "#ef6c00"
+        surface = blend(bg, fg, 0.04)
+        panel = blend(bg, fg, 0.07)
+        success = "#00e676"
+        error = "#ff5252"
+    else:
+        primary = blend(bg, fg, 0.35)
+        surface = blend(bg, fg, 0.06)
+        panel = blend(bg, fg, 0.10)
+        success = "#2e7d32"
+        error = "#c62828"
 
     return {
-        "bg_dark": bg,
-        "bg_input": surface,
-        "bg_block": panel,
-        "bg_focus": blend(panel, fg, 0.15),
-        "neptune_primary": primary,
-        "neptune_dim": blend(bg, primary, 0.3),
-        "neptune_bright": blend(primary, fg, 0.4),
-        "text_main": fg,
-        "text_dim": blend(fg, bg, 0.4),
+        "primary": primary,
+        "background": bg,
+        "foreground": fg,
+        "surface": surface,
+        "panel": panel,
         "success": success,
         "error": error,
-        "border": blend(bg, primary, 0.5),
         "is_dark": is_dark,
     }
 
 
-async def detect_terminal_theme() -> Optional[dict]:
-    loop = None
+def detect_terminal_theme(timeout: float = 0.2) -> Optional[dict]:
     try:
-        loop = __import__("asyncio").get_event_loop()
-        colors = await loop.run_in_executor(
-            None, lambda: query_terminal_colors(timeout=0.15)
-        )
+        colors = query_terminal_colors(timeout=timeout)
         if colors["bg"] and colors["fg"]:
-            return derive_theme_colors(colors["bg"], colors["fg"])
+            return colors
     except Exception:
         pass
     return None
