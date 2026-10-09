@@ -5,6 +5,7 @@ import re
 import time
 import argparse
 import logging
+import tempfile
 import pyte
 import inspect
 from functools import wraps
@@ -66,6 +67,15 @@ class ServerMessage(message.Message):
         super().__init__()
 
 DEFAULT_SOCKET_PATH = "/tmp/neptune.sock"
+
+class NeptuneError(Exception):
+    """Base class for all Neptune-specific errors.
+
+    The crash failsafe (`_handle_exception`) treats *every* exception type as
+    fatal for autosave purposes, so even unknown or future exceptions trigger
+    the recovery backup. Subclassing `NeptuneError` makes the intent explicit
+    and gives future error types a single importable base.
+    """
 
 class NeptuneCommandProvider(Provider):
     async def search(self, query: str) -> ComposeResult:
@@ -304,6 +314,8 @@ class NoteBlock(BaseBlock):
                 if save:
                     self.content = edit.text
                     await self.app_ref.send_message({"type": "edit_save", "block_id": self.block_id, "content": self.content})
+                    # Change-driven autosave: block edited locally.
+                    self.app_ref._schedule_autosave()
                 else:
                     edit.text = self.content
                     await self.app_ref.send_message({"type": "edit_cancel", "block_id": self.block_id})
@@ -427,6 +439,11 @@ class CommandBlock(BaseBlock):
             self.stream.feed(text)
         if self.is_mounted:
             self._schedule_render()
+        # Change-driven autosave: notebook content changed (output arrived).
+        try:
+            self.app_ref._schedule_autosave()
+        except Exception:
+            pass
 
     def _schedule_render(self):
         if not self._render_pending:
@@ -451,7 +468,7 @@ class CommandBlock(BaseBlock):
                 return True
             scroll_y = parent.scroll_y
             view_height = parent.content_region.height
-            y = self.region.y
+            y = self.virtual_region.y
             h = self.region.height
             return y + h > scroll_y and y < scroll_y + view_height
         except:
@@ -721,6 +738,8 @@ class CommandBlock(BaseBlock):
                 if save:
                     self.content = edit.text
                     await self.app_ref.send_message({"type": "edit_save", "block_id": self.block_id, "content": self.content})
+                    # Change-driven autosave: block edited locally.
+                    self.app_ref._schedule_autosave()
                 else:
                     edit.text = self.content
                     await self.app_ref.send_message({"type": "edit_cancel", "block_id": self.block_id})
@@ -742,6 +761,7 @@ class CommandHistoryContainer(ScrollableContainer):
         self._scroll_timer = None
 
     def watch_scroll_y(self, old, new):
+        super().watch_scroll_y(old, new)
         if old != new:
             self._debounce_scroll()
 
@@ -869,6 +889,7 @@ class ClientApp(App):
         self.last_export_time = time.time()
         self._pending_tui_block = False
         self._pending_pty_switch = None  # prefix to switch to after pty.created
+        self._autosave_timer = None
 
         self.available_commands = [
             {"name": "ptyman", "params": "", "desc": "Open PTY Manager overlay"},
@@ -983,7 +1004,15 @@ class ClientApp(App):
     def _render_visible_blocks(self):
         container = self.query_one("#command_history")
         for block in container.children:
-            if isinstance(block, CommandBlock) and block._needs_render:
+            if not isinstance(block, CommandBlock):
+                continue
+            needs_render = block._needs_render
+            try:
+                out = block.query_one("#output")
+                stale = getattr(out, "_last_render_key", None) != hash(block.output)
+            except Exception:
+                stale = False
+            if needs_render or stale:
                 if block._is_visible():
                     block._needs_render = False
                     block.render_terminal()
@@ -994,27 +1023,30 @@ class ClientApp(App):
             self._autosave_on_crash(exc)
         loop.default_exception_handler(context)
 
+    def _handle_exception(self, error: Exception) -> None:
+        """Textual routes *every* unhandled exception here (message loop, workers,
+        idle handlers, next callbacks). The asyncio loop exception handler rarely
+        fires, so this override is what actually guarantees the crash autosave."""
+        try:
+            self._autosave_on_crash(error)
+        except Exception:
+            logging.exception("Crash autosave failed in _handle_exception")
+        super()._handle_exception(error)
+
     def _autosave_on_crash(self, exc=None):
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         filename = f"autosave_crash_{timestamp}.md"
         try:
-            md_output = [f"# Neptune Crash Recovery - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
-            md_output.append(f"\n_This is an automatic backup from an unexpected shutdown._\n")
-            if exc:
-                md_output.append(f"\n**Error:** `{type(exc).__name__}: {exc}`\n")
             container = self.query_one("#command_history")
-            for block in container.children:
-                if isinstance(block, NoteBlock):
-                    md_output.append(f"{block.content}\n")
-                elif isinstance(block, CommandBlock):
-                    pty_uid_export = block.pty_uid if block.pty_uid is not None else 0
-                    md_output.append(f"```bash (uid:{pty_uid_export})\n{block.content}\n```\n")
-                    if block.output:
-                        clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.output)
-                        if clean.strip():
-                            md_output.append(f"```text\n{clean.rstrip()}\n```\n")
+            if not [c for c in container.children if isinstance(c, BaseBlock)]:
+                return
+            header = f"# Neptune Crash Recovery - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            header += "\n_This is an automatic backup from an unexpected shutdown._\n"
+            if exc:
+                header += f"\n**Error:** `{type(exc).__name__}: {exc}`\n"
+            md = self._build_notebook_markdown(header=header, include_output=True)
             with open(filename, "w") as f:
-                f.write("\n".join(md_output))
+                f.write(md)
             self.notify(f"CRASH RECOVERY: Autosaved to {filename}", severity="warning")
         except Exception as e:
             self.notify(f"Autosave failed: {e}", severity="error")
@@ -1209,6 +1241,8 @@ class ClientApp(App):
                         block.render_terminal()
                 self.call_after_refresh(to_mount[-1].scroll_visible)
             self.refresh()
+            # Change-driven autosave: children reordered (or removed on :clear).
+            self._schedule_autosave()
 
         elif msg_type == "update_block":
             data = msg.get("block")
@@ -1218,6 +1252,8 @@ class ClientApp(App):
                 block = self.blocks[b_id]
                 if "content" in data:
                     block.content = data.get("content")
+                    # Change-driven autosave: block edited (remote).
+                    self._schedule_autosave()
                 if isinstance(block, CommandBlock):
                     old_status = getattr(block, "_last_status", None)
                     if "status" in data:
@@ -1301,6 +1337,8 @@ class ClientApp(App):
             if b_id in self.blocks:
                 self.blocks[b_id].remove()
                 del self.blocks[b_id]
+                # Change-driven autosave: block deleted remotely.
+                self._schedule_autosave()
 
         elif msg_type == "lock_denied":
             reason = msg.get("reason", "Block is locked")
@@ -1448,6 +1486,9 @@ class ClientApp(App):
             inp = self.query_one("#filter_input")
             self._filter_single_block(new_block, inp.value)
             self.call_after_refresh(new_block.scroll_visible)
+
+        # Change-driven autosave: a block was created (append/insert/import/paste/sync).
+        self._schedule_autosave()
 
         return new_block
 
@@ -1844,11 +1885,9 @@ class ClientApp(App):
 
         await self.send_message({"type": "run_block", "block_id": block.block_id, "pty_uid": uid})
 
-    def export_notebook(self, data):
-        if not data: return
-        filename, include_output = data if isinstance(data, tuple) else (data, True)
-        if not filename: return
-        md_output = [f"# Shell Notebook Export - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
+    def _build_notebook_markdown(self, header=None, include_output=True):
+        """Build the current notebook as a Markdown string (shared by export + autosave)."""
+        md_output = [header or f"# Shell Notebook Export - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
 
         # Iterate through visual children to respect current reordered state
         container = self.query_one("#command_history")
@@ -1862,8 +1901,65 @@ class ClientApp(App):
                     if clean.strip():
                         # Use rstrip to keep leading indentation but remove trailing empty lines
                         md_output.append(f"```text\n{clean.rstrip()}\n```\n")
+        return "\n".join(md_output)
+
+    def _autosave_path(self):
+        """Per-socket temp session file so concurrent Neptune instances don't clash."""
+        base = os.path.basename(self.socket_path or DEFAULT_SOCKET_PATH)
+        if base.endswith(".sock"):
+            base = base[: -len(".sock")]
+        return os.path.join(tempfile.gettempdir(), f"neptune_autosave_{base}.md")
+
+    def _write_autosave(self, header, notify=False):
+        """Write the autosave file. Returns the path, or None when there is nothing to save."""
+        container = self.query_one("#command_history")
+        blocks = [c for c in container.children if isinstance(c, BaseBlock)]
+        if not blocks:
+            # Never clobber a good autosave with an empty one (e.g. after :clear)
+            return None
+        md = self._build_notebook_markdown(header=header, include_output=True)
+        path = self._autosave_path()
+        with open(path, "w") as f:
+            f.write(md)
+        self.last_export_time = time.time()
+        if notify:
+            self.notify(f"Autosaved: {path}", severity="information")
+        return path
+
+    def _schedule_autosave(self):
+        """Debounced, change-driven autosave: write ~1.5s after the last mutation.
+
+        Called whenever the notebook changes (block created/edited/submitted,
+        output arrives, reorder, delete, clear, import). The debounce collapses
+        bursts (e.g. bulk imports) into a single write. Must never raise: it is
+        hooked into message handlers where a raise would crash the app.
+        """
         try:
-            with open(filename, "w") as f: f.write("\n".join(md_output))
+            if getattr(self, "_autosave_timer", None) is not None:
+                self._autosave_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._autosave_timer = self.set_timer(1.5, self._autosave_debounced)
+        except Exception as e:
+            logging.exception(f"Autosave scheduling failed: {e}")
+
+    def _autosave_debounced(self):
+        self._autosave_timer = None
+        try:
+            if not self.is_mounted:
+                return
+            self._write_autosave(header="# Neptune Autosave\n", notify=False)
+        except Exception as e:
+            logging.exception(f"Autosave failed: {e}")
+
+    def export_notebook(self, data):
+        if not data: return
+        filename, include_output = data if isinstance(data, tuple) else (data, True)
+        if not filename: return
+        try:
+            with open(filename, "w") as f:
+                f.write(self._build_notebook_markdown(include_output=include_output))
             self.last_export_time = time.time()
             self.notify(f"Notebook Saved: {filename}", severity="information")
         except Exception as e: self.notify(f"Save Error: {e}", severity="error")
@@ -2452,6 +2548,11 @@ class ClientApp(App):
             event.prevent_default()
 
     def _do_shutdown(self):
+        try:
+            self._write_autosave(header="# Neptune Autosave\n", notify=False)
+        except Exception:
+            try: logging.exception("Autosave on shutdown failed")
+            except Exception: pass
         self.exit()
 
     def on_unmount(self):

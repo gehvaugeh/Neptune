@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import tempfile
 
 # Ensure we can import NeptuneOracle from the sibling directory
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "oracle"))
@@ -232,6 +233,126 @@ def run_tests():
         assert_screen("WORKFLOW:", "Duplicate ID - workflow entry visible")
         oracle.send_input("<esc><esc>")
         oracle.wait_for_idle(0.5)
+
+        # 17. Notebook Import + Scroll — outputs must survive scroll cycles
+        print("Testing Notebook Import + Scroll...")
+        test_nb = "/tmp/neptune_blackbox_nb.md"
+        if os.path.exists(test_nb):
+            try: os.remove(test_nb)
+            except: pass
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        # Create 12 multi-line-output blocks so the list overflows the viewport
+        for i in range(12):
+            oracle.send_input(f"<esc><esc>!printf 'Block{i:02d}\\nAlpha{i:02d} line1\\nBeta{i:02d} line2\\nGamma{i:02d} line3\\n' <return>")
+            oracle.wait_for_idle(1.2)
+        # Export notebook with output
+        oracle.send_input(f"<esc><esc>:export {test_nb} <return>")
+        oracle.wait_for_idle(3.0)
+        if not os.path.exists(test_nb):
+            record("Import+Scroll - export file", "FAIL", "export file not created")
+        else:
+            # Clear then re-import
+            oracle.send_input("<esc><esc>:clear <return>")
+            oracle.wait_for_idle(4.0)
+            oracle.send_input(f"<esc><esc>:import {test_nb} <return>")
+            oracle.wait_for_idle(6.0)
+            time.sleep(1.0)
+            oracle.feed_stream()
+            # Focus inside the history container (mouse press+release over a block)
+            oracle.child.send("\x1b[<0;12;5M")
+            time.sleep(0.2)
+            oracle.child.send("\x1b[<0;12;5m")
+            oracle.wait_for_idle(0.8)
+            # Scroll up to the top blocks
+            for _ in range(3):
+                oracle.child.send("\x1b[5~")
+                oracle.wait_for_idle(0.6)
+            oracle.wait_for_idle(1.0)
+            s = oracle.get_screen_snapshot()
+            top_ok = all(x in s for x in ["Block02", "Alpha02 line1", "Beta02 line2", "Gamma02 line3"])
+            record("Import+Scroll - top blocks render after scroll up", "PASS" if top_ok else "FAIL", "" if top_ok else "top block output missing")
+            # Scroll back down to the bottom
+            for _ in range(6):
+                oracle.child.send("\x1b[6~")
+                oracle.wait_for_idle(0.4)
+            oracle.wait_for_idle(1.0)
+            s = oracle.get_screen_snapshot()
+            bottom_ok = all(x in s for x in ["Block10", "Alpha10 line1", "Beta10 line2", "Gamma10 line3",
+                                              "Block11", "Alpha11 line1", "Beta11 line2", "Gamma11 line3"])
+            record("Import+Scroll - bottom output preserved after scroll down", "PASS" if bottom_ok else "FAIL", "" if bottom_ok else "bottom block output missing")
+        if os.path.exists(test_nb):
+            try: os.remove(test_nb)
+            except: pass
+
+        # 18. Autosave — change-driven temp session autosave: written on every
+        #     notebook mutation, refreshed, and never clobbered with an empty
+        #     notebook after :clear.
+        print("Testing Autosave...")
+        autosave_file = os.path.join(tempfile.gettempdir(), "neptune_autosave_test.md")
+        if os.path.exists(autosave_file):
+            try: os.remove(autosave_file)
+            except: pass
+        # Fresh state: clear, then create a marker block with output.
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        oracle.send_input("<esc><esc>!echo NepAutosaveOne <return>")
+        oracle.wait_for_idle(3.0)
+        # Wait for the 2s autosave tick (with retry margin) and verify the file.
+        autosave_ok = False
+        start = time.time()
+        while time.time() - start < 12.0:
+            oracle.feed_stream()
+            if os.path.exists(autosave_file):
+                try:
+                    with open(autosave_file, "r") as f:
+                        content = f.read()
+                    if "NepAutosaveOne" in content:
+                        autosave_ok = True
+                        break
+                except Exception:
+                    pass
+            time.sleep(0.5)
+        record("Autosave - change-driven file created with content", "PASS" if autosave_ok else "FAIL",
+               "" if autosave_ok else f"{autosave_file} missing or stale")
+        # Now clear and verify the pre-clear autosave is NOT overwritten with an
+        # empty notebook (blocks list empty -> tick must skip writing).
+        cleared_preserved = False
+        if os.path.exists(autosave_file):
+            oracle.send_input("<esc><esc>:clear <return>")
+            oracle.wait_for_idle(4.0)
+            time.sleep(3.0)  # longer than one autosave interval
+            oracle.feed_stream()
+            try:
+                with open(autosave_file, "r") as f:
+                    content = f.read()
+                cleared_preserved = "NepAutosaveOne" in content
+            except Exception:
+                pass
+        record("Autosave - :clear does not clobber last autosave", "PASS" if cleared_preserved else "FAIL",
+               "" if cleared_preserved else "autosave overwritten with empty notebook")
+        # Create a second block and verify the autosave refreshes to the new state.
+        if os.path.exists(autosave_file):
+            oracle.send_input("<esc><esc>!echo NepAutosaveTwo <return>")
+            oracle.wait_for_idle(3.0)
+            refreshed = False
+            start = time.time()
+            while time.time() - start < 12.0:
+                oracle.feed_stream()
+                try:
+                    with open(autosave_file, "r") as f:
+                        content = f.read()
+                    if "NepAutosaveTwo" in content:
+                        refreshed = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            record("Autosave - file refreshes to newest state", "PASS" if refreshed else "FAIL",
+                   "" if refreshed else "autosave not updated")
+        if os.path.exists(autosave_file):
+            try: os.remove(autosave_file)
+            except: pass
 
     except Exception as e:
         record("Test Suite Execution", "ERROR", str(e))

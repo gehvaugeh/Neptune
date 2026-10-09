@@ -1,6 +1,6 @@
 # Neptune Blackbox Test Results
 
-**Automated Verification Run:** Wed Jul 29 13:34:38 2026
+**Automated Verification Run:** Fri Oct  9 23:04:12 2026
 
 | Feature Test | Result | Details |
 |--------------|--------|---------|
@@ -32,3 +32,8 @@
 | Duplicate ID - palette opens without crash | ✅ PASS |  |
 | Duplicate ID - history entry visible | ✅ PASS |  |
 | Duplicate ID - workflow entry visible | ❌ FAIL | Expected 'WORKFLOW:' not found |
+| Import+Scroll - top blocks render after scroll up | ✅ PASS |  |
+| Import+Scroll - bottom output preserved after scroll down | ✅ PASS |  |
+| Autosave - change-driven file created with content | ✅ PASS |  |
+| Autosave - :clear does not clobber last autosave | ✅ PASS |  |
+| Autosave - file refreshes to newest state | ✅ PASS |  |
