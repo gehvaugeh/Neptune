@@ -249,7 +249,7 @@ class Server:
                         pty = await self.pty_manager.create_remote(msg.get("ssh_config"), msg.get("name"))
                         await self.session_manager.broadcast({"type":"pty.list", "ptys":self.pty_manager.list_ptys()})
                     except Exception as e:
-                        await self.session_manager.send_to_client(writer, json.dumps({"type":"pty.error", "error":"create_failed", "message":str(e)}).encode()+b"\n", user_id)
+                        await self.session_manager.send_to_client(writer, json.dumps({"type":"pty.error", "error":"create_failed", "name": msg.get("name"), "message":str(e)}).encode()+b"\n", user_id)
                 elif msg_type == "pty.destroy":
                     try: uid = int(msg.get("pty_uid"))
                     except: uid = msg.get("pty_uid")

@@ -354,6 +354,51 @@ def run_tests():
             try: os.remove(autosave_file)
             except: pass
 
+        # 19. PTY Frontmatter — export writes a neptune.ptys registry plus
+        #     per-fence (pty:<name>) tokens; import restores the binding.
+        print("Testing PTY Frontmatter Export/Import...")
+        fm_nb = "/tmp/neptune_frontmatter_nb.md"
+        if os.path.exists(fm_nb):
+            try: os.remove(fm_nb)
+            except: pass
+        oracle.send_input("<esc><esc>:clear <return>")
+        oracle.wait_for_idle(3.0)
+        oracle.send_input("<esc><esc>!echo PtyFmMarker <return>")
+        oracle.wait_for_idle(2.5)
+        oracle.send_input(f"<esc><esc>:export {fm_nb} <return>")
+        oracle.wait_for_idle(3.0)
+        fm_ok, pty_token_ok = False, False
+        if os.path.exists(fm_nb):
+            try:
+                with open(fm_nb, "r") as f:
+                    fm_content = f.read()
+                fm_ok = ("neptune:" in fm_content and "ptys:" in fm_content and "local-0" in fm_content)
+                pty_token_ok = "(pty:local-0)" in fm_content
+            except Exception:
+                pass
+        record("PTY Frontmatter - export writes neptune.ptys registry", "PASS" if fm_ok else "FAIL",
+               "" if fm_ok else "frontmatter missing in export")
+        record("PTY Frontmatter - fence carries (pty:<name>) token", "PASS" if pty_token_ok else "FAIL",
+               "" if pty_token_ok else "pty token missing in fence")
+        if os.path.exists(fm_nb):
+            oracle.send_input("<esc><esc>:clear <return>")
+            oracle.wait_for_idle(4.0)
+            oracle.send_input(f"<esc><esc>:import {fm_nb} <return>")
+            oracle.wait_for_idle(5.0)
+            reimport_ok = False
+            start = time.time()
+            while time.time() - start < 8.0:
+                oracle.feed_stream()
+                if "PtyFmMarker" in oracle.get_screen_snapshot():
+                    reimport_ok = True
+                    break
+                time.sleep(0.5)
+            record("PTY Frontmatter - import restores bound block", "PASS" if reimport_ok else "FAIL",
+                   "" if reimport_ok else "imported block not visible")
+        if os.path.exists(fm_nb):
+            try: os.remove(fm_nb)
+            except: pass
+
     except Exception as e:
         record("Test Suite Execution", "ERROR", str(e))
     finally:

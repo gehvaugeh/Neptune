@@ -53,6 +53,7 @@ from textual.theme import Theme
 from autocomplete import BashAutocompleteProvider, CmdAutocompleteProvider, LocalFileProvider
 from markdown_toolbox import MarkdownToolboxPanel, MdElementSelected
 from pty_manager_ui import PTYManagerModal, RemotePTYAuthModal
+from frontmatter import parse_frontmatter, build_frontmatter
 
 # Setup client logging
 logging.basicConfig(
@@ -889,6 +890,8 @@ class ClientApp(App):
         self.last_export_time = time.time()
         self._pending_tui_block = False
         self._pending_pty_switch = None  # prefix to switch to after pty.created
+        self._pending_remote_cfg = {}  # name -> ssh_config (no password)
+        self._pending_remote_failed = {}  # name -> error message (during import)
         self._autosave_timer = None
 
         self.available_commands = [
@@ -1358,7 +1361,17 @@ class ClientApp(App):
         elif msg_type == "pty.created":
             uid = int(msg.get("uid"))
             pty_type = msg.get("pty_type")
-            self.ptys[uid] = {"type": pty_type, "status": "idle", "block_count": 0, "name": msg.get("name")}
+            pty_name = msg.get("name")
+            self.ptys[uid] = {"type": pty_type, "status": "idle", "block_count": 0, "name": pty_name}
+            # Cache ssh_config if provided (for frontmatter export)
+            if msg.get("ssh_config"):
+                try:
+                    cfg = dict(msg.get("ssh_config") or {})
+                    # Don't cache password
+                    cfg.pop("password", None)
+                    self.ptys[uid]["ssh_config"] = cfg
+                except Exception:
+                    pass
             if pty_type == "remote":
                 self.last_remote_pty_uid = uid
             self.notify(f"PTY created: {msg.get('name')} (UID:{uid})")
@@ -1389,6 +1402,9 @@ class ClientApp(App):
             pass
 
         elif msg_type == "pty.error":
+            nm = msg.get("name")
+            if nm and getattr(self, "_pending_remote_failed", None) is not None:
+                self._pending_remote_failed[nm] = msg.get("message") or "error"
             self.notify(f"PTY Error: {msg.get('message')}", severity="error")
             self._pending_pty_switch = None
 
@@ -1399,13 +1415,18 @@ class ClientApp(App):
             for p in server_ptys:
                 uid = int(p.get("uid"))
                 active_uids.append(uid)
+                name = p.get("name")
                 self.ptys[uid] = {
                     "type": p.get("type", "local"),
                     "status": p.get("status", "idle"),
                     "block_count": p.get("block_count", 0),
                     "active_block_id": p.get("active_block_id"),
-                    "name": p.get("name")
+                    "name": name
                 }
+                if name and getattr(self, "_pending_remote_cfg", None) and name in self._pending_remote_cfg:
+                    cfg = dict(self._pending_remote_cfg.pop(name))
+                    cfg.pop("password", None)
+                    self.ptys[uid]["ssh_config"] = cfg
             # Remove ptys no longer on server
             for uid in list(self.ptys.keys()):
                 if uid not in active_uids:
@@ -1887,15 +1908,41 @@ class ClientApp(App):
 
     def _build_notebook_markdown(self, header=None, include_output=True):
         """Build the current notebook as a Markdown string (shared by export + autosave)."""
-        md_output = [header or f"# Shell Notebook Export - {time.strftime('%Y-%m-%d %H:%M:%S')}\n"]
+        md_output = []
+        # Build frontmatter with current PTYs (name -> config)
+        try:
+            ptys = {}
+            for uid, info in self.ptys.items():
+                name = info.get("name") or f"local-{uid}"
+                ptype = info.get("type") or ("remote" if uid != 0 else "local")
+                if ptype == "remote":
+                    cfg = dict(info.get("ssh_config") or {})
+                    cfg["type"] = "remote"
+                    # ensure host/user present if cached? may be empty but keep as is
+                    ptys[name] = cfg
+                else:
+                    ptys[name] = {"type": "local"}
+            fm = build_frontmatter(ptys)
+            if fm:
+                md_output.append(fm)
+        except Exception:
+            pass
+        md_output.append(header or f"# Shell Notebook Export - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
         # Iterate through visual children to respect current reordered state
         container = self.query_one("#command_history")
         for block in container.children:
             if isinstance(block, NoteBlock): md_output.append(f"{block.content}\n")
             elif isinstance(block, CommandBlock):
-                pty_uid_export = block.pty_uid if block.pty_uid is not None else 0
-                md_output.append(f"```bash (uid:{pty_uid_export})\n{block.content}\n```\n")
+                # Resolve the symbolic pty name for the frontmatter binding.
+                pty_name = getattr(block, 'pty_name', None)
+                if not pty_name or pty_name in ('unknown', 'deleted'):
+                    info = self.ptys.get(block.pty_uid) if block.pty_uid is not None else None
+                    if info and info.get('name'):
+                        pty_name = info['name']
+                    else:
+                        pty_name = 'none' if block.pty_uid is None else f"local-{block.pty_uid}"
+                md_output.append(f"```bash (pty:{pty_name})\n{block.content}\n```\n")
                 if include_output and block.output:
                     clean = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', block.output)
                     if clean.strip():
@@ -1970,38 +2017,122 @@ class ClientApp(App):
         if not filename or not os.path.exists(filename): return
         try:
             with open(filename, "r") as f: content = f.read()
-            pattern = re.compile(r'```(bash|text)(?:\s*\((.*?)\))?\n(.*?)\n```', re.DOTALL)
+            # Parse frontmatter
+            ptys_plan = {}
+            body = content
+            try:
+                parsed, parsed_body = parse_frontmatter(content)
+                body = parsed_body
+                if parsed and isinstance(parsed, dict):
+                    neptune = parsed.get('neptune') or {}
+                    p = neptune.get('ptys') or {}
+                    if isinstance(p, dict):
+                        ptys_plan = p
+            except Exception:
+                body = content
+            content_body = body
+            pattern = re.compile(r'```(bash|text)([^\n]*)\n(.*?)\n```', re.DOTALL)
             last_pos, new_blocks = 0, []
-            for match in pattern.finditer(content):
-                before = content[last_pos:match.start()].strip()
+            blocks_with_ptyname = []  # (index in new_blocks, pty_name)
+            for match in pattern.finditer(content_body):
+                before = content_body[last_pos:match.start()].strip()
                 if before:
                     lines = [l for l in before.splitlines() if not l.strip().startswith("# Shell Notebook Export")]
                     if clean_before := "\n".join(lines).strip(): new_blocks.append({"type": "NOTE", "content": clean_before})
                 lang, metadata, code = match.groups()
                 if lang == "bash":
+                    target_pty_name = None
                     pty_uid = 0
-                    if metadata and 'uid:' in metadata:
-                        m = re.search(r'uid:(\d+)', metadata)
-                        if m:
-                            pty_uid = int(m.group(1))
-                            if pty_uid != 0: pty_uid = None
-                        else:
-                            pty_uid = None # (uid:something) present but not int? default to none
-                    else:
-                        # No uid metadata at all
-                        pty_uid = 0
+                    if metadata:
+                        m_pty = re.search(r'pty:([^\s)]+)', metadata)
+                        if m_pty:
+                            target_pty_name = m_pty.group(1)
+                        m_uid = re.search(r'uid:(\d+)', metadata)
+                        if m_uid:
+                            pu = int(m_uid.group(1))
+                            pty_uid = 0 if pu == 0 else None
+                        elif target_pty_name is None:
+                            pty_uid = 0
                     new_blocks.append({"type": "CMD", "content": code, "cwd": os.getcwd(), "pty_uid": pty_uid})
+                    if target_pty_name:
+                        blocks_with_ptyname.append((len(new_blocks)-1, target_pty_name))
                 elif lang == "text" and include_output and new_blocks and new_blocks[-1]["type"] == "CMD":
-                    # pyte expects \r\n for proper line breaks from a raw feed usually,
-                    # but here we are restoring saved output.
-                    # Normalize and ensure newlines are clean.
                     new_blocks[-1]["output"] = code.replace("\r\n", "\n").replace("\n", "\r\n")
                 last_pos = match.end()
-            if clean_after := "\n".join([l for l in content[last_pos:].splitlines() if not l.strip().startswith("# Shell Notebook Export")]).strip():
+            if clean_after := "\n".join([l for l in content_body[last_pos:].splitlines() if not l.strip().startswith("# Shell Notebook Export")]).strip():
                 new_blocks.append({"type": "NOTE", "content": clean_after})
+            # Reconcile PTYs
+            failed_ptys = []
+            if ptys_plan:
+                self._pending_remote_failed = {}
+                # build name->uid map current
+                name_to_uid = {}
+                for uid, info in self.ptys.items():
+                    nm = info.get('name')
+                    if nm:
+                        name_to_uid[nm] = uid
+                to_create = [pname for pname in ptys_plan if pname not in name_to_uid]
+                for pname in to_create:
+                    cfg = ptys_plan.get(pname) or {}
+                    try:
+                        ptype = (cfg or {}).get('type') or 'local'
+                        if ptype == 'local':
+                            await self.send_message({"type": "pty.create.local", "name": pname})
+                        elif ptype == 'remote':
+                            rcfg = dict(cfg or {})
+                            rcfg.pop('type', None)
+                            rcfg_clean = dict(rcfg)
+                            rcfg_clean.pop('password', None)
+                            self._pending_remote_cfg[pname] = rcfg_clean
+                            await self.send_message({"type": "pty.create.remote", "ssh_config": rcfg, "name": pname})
+                    except Exception as e:
+                        failed_ptys.append((pname, str(e)))
+                # Wait (bounded) for PTYs to register; remote connects can take a while.
+                pending = set(to_create) - {p for p, _ in failed_ptys}
+                deadline = time.time() + 15.0
+                while pending and time.time() < deadline:
+                    await asyncio.sleep(0.2)
+                    live_names = {info.get('name') for info in self.ptys.values()}
+                    for pname in list(pending):
+                        err = self._pending_remote_failed.pop(pname, None)
+                        if err is not None:
+                            failed_ptys.append((pname, err))
+                            self._pending_remote_cfg.pop(pname, None)
+                            pending.discard(pname)
+                        elif pname in live_names:
+                            pending.discard(pname)
+                for pname in pending:
+                    failed_ptys.append((pname, "timeout"))
+                    self._pending_remote_cfg.pop(pname, None)
+            # rebuild map after creates
+            name_to_uid2 = {}
+            for uid, info in self.ptys.items():
+                nm = info.get('name')
+                if nm:
+                    name_to_uid2[nm] = uid
+            # Apply block bindings by pty name
+            for bidx, pname in blocks_with_ptyname:
+                if bidx < 0 or bidx >= len(new_blocks):
+                    continue
+                b = new_blocks[bidx]
+                if b.get('type') != 'CMD':
+                    continue
+                uid_b = name_to_uid2.get(pname)
+                if uid_b is not None:
+                    b['pty_uid'] = uid_b
+                    b['pty_name'] = pname
+                else:
+                    # Planned PTY could not be created/connected -> leave unassigned.
+                    b['pty_uid'] = None
+                    b['pty_name'] = None
             await self.send_message({"type": "import_blocks", "blocks": new_blocks})
-            self.notify(f"Notebook Imported: {filename}", severity="information")
-        except Exception as e: self.notify(f"Import Error: {e}", severity="error")
+            if failed_ptys:
+                msg = "PTY connect failed: " + ", ".join([f"{p}" for p, _e in failed_ptys]) + " — some blocks left unassigned"
+                self.notify(msg, severity="warning")
+            else:
+                self.notify(f"Notebook Imported: {filename}", severity="information")
+        except Exception as e:
+            self.notify(f"Import Error: {e}", severity="error")
 
     async def action_move_up(self):
         if self.focused and isinstance(self.focused, BaseBlock): await self.send_message({"type": "move_block", "block_id": self.focused.block_id, "direction": "up"})

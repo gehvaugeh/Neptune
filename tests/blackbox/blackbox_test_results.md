@@ -1,6 +1,6 @@
 # Neptune Blackbox Test Results
 
-**Automated Verification Run:** Fri Oct  9 23:04:12 2026
+**Automated Verification Run:** Thu Oct 15 11:32:33 2026
 
 | Feature Test | Result | Details |
 |--------------|--------|---------|
@@ -37,3 +37,6 @@
 | Autosave - change-driven file created with content | ✅ PASS |  |
 | Autosave - :clear does not clobber last autosave | ✅ PASS |  |
 | Autosave - file refreshes to newest state | ✅ PASS |  |
+| PTY Frontmatter - export writes neptune.ptys registry | ✅ PASS |  |
+| PTY Frontmatter - fence carries (pty:<name>) token | ✅ PASS |  |
+| PTY Frontmatter - import restores bound block | ✅ PASS |  |

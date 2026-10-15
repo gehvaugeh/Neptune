@@ -38,7 +38,7 @@ class RemotePTY(BasePTY):
         password = self.ssh_config.get("password")
         if password and not shutil.which("sshpass"):
             msg = "sshpass not installed. Password auth is insecure; please install sshpass or preferably use SSH keys for better security."
-            await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "error": "sshpass_missing", "message": msg})
+            await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "name": self.pty_id, "error": "sshpass_missing", "message": msg})
 
         # Step 1: Open ControlMaster socket
         m_cmd = self._get_ssh_base(use_socket=False)
@@ -51,7 +51,7 @@ class RemotePTY(BasePTY):
                 await asyncio.sleep(0.2)
             else: raise Exception("ControlMaster socket failed to initialize")
         except Exception as e:
-            await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "error": "connection_failed", "message": str(e)})
+            await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "name": self.pty_id, "error": "connection_failed", "message": str(e)})
             raise
 
         # Step 2: Open persistent shell and shadow shell
