@@ -1,6 +1,6 @@
 # Neptune Blackbox Test Results
 
-**Automated Verification Run:** Tue Oct 20 14:03:46 2026
+**Automated Verification Run:** Tue Oct 20 14:50:44 2026
 
 | Feature Test | Result | Details |
 |--------------|--------|---------|
@@ -40,3 +40,12 @@
 | PTY Frontmatter - export writes neptune.ptys registry | ✅ PASS |  |
 | PTY Frontmatter - fence carries (pty:<name>) token | ✅ PASS |  |
 | PTY Frontmatter - import restores bound block | ✅ PASS |  |
+| PTY Remote Reconnect - remote created | ✅ PASS |  |
+| PTY Remote Reconnect - command ran | ✅ PASS |  |
+| PTY Remote Reconnect - persists host/user/key | ✅ PASS |  |
+| PTY Remote Reconnect - reconnects on import | ✅ PASS |  |
+| PTY Remote Reconnect - clear auth error | ✅ PASS | 0.0.
+                                       ▌ 1: Permission denied
+───────────────────────────────────────▌ (publickey,password).                ──
+ MODE: NORMAL                          ▌
+   User: Me |

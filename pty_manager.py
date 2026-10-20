@@ -40,12 +40,35 @@ class PTYManager:
         })
         return pty
 
+    @staticmethod
+    def _sanitized_ssh_config(ssh_config: Optional[dict]) -> dict:
+        """Return the subset of an SSH config that is safe to persist/broadcast.
+
+        Passwords must never leave the server, so only connection metadata is
+        exposed. Host/user/port/key are needed to rebuild the connection from a
+        notebook's frontmatter.
+        """
+        if not isinstance(ssh_config, dict):
+            return {}
+        result = {}
+        for field in ("host", "user", "port", "key"):
+            value = ssh_config.get(field)
+            if value not in (None, ""):
+                result[field] = value
+        return result
+
     async def create_remote(self, ssh_config: dict, name: Optional[str] = None) -> RemotePTY:
+        ssh_config = dict(ssh_config or {})
+        host = str(ssh_config.get("host") or "").strip()
+        if not host:
+            # Fail before allocating a UID so a bad config leaves no gaps.
+            raise ValueError("Remote PTY requires a 'host' in its SSH config")
+        ssh_config["host"] = host
+
         uid = self.uid_counter
         self.uid_counter += 1
 
         if name is None:
-            host = ssh_config.get("host", "remote")
             name = f"{host}-{uid}"
 
         pty_id = name
@@ -61,7 +84,8 @@ class PTYManager:
             "type": "pty.created",
             "uid": uid,
             "name": name,
-            "pty_type": "remote"
+            "pty_type": "remote",
+            "ssh_config": self._sanitized_ssh_config(pty.ssh_config),
         })
         return pty
 
@@ -139,16 +163,23 @@ class PTYManager:
         return False
 
     def list_ptys(self) -> List[dict]:
-        return [
-            {
+        entries = []
+        for uid, pty in self.ptys.items():
+            entry = {
                 "uid": uid,
                 "name": self.names.get(uid, f"pty-{uid}"),
                 "type": "local" if isinstance(pty, LocalPTY) else "remote",
                 "status": "running" if pty.current_block_id else "idle",
-                "block_count": pty.queue.qsize()
+                "block_count": pty.queue.qsize(),
             }
-            for uid, pty in self.ptys.items()
-        ]
+            if not isinstance(pty, LocalPTY):
+                # Sanitized (never contains a password) so clients can export
+                # and later reconnect remote PTYs from frontmatter.
+                entry["ssh_config"] = self._sanitized_ssh_config(
+                    getattr(pty, "ssh_config", None)
+                )
+            entries.append(entry)
+        return entries
 
     async def update_all_block_statuses(self):
         for uid, pty in self.ptys.items():

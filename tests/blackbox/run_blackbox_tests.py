@@ -2,6 +2,8 @@ import sys
 import os
 import time
 import tempfile
+import shutil
+import subprocess
 
 # Ensure we can import NeptuneOracle from the sibling directory
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "oracle"))
@@ -399,6 +401,142 @@ def run_tests():
             try: os.remove(fm_nb)
             except: pass
 
+        # 20. PTY Remote Reconnect — the frontmatter must persist the SSH user
+        #     (plus host/port/key) and importing it must rebuild the connection.
+        #     Skipped gracefully when no local sshd/key auth is available.
+        print("Testing PTY Remote Reconnect (ssh_config persistence)...")
+        rh_path = os.path.join(root_dir, "remote_hosts.txt")
+        rh_before = None
+        if os.path.exists(rh_path):
+            try:
+                with open(rh_path) as f:
+                    rh_before = f.read()
+            except Exception:
+                rh_before = None
+
+        ssh_user = os.environ.get("USER") or "root"
+        key_candidates = [
+            os.path.expanduser("~/.ssh/id_ed25519"),
+            os.path.expanduser("~/.ssh/id_rsa"),
+        ]
+        ssh_key = next(
+            (k for k in key_candidates if os.path.exists(k) and os.path.exists(k + ".pub")),
+            None,
+        )
+        ssh_ok = False
+        if ssh_key and shutil.which("ssh"):
+            try:
+                probe = subprocess.run(
+                    ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                     "-o", "ConnectTimeout=3", "-i", ssh_key, "localhost", "true"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8,
+                )
+                ssh_ok = probe.returncode == 0
+            except Exception:
+                ssh_ok = False
+
+        def wait_for_text(needle, timeout=20.0):
+            start = time.time()
+            while time.time() - start < timeout:
+                oracle.feed_stream()
+                if needle.lower() in oracle.get_screen_snapshot().lower():
+                    return True
+                time.sleep(0.5)
+            return False
+
+        remote_nb = "/tmp/neptune_remote_reconnect_nb.md"
+        try:
+            if not ssh_ok:
+                record("PTY Remote Reconnect - ssh_config persisted", "PASS",
+                       "skipped (no local ssh key auth)")
+            else:
+                if os.path.exists(remote_nb):
+                    try: os.remove(remote_nb)
+                    except: pass
+                oracle.send_input("<esc><esc>:clear <return>")
+                oracle.wait_for_idle(3.0)
+
+                # Open the PTY target bar with a raw "!!" (the helper sleeps
+                # 0.5s per '!', which exceeds the 0.3s double-bang window).
+                oracle.send_input("<esc><esc>")
+                oracle.child.send("!!")
+                time.sleep(0.6)
+                oracle.feed_stream()
+                oracle.send_input(f"{ssh_user}@localhost:22:{ssh_key}<return>")
+                created = wait_for_text("PTY created", 20.0)
+                record("PTY Remote Reconnect - remote created", "PASS" if created else "FAIL",
+                       "" if created else "no PTY created")
+
+                oracle.send_input("echo RemoteReconnectMarker <return>")
+                ran = wait_for_text("RemoteReconnectMarker", 15.0)
+                record("PTY Remote Reconnect - command ran", "PASS" if ran else "FAIL")
+
+                oracle.send_input(f"<esc><esc>:export {remote_nb} <return>")
+                oracle.wait_for_idle(3.0)
+                fm = ""
+                if os.path.exists(remote_nb):
+                    try:
+                        with open(remote_nb) as f:
+                            fm = f.read()
+                    except Exception:
+                        pass
+                host_ok = "host: localhost" in fm
+                user_ok = f"user: {ssh_user}" in fm
+                key_ok = "key:" in fm
+                record("PTY Remote Reconnect - persists host/user/key",
+                       "PASS" if (host_ok and user_ok and key_ok) else "FAIL",
+                       "" if (host_ok and user_ok and key_ok) else fm[:200])
+
+                oracle.send_input("<esc><esc>:clear <return>")
+                oracle.wait_for_idle(4.0)
+                oracle.send_input(f"<esc><esc>:import {remote_nb} <return>")
+                time.sleep(8.0)
+                oracle.feed_stream()
+                snap = oracle.get_screen_snapshot()
+                rebound = "RemoteReconnectMarker" in snap and "localhost" in snap.lower()
+                record("PTY Remote Reconnect - reconnects on import",
+                       "PASS" if rebound else "FAIL",
+                       "" if rebound else snap[-200:])
+
+                # Bad credentials must fail with ssh's reason, never the old
+                # "expected str, bytes or os.PathLike object, not NoneType".
+                oracle.send_input("<esc><esc>")
+                oracle.child.send("!!")
+                time.sleep(0.6)
+                oracle.feed_stream()
+                oracle.send_input(
+                    f"definitely_no_such_user_xyz@127.0.0.1:22:{ssh_key}<return>"
+                )
+                saw_error = False
+                saw_typeerror = False
+                detail = ""
+                start = time.time()
+                while time.time() - start < 20.0:
+                    oracle.feed_stream()
+                    snap2 = oracle.get_screen_snapshot()
+                    if "not NoneType" in snap2 or "expected str, bytes" in snap2:
+                        saw_typeerror = True
+                        detail = snap2[-200:]
+                    if "PTY Error" in snap2 or "connect failed" in snap2.lower():
+                        saw_error = True
+                        detail = snap2[-200:]
+                        break
+                    time.sleep(0.5)
+                record("PTY Remote Reconnect - clear auth error", "PASS" if saw_error and not saw_typeerror else "FAIL", detail)
+        finally:
+            if os.path.exists(remote_nb):
+                try: os.remove(remote_nb)
+                except: pass
+            # Restore the remote-host history exactly as it was before the test.
+            try:
+                if rh_before is None:
+                    if os.path.exists(rh_path):
+                        os.remove(rh_path)
+                else:
+                    with open(rh_path, "w") as f:
+                        f.write(rh_before)
+            except Exception:
+                pass
     except Exception as e:
         record("Test Suite Execution", "ERROR", str(e))
     finally:

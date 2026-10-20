@@ -20,21 +20,31 @@ class RemotePTY(BasePTY):
 
     def _get_ssh_base(self, use_socket: bool = True) -> List[str]:
         host, user = self.ssh_config.get("host"), self.ssh_config.get("user")
+        if not host:
+            raise ValueError("Remote PTY requires a 'host' in its SSH config")
         key, password = self.ssh_config.get("key"), self.ssh_config.get("password")
         port = self.ssh_config.get("port")
         cmd = []
-        if password and password != "x" * len(password):
+        use_password = bool(password) and password != "x" * len(password)
+        if use_password:
             cmd.extend(["sshpass", "-p", password])
         cmd.append("ssh")
         if use_socket: cmd.extend(["-S", self.socket_path])
         if key: cmd.extend(["-i", key])
         if port: cmd.extend(["-p", str(port)])
-        cmd.extend(["-o", "BatchMode=no", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"])
+        # Only allow interactive auth when a password is supplied (via sshpass).
+        # Otherwise ssh must fail fast instead of blocking on a prompt.
+        batch_mode = "no" if use_password else "yes"
+        cmd.extend(["-o", f"BatchMode={batch_mode}", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"])
         cmd.append(f"{user}@{host}" if user else host)
         return cmd
 
     async def connect(self, ssh_config: dict):
-        self.ssh_config = ssh_config.copy()
+        self.ssh_config = dict(ssh_config or {})
+        host = str(self.ssh_config.get("host") or "").strip()
+        if not host:
+            raise ValueError("Remote PTY requires a 'host' in its SSH config")
+        self.ssh_config["host"] = host
         password = self.ssh_config.get("password")
         if password and not shutil.which("sshpass"):
             msg = "sshpass not installed. Password auth is insecure; please install sshpass or preferably use SSH keys for better security."
@@ -45,13 +55,37 @@ class RemotePTY(BasePTY):
         target = m_cmd.pop()
         m_cmd.extend(["-M", "-N", "-S", self.socket_path, target])
         try:
-            self.master_proc = await asyncio.create_subprocess_exec(*m_cmd)
+            self.master_proc = await asyncio.create_subprocess_exec(
+                *m_cmd, stderr=asyncio.subprocess.PIPE
+            )
             for _ in range(50):
                 if os.path.exists(self.socket_path): break
                 await asyncio.sleep(0.2)
-            else: raise Exception("ControlMaster socket failed to initialize")
-        except Exception as e:
-            await self.broadcast({"type": "pty.error", "pty_uid": self.pty_uid, "name": self.pty_id, "error": "connection_failed", "message": str(e)})
+            else:
+                # Surface ssh's own reason (auth failure, unknown host, ...)
+                # instead of a generic timeout message.
+                reason = ""
+                if self.master_proc.stderr is not None:
+                    try:
+                        raw = await asyncio.wait_for(self.master_proc.stderr.read(), 1.0)
+                        reason = raw.decode(errors="replace").strip()
+                    except Exception:
+                        pass
+                raise Exception(
+                    "ControlMaster socket failed to initialize"
+                    + (f": {reason}" if reason else "")
+                )
+            # On success keep draining stderr so a full pipe can never block ssh.
+            if self.master_proc.stderr is not None:
+                asyncio.create_task(self._drain_stream(self.master_proc.stderr))
+        except Exception:
+            # Don't leak a half-open ssh master process on failure. The server's
+            # pty.create.remote handler reports the error to the client.
+            if self.master_proc is not None and self.master_proc.returncode is None:
+                try:
+                    self.master_proc.kill()
+                except ProcessLookupError:
+                    pass
             raise
 
         # Step 2: Open persistent shell and shadow shell
@@ -109,6 +143,18 @@ class RemotePTY(BasePTY):
 
         if password: self.ssh_config["password"] = "x" * len(password)
         if "password" in self.ssh_config: del self.ssh_config["password"]
+
+    @staticmethod
+    async def _drain_stream(stream) -> None:
+        """Consume a subprocess stream until EOF (prevents pipe back-pressure)."""
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                logging.debug(f"[ssh] {line.decode(errors='replace').rstrip()}")
+        except Exception:
+            pass
 
     async def run_command(self, block: dict):
         block_id = block.get("id")

@@ -1,185 +1,162 @@
-# PTY Bindings via YAML Frontmatter — Concept & Plan
+# PTY Bindings via YAML Frontmatter
 
-**Status:** Proposal (not yet implemented)
-**Goal:** When a notebook is opened (imported), PTY bindings of its code blocks are
-restored automatically instead of requiring manual re-assignment in the PTY Manager.
+**Status:** Implemented (`0d0afc6`, extended for remote `ssh_config` persistence)
+**Goal:** When a notebook is imported, PTY bindings of its code blocks are restored
+automatically — including reconnecting remote PTYs — instead of requiring manual
+re-assignment in the PTY Manager.
 
 ---
 
 ## 1. Problem
 
-- Block-to-PTY binding today is a **numeric UID** (`pty_uid`) assigned by the server's
-  `PTYManager` (`pty_manager.py`, `uid_counter`), e.g. `0` = `local-0`, `3` = a remote.
-- UIDs are **ephemeral per server run**. Export writes ` ```bash (uid:N) `.
-- Import (`client.py:import_notebook`) reads `(uid:N)` but treats any non-zero UID as
-  `pty_uid = None` (`client.py:1987`). Remote bindings are therefore **silently lost**.
-- The user must re-create the remote PTY and re-bind blocks via `ctrl+t` (PTY Manager)
-  every time a notebook is opened. This is "on purpose" today — but it is manual and
-  error-prone.
-- The client never persists the remote `ssh_config`; the server keeps it only in the
-  live `RemotePTY` object (password masked, then removed).
+- Block-to-PTY binding was a **numeric UID** (`pty_uid`) assigned by the server's
+  `PTYManager`, e.g. `0` = `local-0`, `3` = a remote. UIDs are **ephemeral per
+  server run**.
+- Export wrote ` ```bash (uid:N) `; import treats any non-zero UID as
+  `pty_uid = None`, so remote bindings were silently lost.
+- The client never persisted the remote `ssh_config`; the server keeps it only in
+  the live `RemotePTY` object (password masked, then removed). Exports therefore
+  contained `type: remote` without `host`/`user`, and re-creation crashed with
+  `TypeError: expected str, bytes or os.PathLike object, not NoneType`.
 
 ## 2. Solution Overview
 
-Make the exported Markdown self-describing:
-
-1. **YAML frontmatter** at the top of the notebook file (parsed only when present;
-   old files keep working) carrying:
-   - a **symbolic PTY registry** (`ptys:`): stable, human-readable names
-     (`local-0`, `prod-db`) instead of ephemeral UIDs, with `type: local|remote`
-     and remote connection data (`host`, `user`, `port`, `key`).
-   - a **block → PTY map** (`blocks:`): stable block IDs to symbolic PTY names.
-2. **Stable block IDs** in the code-block info string (`(id:blk-ab12)`), Markdown-
-   conform (CommonMark info strings are free-form text after the language).
-3. On import, Neptune **reconciles** the frontmatter against the live session:
-   reuses same-named PTYs, creates missing ones (local instantly, remote with the
-   saved config, prompting only for password), and rebinds every block.
+1. **Symbolic PTY names** replace ephemeral UIDs. Named PTYs are stable enough to
+   survive a server restart (`local-0`, `t1-app-01.hio.rub.de-1`, ...).
+2. **YAML frontmatter** at the top of the notebook carries a `neptune.ptys`
+   registry: name → `{type: local|remote, host, user, port, key}`.
+3. **No block IDs / no block→PTY map.** Binding is encoded inline in each code
+   fence as a `(pty:<name>)` token, so reordered fences stay correct.
+4. On import, Neptune **reconciles** the registry against the live session:
+   reuses same-named PTYs, creates missing ones, and rebinds each block to the
+   PTY named in its fence. Failed remotes leave their blocks unassigned.
+5. **Passwords and private-key contents are never written to disk.**
 
 ## 3. File Format
 
-```markdown
+````markdown
 ---
 neptune:
   version: 1
   ptys:
     local-0:
       type: local
-    prod-db:
+    t1-app-01.hio.rub.de-1:
       type: remote
-      host: db.example.com
-      user: deploy
+      host: t1-app-01.hio.rub.de
+      user: myuser
       port: 22
-      key: ~/.ssh/id_ed25519
-  blocks:
-    blk-ab12:
-      pty: prod-db
-      cwd: /srv/app
-    blk-cd34:
-      pty: local-0
+      key: /home/me/.ssh/id_ed25519
 ---
-# Shell Notebook Export - 2026-10-09 22:00:00
+# Shell Notebook Export - 2026-10-20 12:00:00
 
-```bash (uid:0) (id:blk-ab12)
-git pull && ./deploy.sh
+```bash (pty:local-0)
+git status
 ```
 
-```text
-[...output...]
+```bash (pty:t1-app-01.hio.rub.de-1)
+sudo systemctl status tomcat
 ```
-```
+````
 
 Notes:
-- `neptune:` namespacing avoids collisions with Jekyll/Hugo/etc. frontmatter.
-- The fence keeps `(uid:N)` for backward compatibility; **frontmatter is
-  authoritative when present**.
-- **Passwords and private-key contents are never written to disk.**
-- `cwd` per block is optional (restored after reconnect for remote shells).
+- The first token after the language (`bash`) is the fenced-code info string; the
+  `(pty:name)` token is valid CommonMark info-string text and is ignored by other
+  renderers. Keeping `bash` preserves syntax highlighting.
+- Legacy `(uid:N)` fences and files without frontmatter still import as before
+  (unassigned unless UID 0).
+- `key` is a path, never key material.
 
 ## 4. Component Changes
 
 ### 4.1 `frontmatter.py` (new, shared module)
 
-A small, dependency-free frontmatter reader/writer:
+Dependency-free parser/writer for the closed YAML subset we emit (nested maps +
+scalars). Malformed or absent frontmatter → `None`, so legacy files import
+unchanged. PyYAML is intentionally not required.
 
-- `parse_frontmatter(text) -> (dict | None, body)`: extracts `---\n...\n---` header,
-  parses a **strict YAML subset** (nested maps, scalar strings/ints/bools, `#` comments
-  outside scalars). Unsupported/malformed → `None` (treat as legacy file).
-- `build_frontmatter(ptys, blocks) -> str`: emits exactly the subset the parser reads
-  (we control the writer, so the subset is closed).
-- Optional: if `import yaml` is available at runtime, use PyYAML for parsing instead
-  (more robust); otherwise fall back to the subset parser. **PyYAML is not currently
-  installed** — decide in Phase 1 whether to add it as a dependency or keep the
-  subset parser (recommended: subset parser, zero deps; PyYAML as optional).
+### 4.2 Fence tokenizer (client.py)
 
-### 4.2 Fence info-string tokenizer (client.py)
+Fences are matched and the optional `(pty:<name>)` token is extracted. The
+language token remains (`bash` / `text`), so block type detection is unchanged.
+`text` fences remain output-only.
 
-Replace the single `(uid:\d+)` regex with a tokenizer for parenthesized KV pairs
-arriving in the info string:
+### 4.3 Server exposes sanitized `ssh_config`
 
-- ` ```bash (uid:0) (id:blk-ab12) ` → `{uid: 0, id: "blk-ab12"}`
-- Unknown tokens ignored, old format ` ```bash (uid:N) ` still parses.
-- `text` fences stay output-only (no id/pty semantics).
+`PTYManager` now publishes connection metadata for remote PTYs:
 
-### 4.3 Client caching of `ssh_config`
+- `list_ptys()` includes `ssh_config: {host, user, port, key}` (sanitized).
+- `pty.created` does the same.
+- `_sanitized_ssh_config()` drops the password unconditionally.
 
-- `ClientApp` caches the config it already sends in `pty.create.remote`
-  (`client.py:~2272`) as `self.ptys[uid]["ssh_config"]` (host/user/port/key — the
-  password is entered on the modal and stays out of the cache in plain form after
-  connect; keep the existing masking/`del` behavior server-side).
-- This cache is the export source for `ptys:`.
+This makes the **server the source of truth**, so PTYs created before this feature,
+by another client, or via the UI can all be exported correctly.
 
-### 4.4 Export (`export_notebook` + autosave + crash autosave)
+### 4.4 Client caching
 
-1. Assign stable IDs: reuse a block's persisted `stable_id` if present, else
-   generate `blk-<4hex>` (unique within the file).
-2. Write frontmatter from cached PTY configs + block→pty map.
-3. Fences get `(uid:N) (id:blk-xxxx)`.
-4. Autosave files become roundtrip-importable (same path as export).
+`ClientApp.ptys[uid]["ssh_config"]` is populated from `init`, `pty.created`, and
+`pty.list` (server value first, then the import-time `_pending_remote_cfg`, then a
+previously cached value). Passwords are popped before caching.
 
-### 4.5 Import (`import_notebook`)
+### 4.5 Export (`export_notebook` + autosave + crash autosave)
 
-1. Parse frontmatter (optional). Parse fences (uid + id).
-2. Build **binding plan**:
-   - for each `ptys[name]` missing in the live session →
-     - `local` → `pty.create.local` with the name
-     - `remote` → `pty.create.remote` with saved config + name; on `pty.error`
-       (auth needed) → push `RemotePTYAuthModal` **prefilled** with
-       host/user/port/key from the file
-   - same-named live PTY → reuse its UID
-3. Resolve each block: `blocks[id].pty` → session UID → set `pty_uid`/`pty_name`
-   (plumbed through `import_blocks`/`add_block` server-side and reused by
-   `create_block` client-side).
-4. Restore `cwd` for remote blocks after connect (shadow `cd` + `_update_cwd`).
-5. Unresolvable bindings → bind to `local-0`, notify warning.
+Shares `_build_notebook_markdown()`:
 
-### 4.6 Server (`server.py` / `pty_manager.py`)
+1. Emit frontmatter from cached PTY configs (`type`, `host`, `user`, `port`, `key`).
+2. Emit each command fence with `(pty:<resolved name>)`.
+3. Autosave and crash-recovery files use the same format and are round-trip
+   importable.
 
-- `add_block` / `import_blocks`: carry a passthrough `stable_id` on the block dict.
-- No store of recipes server-side — the client drives reconnection (server stays
-  stateless); `pty.create.local/remote` already accept a `name`.
+### 4.6 Import (`import_notebook`)
+
+1. Parse frontmatter (optional) + fences (`pty:` token, legacy `uid:` token).
+2. Reconcile PTYs by name:
+   - `local` → `pty.create.local` with the file's name.
+   - `remote` → validate/infer config, then `pty.create.remote`.
+   - wait up to 15 s for creation; `pty.error` names are matched and reported.
+3. Apply `(pty:name)` bindings to the imported blocks. If a PTY could not be
+   created/connected, its blocks stay unassigned (`pty_uid=None`) — never silently
+   fall back to `local-0`.
+4. One summarized warning toast lists the failed names and reasons.
+
+#### Legacy recovery (frontmatter with `type: remote` but no host/user)
+
+Older exports only contain `type: remote`. On import Neptune performs a
+best-effort recovery:
+
+- **host** is derived from the server's default name pattern `<host>-<uid>`
+  (e.g. `t1-app-01.hio.rub.de-1` → `t1-app-01.hio.rub.de`);
+- **user** is looked up in the saved remote-host history (`remote_hosts.txt`);
+- if no user is known, ssh falls back to the local username / agent;
+- `key`/`password` cannot be recovered. If auth still fails, the user gets a clear
+  `Permission denied ...`-style message and can re-create the PTY.
+
+### 4.7 Remote connect robustness (`pty_remote.py`)
+
+- `host` is validated before spawning anything; a missing host raises a clear
+  `ValueError` instead of reaching `create_subprocess_exec(None)`.
+- `BatchMode=yes` is used when no password is supplied, so ssh fails fast instead
+  of blocking on an interactive prompt.
+- ssh's stderr is captured and included in the failure message
+  (`ControlMaster socket failed to initialize: <reason>`).
+- A half-open master process is killed on failure; on success stderr is drained in
+  the background to avoid pipe back-pressure.
 
 ## 5. UX
 
-- `:import notebook.md` → "Restoring PTYs: local-0, prod-db (remote)" →
-  auto-create + rebind. No manual re-binding.
-- Missing password → one prefilled modal per remote host (user can use an SSH agent
-  key instead; modal already supports both).
-- `:import notebook.md --no-ptys` (optional) → import only, all blocks on `local-0`.
-- PTY Manager (`ctrl+t`) continues to work as today; renames are picked up on the
-  next export because export reads live names.
+- `:import notebook.md` → PTYs are created/reconnected and blocks are rebound
+  automatically.
+- Missing/failed remote → warning toast naming the PTY and the reason; affected
+  blocks remain unassigned and can be re-bound via `ctrl+t`.
+- Remote PTYs created through the UI (`!!` → PTY target bar) now persist their
+  host/user/port/key on the next export.
 
-## 6. Implementation Plan
+## 6. Remaining / Future Work
 
-### Phase 1 — Foundation (core roundtrip)
-1. `frontmatter.py` (subset parser + writer) and fence tokenizer; unit tests.
-2. Export: stable IDs + frontmatter; client `ssh_config` cache on
-   `pty.created`.
-3. Import: reconcile PTYs, bind blocks, prefilled auth modal on `pty.error`.
-4. Blackbox: export → `:clear` → import roundtrip preserves bindings;
-   old-format files still import as today.
-
-### Phase 2 — Polish
-5. `resolve_pty(name)` re-resolution at `run_block` time (resilient to
-   mid-session PTY destruction/recreation).
-6. `cwd` restore for local + remote after reconnect.
-7. `--no-ptys` flag; WARN summary listing missing/matched PTYs.
-8. Collision handling: two same-named remote configs in one file.
-
-### Phase 3 — Robustness
-9. Queue auth prompts (don't block the whole import).
-10. Multi-user: broadcast a notification when an auto-created PTY appears
-    (already happens via `pty.created`).
-11. Decide/add PyYAML if the subset parser proves insufficient.
-
-## 7. Risks / Open Questions
-
-- **Dependency:** PyYAML not installed. Preferred: closed subset parser (we are the
-  only writer) + optional PyYAML upgrade path. *(decide in Phase 1)*
-- **ID stability across sessions:** `stable_id` must survive server `add_block`
-  round-trip; blocks created *within* a session without import get IDs at export
-  time only — acceptable? Or persist on server block dict from creation?
-- **Remote auth at import time:** password required only when the host is not
-  reachable with existing keys — modal appears only in that case.
-- **`cwd` semantics:** restore only for remote (local cwd is the client's spawn cwd
-  today); confirm desired local behavior.
-- **Migration:** keep writing `(uid:N)` forever for tools/older clients that read it.
+- Optional pre-filled auth modal on import when a key/password is required
+  (currently the failure is reported and the user re-creates the PTY).
+- Re-resolve PTY names at `run_block` time to survive mid-session destruction.
+- Restore per-block `cwd` for remote shells.
+- Queue auth prompts instead of a single summarized failure.
+- Collision handling for two same-named remote configs in one file.
+- Decide whether to add PyYAML as an optional parser backend.

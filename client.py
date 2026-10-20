@@ -902,6 +902,7 @@ class ClientApp(App):
         self._pending_pty_switch = None  # prefix to switch to after pty.created
         self._pending_remote_cfg = {}  # name -> ssh_config (no password)
         self._pending_remote_failed = {}  # name -> error message (during import)
+        self._pending_remote_names: set = set()  # names being created during import
         self._autosave_timer = None
 
         self.available_commands = [
@@ -1200,6 +1201,13 @@ class ClientApp(App):
                         "active_block_id": p.get("active_block_id"),
                         "name": p.get("name")
                     }
+                    # Keep the sanitized remote config so exports work even
+                    # before the first pty.list arrives.
+                    server_cfg = p.get("ssh_config")
+                    if isinstance(server_cfg, dict) and server_cfg.get("host"):
+                        cfg = dict(server_cfg)
+                        cfg.pop("password", None)
+                        self.ptys[uid]["ssh_config"] = cfg
 
         elif msg_type == "user_join":
             u_id, u_col, u_name = msg.get("user_id"), msg.get("color"), msg.get("name")
@@ -1380,6 +1388,8 @@ class ClientApp(App):
                     # Don't cache password
                     cfg.pop("password", None)
                     self.ptys[uid]["ssh_config"] = cfg
+                    if pty_name:
+                        self._pending_remote_cfg.pop(pty_name, None)
                 except Exception:
                     pass
             if pty_type == "remote":
@@ -1413,9 +1423,15 @@ class ClientApp(App):
 
         elif msg_type == "pty.error":
             nm = msg.get("name")
-            if nm and getattr(self, "_pending_remote_failed", None) is not None:
-                self._pending_remote_failed[nm] = msg.get("message") or "error"
-            self.notify(f"PTY Error: {msg.get('message')}", severity="error")
+            message = msg.get("message") or "error"
+            pending_names = getattr(self, "_pending_remote_names", None) or set()
+            if nm and nm in pending_names:
+                # During import/reconcile a single summarized toast is shown at
+                # the end, so remember the reason instead of spamming errors.
+                if getattr(self, "_pending_remote_failed", None) is not None:
+                    self._pending_remote_failed[nm] = message
+            else:
+                self.notify(f"PTY Error: {message}", severity="error")
             self._pending_pty_switch = None
 
         elif msg_type == "pty.list":
@@ -1426,6 +1442,7 @@ class ClientApp(App):
                 uid = int(p.get("uid"))
                 active_uids.append(uid)
                 name = p.get("name")
+                previous_cfg = (self.ptys.get(uid) or {}).get("ssh_config")
                 self.ptys[uid] = {
                     "type": p.get("type", "local"),
                     "status": p.get("status", "idle"),
@@ -1433,10 +1450,23 @@ class ClientApp(App):
                     "active_block_id": p.get("active_block_id"),
                     "name": name
                 }
-                if name and getattr(self, "_pending_remote_cfg", None) and name in self._pending_remote_cfg:
-                    cfg = dict(self._pending_remote_cfg.pop(name))
-                    cfg.pop("password", None)
-                    self.ptys[uid]["ssh_config"] = cfg
+                if name:
+                    # Prefer the server-provided (sanitized) ssh_config so
+                    # remote PTYs created at any time can be exported and
+                    # reconnected. Fall back to the import-time cache, then to
+                    # a previously cached config.
+                    server_cfg = p.get("ssh_config")
+                    if isinstance(server_cfg, dict) and server_cfg.get("host"):
+                        cfg = dict(server_cfg)
+                        cfg.pop("password", None)
+                        self.ptys[uid]["ssh_config"] = cfg
+                        self._pending_remote_cfg.pop(name, None)
+                    elif getattr(self, "_pending_remote_cfg", None) and name in self._pending_remote_cfg:
+                        cfg = dict(self._pending_remote_cfg.pop(name))
+                        cfg.pop("password", None)
+                        self.ptys[uid]["ssh_config"] = cfg
+                    elif isinstance(previous_cfg, dict) and previous_cfg.get("host"):
+                        self.ptys[uid]["ssh_config"] = dict(previous_cfg)
             # Remove ptys no longer on server
             for uid in list(self.ptys.keys()):
                 if uid not in active_uids:
@@ -2025,6 +2055,9 @@ class ClientApp(App):
         if not data: return
         filename, include_output = data if isinstance(data, tuple) else (data, True)
         if not filename or not os.path.exists(filename): return
+        # Clear any stale reconcile state so unrelated pty.error toasts are not
+        # suppressed if a previous import aborted mid-way.
+        self._pending_remote_names = set()
         try:
             with open(filename, "r") as f: content = f.read()
             # Parse frontmatter
@@ -2075,6 +2108,7 @@ class ClientApp(App):
             failed_ptys = []
             if ptys_plan:
                 self._pending_remote_failed = {}
+                self._pending_remote_names = set()
                 # build name->uid map current
                 name_to_uid = {}
                 for uid, info in self.ptys.items():
@@ -2091,10 +2125,21 @@ class ClientApp(App):
                         elif ptype == 'remote':
                             rcfg = dict(cfg or {})
                             rcfg.pop('type', None)
-                            rcfg_clean = dict(rcfg)
-                            rcfg_clean.pop('password', None)
-                            self._pending_remote_cfg[pname] = rcfg_clean
+                            rcfg.pop('password', None)
+                            # Older notebooks (or PTYs created before config
+                            # caching) may only have `type: remote`. Recover
+                            # host from the `<host>-<uid>` name and user from
+                            # the remote-host history as a best effort.
+                            if not rcfg.get('host'):
+                                rcfg.update(self._infer_remote_ssh_config(pname, rcfg))
+                            if not rcfg.get('host'):
+                                failed_ptys.append((pname, "missing host in frontmatter"))
+                                continue
+                            self._pending_remote_cfg[pname] = dict(rcfg)
+                            self._pending_remote_names.add(pname)
                             await self.send_message({"type": "pty.create.remote", "ssh_config": rcfg, "name": pname})
+                        else:
+                            failed_ptys.append((pname, f"unknown PTY type '{ptype}'"))
                     except Exception as e:
                         failed_ptys.append((pname, str(e)))
                 # Wait (bounded) for PTYs to register; remote connects can take a while.
@@ -2114,6 +2159,7 @@ class ClientApp(App):
                 for pname in pending:
                     failed_ptys.append((pname, "timeout"))
                     self._pending_remote_cfg.pop(pname, None)
+                self._pending_remote_names = set()
             # rebuild map after creates
             name_to_uid2 = {}
             for uid, info in self.ptys.items():
@@ -2137,12 +2183,44 @@ class ClientApp(App):
                     b['pty_name'] = None
             await self.send_message({"type": "import_blocks", "blocks": new_blocks})
             if failed_ptys:
-                msg = "PTY connect failed: " + ", ".join([f"{p}" for p, _e in failed_ptys]) + " — some blocks left unassigned"
+                detail = ", ".join(
+                    f"{p}: {str(reason)[:80]}" for p, reason in failed_ptys
+                )
+                msg = f"PTY connect failed: {detail} — some blocks left unassigned"
                 self.notify(msg, severity="warning")
             else:
                 self.notify(f"Notebook Imported: {filename}", severity="information")
         except Exception as e:
             self.notify(f"Import Error: {e}", severity="error")
+
+    def _infer_remote_ssh_config(self, name: str, cfg: dict) -> dict:
+        """Best-effort recovery for remote entries without host/user.
+
+        Remote PTYs created by the server default to ``<host>-<uid>``. If the
+        frontmatter only says ``type: remote`` we derive the host from that
+        name and look up the user in the saved remote-host history. The key or
+        password cannot be recovered; ssh then falls back to the local default
+        agent/key, and a failed reconnect is reported normally.
+        """
+        inferred: dict = {}
+        host = str(cfg.get("host") or "").strip()
+        if not host and name:
+            match = re.match(r"^(.+?)-\d+$", name)
+            if match:
+                host = match.group(1)
+        if not host:
+            return inferred
+        inferred["host"] = host
+        if not str(cfg.get("user") or "").strip():
+            for entry in getattr(self, "remote_hosts", None) or []:
+                try:
+                    user, host_part = entry.split("@", 1)
+                except ValueError:
+                    continue
+                if host_part.split(":", 1)[0] == host:
+                    inferred["user"] = user
+                    break
+        return inferred
 
     async def action_move_up(self):
         if self.focused and isinstance(self.focused, BaseBlock): await self.send_message({"type": "move_block", "block_id": self.focused.block_id, "direction": "up"})
@@ -2380,6 +2458,7 @@ class ClientApp(App):
                  # If only port was provided, we might still want the modal for key/password
                  # Unless it's user@host:port:key
                  if len(parts) > 2:
+                     self._save_remote_host(f"{user}@{host}")
                      await self.send_message({
                          "type": "pty.create.remote",
                          "name": host,
