@@ -490,9 +490,13 @@ class CommandBlock(BaseBlock):
                 out_widget.update(rich_text)
                 out_widget._last_render_key = cache_key
             if self._color_error:
-                info = self.query_one("#info")
-                if "⚠" not in str(info.renderable):
-                    info.update(f"{self._last_status_text} [dim]⚠ color error[/]")
+                try:
+                    info = self.query_one("#info")
+                    current = getattr(info, "content", "")
+                    if "⚠" not in str(current):
+                        info.update(f"{self._last_status_text} [dim]⚠ color error[/]")
+                except Exception:
+                    pass
             return
 
         rich_text = Text()
@@ -577,9 +581,15 @@ class CommandBlock(BaseBlock):
             out_widget._last_render_key = cache_key
 
         if self._color_error:
-            info = self.query_one("#info")
-            if "⚠" not in str(info.renderable):
-                info.update(f"{self._last_status_text} [dim]⚠ color error[/]")
+            try:
+                info = self.query_one("#info")
+                # Static/Label expose `.content`; `.renderable` does not exist
+                # in this Textual version (AttributeError crashed vim sessions).
+                current = getattr(info, "content", "")
+                if "⚠" not in str(current):
+                    info.update(f"{self._last_status_text} [dim]⚠ color error[/]")
+            except Exception:
+                pass
 
     def _get_rich_style(self, char):
         # Cache key based on char attributes that affect style
