@@ -8,6 +8,7 @@ def main():
     parser = setup_parser("Neptune Multi-User Launcher")
     parser.add_argument("mode", choices=["server", "client", "all"], nargs="?", help="Mode to start: server, client, or all")
     parser.add_argument("-s", "--socket", default="/tmp/neptune.sock", help="Path to the Unix Domain Socket")
+    parser.add_argument("-f", "--file", help="Open a Markdown notebook on startup")
     parser.add_argument("--enable-hist-expansion", action="store_true", help="Enable Bash history expansion (e.g. using !)")
     parser.add_argument("--clean-history", action="store_true", help="Start with a fresh history file")
 
@@ -22,6 +23,12 @@ def main():
         sys.exit(0)
     socket_path = args.socket
 
+    if args.file:
+        args.file = os.path.abspath(os.path.expanduser(args.file))
+        if not os.path.isfile(args.file):
+            print(f"Error: notebook not found: {args.file}", file=sys.stderr)
+            sys.exit(1)
+
     if mode == "server":
         import server
         s = server.Server(
@@ -34,7 +41,7 @@ def main():
         import client
         from terminal_colors import detect_terminal_theme
         tc = detect_terminal_theme()
-        client.ClientApp(socket_path=socket_path, terminal_colors=tc).run()
+        client.ClientApp(socket_path=socket_path, terminal_colors=tc, initial_notebook=args.file).run()
     elif mode == "all":
         # Start server in background
         server_args = [sys.executable, "server.py", "-s", socket_path]
@@ -48,7 +55,7 @@ def main():
             import client
             from terminal_colors import detect_terminal_theme
             tc = detect_terminal_theme()
-            client.ClientApp(socket_path=socket_path, terminal_colors=tc).run()
+            client.ClientApp(socket_path=socket_path, terminal_colors=tc, initial_notebook=args.file).run()
         finally:
             # Server was already notified via shutdown message from client.
             # Wait for it to clean up, force kill if it hangs.

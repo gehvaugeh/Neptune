@@ -24,6 +24,16 @@ python3 main.py all [-s /path/to/socket]
 - `server`: Starts only the server.
 - `client`: Starts only the client.
 
+### Open a Notebook on Startup
+Pass a Markdown notebook with `-f/--file`; it is imported as soon as the client
+is connected (PTY bindings from the frontmatter are restored too):
+```bash
+python3 main.py all -f /tmp/generated-book.md
+```
+This makes it easy to generate a notebook from a script and open it directly.
+The path is resolved relative to the current directory; a missing file exits
+with an error before the server starts.
+
 ### Manual Start
 1. **Start the Server**
    ```bash

@@ -819,9 +819,10 @@ class ClientApp(App):
         if result == "exit":
             self._do_shutdown()
 
-    def __init__(self, socket_path=DEFAULT_SOCKET_PATH, terminal_colors=None):
+    def __init__(self, socket_path=DEFAULT_SOCKET_PATH, terminal_colors=None, initial_notebook=None):
         super().__init__()
         self.socket_path = socket_path
+        self.initial_notebook = initial_notebook  # opened once the server is ready
         self.history = HistoryManager()
         self.preferred_cols = 80
         self.preferred_rows = 24
@@ -1208,6 +1209,14 @@ class ClientApp(App):
                         cfg = dict(server_cfg)
                         cfg.pop("password", None)
                         self.ptys[uid]["ssh_config"] = cfg
+
+            # `-f/--file`: open the notebook once the connection is ready.
+            # Run as a separate task so the message pump keeps handling the
+            # pty.created/pty.error messages the import waits for.
+            if getattr(self, "initial_notebook", None):
+                notebook = self.initial_notebook
+                self.initial_notebook = None
+                asyncio.create_task(self.import_notebook((notebook, True)))
 
         elif msg_type == "user_join":
             u_id, u_col, u_name = msg.get("user_id"), msg.get("color"), msg.get("name")
