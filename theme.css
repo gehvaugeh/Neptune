@@ -112,7 +112,15 @@ CommandBlock:focus, NoteBlock:focus {
 }
 
 NoteBlock {
-    border-left: solid $primary-darken-2;
+    /* Subtle tint so Markdown notes are distinguishable from shell blocks
+       at a glance. Alpha blends with the active theme's background. */
+    border-left: solid $primary-darken-1;
+    background: $primary 18%;
+}
+
+NoteBlock:focus {
+    border-left: solid $primary;
+    background: $primary 30%;
 }
 
 .block-header {
